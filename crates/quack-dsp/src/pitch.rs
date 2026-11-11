@@ -95,7 +95,7 @@ pub fn midi_to_hz(note: f32) -> f32 {
 
 /// RBJ biquad, transposed direct form II.
 #[derive(Debug, Clone, Copy, Default)]
-struct Biquad {
+pub(crate) struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -107,7 +107,7 @@ struct Biquad {
 
 impl Biquad {
     #[allow(clippy::cast_possible_truncation)]
-    fn lowpass(sample_rate: f64, hz: f64) -> Self {
+    pub(crate) fn lowpass(sample_rate: f64, hz: f64) -> Self {
         let w = 2.0 * PI * hz / sample_rate;
         let alpha = w.sin() / (2.0 * std::f64::consts::FRAC_1_SQRT_2);
         let c = w.cos();
@@ -124,14 +124,14 @@ impl Biquad {
     }
 
     #[inline]
-    fn tick(&mut self, x: f32) -> f32 {
+    pub(crate) fn tick(&mut self, x: f32) -> f32 {
         let y = self.b0 * x + self.z1;
         self.z1 = self.b1 * x - self.a1 * y + self.z2;
         self.z2 = self.b2 * x - self.a2 * y;
         y
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.z1 = 0.0;
         self.z2 = 0.0;
     }

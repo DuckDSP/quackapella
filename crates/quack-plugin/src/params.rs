@@ -62,6 +62,36 @@ pub struct QuackParams {
     #[param(id = 4, name = "Bypass", flags = "automatable | bypass")]
     pub bypass: BoolParam,
 
+    #[param(
+        id = 200,
+        name = "Pitch",
+        range = "linear(-24, 24)",
+        default = 0.0,
+        unit = "st",
+        smooth = "none"
+    )]
+    pub pitch: FloatParam,
+
+    #[param(
+        id = 201,
+        name = "Fine",
+        range = "linear(-100, 100)",
+        default = 0.0,
+        unit = "none",
+        smooth = "none"
+    )]
+    pub fine: FloatParam,
+
+    #[param(
+        id = 202,
+        name = "Formant",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "st",
+        smooth = "none"
+    )]
+    pub formant: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -84,6 +114,9 @@ impl QuackParams {
         #[allow(clippy::cast_precision_loss)]
         v.set(ParamId::Mode, self.mode.value().to_index() as f64);
         v.set(ParamId::Bypass, f64::from(u8::from(self.bypass.value())));
+        v.set(ParamId::Pitch, FloatParamReadF64::value(&self.pitch));
+        v.set(ParamId::Fine, FloatParamReadF64::value(&self.fine));
+        v.set(ParamId::Formant, FloatParamReadF64::value(&self.formant));
         v
     }
 }

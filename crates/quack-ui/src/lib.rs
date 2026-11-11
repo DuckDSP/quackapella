@@ -10,7 +10,8 @@
 //!
 //! Step 1 shows the mode, the level controls, bypass, the MIDI notes
 //! received and the latency; step 2 adds the detected pitch (note,
-//! cents, Hz, confidence) as a tuner strip. Panels for pitch, formants, autotune,
+//! cents, Hz, confidence) as a tuner strip; step 3 the Voice panel
+//! (transposition, fine tune, formant shift). Panels for autotune,
 //! harmonies and vocoder come with their DSP steps (roadmap step 8 for
 //! presets, macros and MIDI learn).
 
@@ -28,7 +29,7 @@ use theme::{color, size, space};
 /// Editor size in points (fixed for now; zoom comes with step 8, with
 /// the AUv2 resize patch already in `vendor/`).
 pub const BASE_W: u32 = 760;
-pub const BASE_H: u32 = 520;
+pub const BASE_H: u32 = 680;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -215,8 +216,15 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     );
     pitch_strip(&p, pitch_r, view, accent);
 
+    // Voice panel: transposition and formants.
+    let voice_r = Rect::from_min_size(
+        pos2(inner.left(), pitch_r.bottom() + space::L),
+        vec2(inner.width(), 148.0),
+    );
+    voice_panel(ui, params, st, voice_r, accent);
+
     // Level panel.
-    let row_top = pitch_r.bottom() + space::L;
+    let row_top = voice_r.bottom() + space::L;
     let foot_h = 28.0;
     let row_h = inner.bottom() - foot_h - row_top;
     let level_r = Rect::from_min_size(
@@ -308,6 +316,90 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     if st.drag.is_some() && !ui.input(|i| i.pointer.any_down()) {
         st.end_open_edits(params);
     }
+}
+
+/// Pitch, fine and formant knobs, with what the setting does.
+fn voice_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 20.0),
+        Align2::LEFT_CENTER,
+        "Voice",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let st_fmt = |v: f64| format!("{v:+.1}");
+    let ct_fmt = |v: f64| format!("{v:+.0}");
+    // Same columns as the Level knobs below.
+    let kw = r.width() * 0.52 / 3.0;
+    let ky = r.center().y + 4.0;
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
+        (ParamId::Pitch, &st_fmt),
+        (ParamId::Fine, &ct_fmt),
+        (ParamId::Formant, &st_fmt),
+    ];
+    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + kw * (i as f32 + 0.5);
+        controls::knob(ui, params, st, id, pos2(cx, ky), accent, fmt);
+    }
+
+    let shift = params.get_plain(ParamId::Pitch) + params.get_plain(ParamId::Fine) / 100.0;
+    let formant = params.get_plain(ParamId::Formant);
+    let x = r.left() + r.width() * 0.52 + space::L;
+    let (line1, line2) = voice_summary(shift, formant);
+    let p = ui.painter();
+    value(
+        p,
+        pos2(x, ky - 12.0),
+        Align2::LEFT_CENTER,
+        &line1,
+        size::VALUE,
+        if shift.abs() < 0.005 {
+            color::TEXT_DIM
+        } else {
+            accent
+        },
+    );
+    text(
+        p,
+        pos2(x, ky + 12.0),
+        Align2::LEFT_CENTER,
+        &line2,
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+}
+
+/// The Voice panel's two lines: the interval, then where the formants
+/// are.
+#[must_use]
+pub fn voice_summary(shift_st: f64, formant_st: f64) -> (String, String) {
+    let line1 = if shift_st.abs() < 0.005 {
+        "No transposition".to_owned()
+    } else {
+        let dir = if shift_st > 0.0 { "up" } else { "down" };
+        format!("{:.2} semitones {dir}", shift_st.abs())
+    };
+    let line2 = if formant_st.abs() < 0.05 {
+        "Formants in place, consonants untouched".to_owned()
+    } else {
+        let dir = if formant_st > 0.0 {
+            "brighter"
+        } else {
+            "darker"
+        };
+        format!("Formants {formant_st:+.1} st ({dir}), pitch unchanged")
+    };
+    (line1, line2)
 }
 
 /// Nearest note and the offset from it in cents, for a pitch in Hz.
@@ -547,6 +639,13 @@ mod tests {
             }
         }
         assert!(params.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn voice_summaries() {
+        assert_eq!(voice_summary(0.0, 0.0).0, "No transposition");
+        assert_eq!(voice_summary(-12.0, 0.0).0, "12.00 semitones down");
+        assert!(voice_summary(7.2, 3.0).1.starts_with("Formants +3.0 st"));
     }
 
     #[test]

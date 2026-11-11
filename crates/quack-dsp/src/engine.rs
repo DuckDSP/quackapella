@@ -1,19 +1,18 @@
 //! The signal chain.
 //!
-//! Step 1 chain, per channel (step 2 adds the pitch detector, fed with
-//! the gained input summed to mono, which only reads):
+//! Chain, per channel:
 //!
 //! ```text
-//! in ──┬──────────────── dry delay ─────────────┬─ mix ─ out gain ─┬─ bypass fade ─ out
-//!      └─ in gain ─ voice chain (identity now) ─┘                  │
-//!      └──────────────── dry delay ────────────────────────────────┘
+//!                 ┌─ pitch detector (mono, reads only) ─┐ period
+//! in ──┬─ in gain ┴─────────── shifter (PSOLA) ─────────┴─┬─ mix ─ out gain ─┬─ bypass fade ─ out
+//!      ├──────────────────── dry delay ───────────────────┘                  │
+//!      └──────────────────── dry delay ──────────────────────────────────────┘
 //! ```
 //!
-//! Both paths are delayed to the same fixed latency
-//! ([`crate::latency::LATENCY_MS`]), so dry/wet and bypass never comb
-//! and the host's compensation is always right. The voice chain of the
-//! next steps (detector, shifter, autotune, harmonies) will take over
-//! the wet delay, padded to the same total.
+//! The shifter delays the voice by exactly the fixed latency
+//! ([`crate::latency::LATENCY_MS`]), like the dry delay lines, so
+//! dry/wet and bypass never comb and the host's compensation is always
+//! right. Autotune and harmonies (next steps) will steer the shifter.
 
 use crate::db_to_gain;
 use crate::latency::{DelayLine, latency_samples};
@@ -21,6 +20,7 @@ use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
 use crate::params::{ParamId, ParamValues};
 use crate::pitch::{PitchDetector, PitchEstimate, Yin};
+use crate::shift::{Psola, semitones_to_ratio};
 use crate::smooth::Ramp;
 
 /// Smoothing time for gains and mix.
@@ -41,10 +41,13 @@ pub struct Engine {
     mix: Ramp,
     /// 0 = processed, 1 = bypassed.
     bypass: Ramp,
+    /// Transposition and formant shift, in semitones.
+    pitch: Ramp,
+    formant: Ramp,
     dry: [DelayLine; CHANNELS],
-    wet: [DelayLine; CHANNELS],
     notes: NoteStack,
     detector: Yin,
+    shifter: Psola,
 }
 
 impl Default for Engine {
@@ -65,10 +68,12 @@ impl Engine {
             out_gain: Ramp::new(1.0),
             mix: Ramp::new(1.0),
             bypass: Ramp::new(0.0),
+            pitch: Ramp::new(0.0),
+            formant: Ramp::new(0.0),
             dry: Default::default(),
-            wet: Default::default(),
             notes: NoteStack::default(),
             detector: Yin::default(),
+            shifter: Psola::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -78,24 +83,32 @@ impl Engine {
     pub fn prepare(&mut self, sample_rate: f64, max_block: usize) {
         self.sample_rate = sample_rate;
         self.latency = latency_samples(sample_rate);
-        for d in self.dry.iter_mut().chain(self.wet.iter_mut()) {
+        for d in &mut self.dry {
             d.prepare(self.latency);
         }
-        for r in [&mut self.in_gain, &mut self.out_gain, &mut self.mix] {
+        for r in [
+            &mut self.in_gain,
+            &mut self.out_gain,
+            &mut self.mix,
+            &mut self.pitch,
+            &mut self.formant,
+        ] {
             r.prepare(sample_rate, SMOOTH_MS);
         }
         self.bypass.prepare(sample_rate, BYPASS_MS);
         self.detector.prepare(sample_rate, max_block);
+        self.shifter.prepare(sample_rate, self.latency);
         self.apply_all(true);
         self.notes.clear();
     }
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
     pub fn reset(&mut self) {
-        for d in self.dry.iter_mut().chain(self.wet.iter_mut()) {
+        for d in &mut self.dry {
             d.reset();
         }
         self.detector.reset();
+        self.shifter.reset();
         self.apply_all(true);
         self.notes.clear();
     }
@@ -154,6 +167,13 @@ impl Engine {
             ParamId::OutputGain => (&mut self.out_gain, db_to_gain(v)),
             ParamId::Mix => (&mut self.mix, v / 100.0),
             ParamId::Bypass => (&mut self.bypass, v),
+            ParamId::Pitch | ParamId::Fine => {
+                #[allow(clippy::cast_possible_truncation)]
+                let st = (self.values.get(ParamId::Pitch) + self.values.get(ParamId::Fine) / 100.0)
+                    as f32;
+                (&mut self.pitch, st)
+            }
+            ParamId::Formant => (&mut self.formant, v),
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
                 return;
@@ -183,16 +203,20 @@ impl Engine {
     pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         debug_assert_eq!(left.len(), right.len());
         let [dl, dr] = &mut self.dry;
-        let [wl, wr] = &mut self.wet;
+        #[allow(clippy::cast_possible_truncation)]
+        let sr = self.sample_rate as f32;
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let g_in = self.in_gain.tick();
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
-            self.detector.push_sample(0.5 * (*l + *r) * g_in);
+            let pitch = semitones_to_ratio(self.pitch.tick());
+            let formant = semitones_to_ratio(self.formant.tick());
+            let (in_l, in_r) = (*l * g_in, *r * g_in);
+            self.detector.push_sample(0.5 * (in_l + in_r));
+            let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
-            // Voice chain placeholder: delayed, gained input.
-            let (wet_l, wet_r) = (wl.tick(*l * g_in), wr.tick(*r * g_in));
+            let (wet_l, wet_r) = self.shifter.tick(in_l, in_r, period, pitch, formant);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
@@ -302,6 +326,27 @@ mod tests {
         assert!((p.note() - 57.0).abs() < 0.05, "{}", p.hz);
         e.reset();
         assert!(e.pitch().is_none());
+    }
+
+    #[test]
+    fn transposes_the_voice() {
+        let mut e = Engine::new();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Pitch, 7.0);
+        v.set(ParamId::Fine, -20.0);
+        e.set_all(&v, true);
+        #[allow(clippy::cast_precision_loss)]
+        let x: Vec<f32> = (0..24_000)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 196.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let (mut l, mut r) = (x.clone(), x);
+        e.process(&mut l, &mut r);
+        assert_eq!(l, r);
+        let mut det = Yin::new(48_000.0);
+        det.push(&l[12_000..]);
+        let got = det.estimate().expect("voiced").note();
+        let want = crate::pitch::hz_to_midi(196.0) + 6.8;
+        assert!((got - want).abs() < 0.1, "{got} vs {want}");
     }
 
     #[test]
