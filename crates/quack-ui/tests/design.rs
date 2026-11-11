@@ -58,6 +58,8 @@ fn editor_captures() {
             v.set(ParamId::Harmony, 3.0);
             v.set(ParamId::Harmony3, 16.0);
             v.set(ParamId::Lead, 90.0);
+            v.set(ParamId::Double, 40.0);
+            v.set(ParamId::Latch, 1.0);
         }
         if mode == 1.0 {
             v.set(ParamId::Pitch, 0.0);

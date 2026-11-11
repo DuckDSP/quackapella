@@ -154,9 +154,12 @@ pub enum ParamId {
     Character,
     Expression,
     Glide,
+    Double,
+    CloseVoicing,
+    Latch,
 }
 
-pub const PARAM_COUNT: usize = 53;
+pub const PARAM_COUNT: usize = 56;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -678,6 +681,31 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 30.0,
         },
     },
+    ParamSpec {
+        key: "double",
+        host_id: 412,
+        name: "Double",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "close_voicing",
+        host_id: 413,
+        name: "Close Voicing",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "latch",
+        host_id: 414,
+        name: "Latch",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 impl ParamId {
@@ -735,6 +763,9 @@ impl ParamId {
         Self::Character,
         Self::Expression,
         Self::Glide,
+        Self::Double,
+        Self::CloseVoicing,
+        Self::Latch,
     ];
 
     #[must_use]

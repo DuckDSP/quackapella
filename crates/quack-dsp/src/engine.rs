@@ -80,6 +80,7 @@ pub struct Engine {
     harmony: Harmonizer,
     lead: Ramp,
     harmony_level: Ramp,
+    double: Ramp,
 }
 
 impl Default for Engine {
@@ -119,6 +120,7 @@ impl Engine {
             harmony: Harmonizer::default(),
             lead: Ramp::new(1.0),
             harmony_level: Ramp::new(0.0),
+            double: Ramp::new(0.0),
         };
         e.prepare(48_000.0, 512);
         e
@@ -141,6 +143,7 @@ impl Engine {
             &mut self.follow,
             &mut self.lead,
             &mut self.harmony_level,
+            &mut self.double,
         ]
         .into_iter()
         .chain(self.layers.iter_mut())
@@ -320,7 +323,10 @@ impl Engine {
             | ParamId::HarmonyHumanize
             | ParamId::Character
             | ParamId::Expression
-            | ParamId::Glide => {
+            | ParamId::Glide
+            | ParamId::Double
+            | ParamId::CloseVoicing
+            | ParamId::Latch => {
                 self.update_harmony(snap);
                 return;
             }
@@ -432,8 +438,21 @@ impl Engine {
         {
             s.spread = pct(ParamId::Spread) as f32;
         }
+        s.close = v.get(ParamId::CloseVoicing) >= 0.5;
+        let double = if on { pct(ParamId::Double) } else { 0.0 };
+        s.double = double > 0.0;
+        // Latch: only where the notes play the harmonies.
+        let latch = on && v.get(ParamId::Latch) >= 0.5;
+        self.notes.set_latch(latch);
         self.harmony.apply_settings();
         self.harmony.set_notes(&self.notes);
+        #[allow(clippy::cast_possible_truncation)]
+        let double = double as f32;
+        if snap {
+            self.double.snap(double);
+        } else {
+            self.double.set(double);
+        }
         #[allow(clippy::cast_possible_truncation)]
         let (lead, level) = if on {
             (pct(ParamId::Lead) as f32, pct(ParamId::HarmonyLevel) as f32)
@@ -532,6 +551,14 @@ impl Engine {
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
+    /// Sustain pedal (CC 64): released notes stay held while it is down.
+    pub fn set_sustain(&mut self, down: bool) {
+        self.notes.set_sustain(down);
+        self.update_tune();
+        self.update_harmony(false);
+        self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
+    }
+
     pub fn all_notes_off(&mut self) {
         self.notes.clear();
         self.update_tune();
@@ -574,8 +601,9 @@ impl Engine {
             self.shifter.set_freeze(self.freeze, freeze_hz, transpose);
             let lead = self.lead.tick();
             let level = self.harmony_level.tick();
-            let voices = self.harmony.tick();
-            self.shifter.set_voices(voices, lead, level);
+            let double = self.double.tick();
+            let voices = self.harmony.tick(level, double);
+            self.shifter.set_voices(voices, lead, 1.0);
             let mut steer = Steer {
                 retuner: &mut self.retuner,
                 robot: &mut self.robot,

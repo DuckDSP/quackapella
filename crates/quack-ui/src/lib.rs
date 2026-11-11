@@ -804,9 +804,34 @@ fn harmony_panel(
         color::TEXT_FAINT,
     );
 
-    // Second row: what makes several singers out of one.
-    let row2 = r.bottom() - 64.0;
-    let kw2 = (r.width() - 2.0 * space::L) / 5.0;
+    // Close voicing and latch, between the rows (MIDI notes).
+    let tog_y = row1 + knob_d * 0.5 + 34.0;
+    let close_r = Rect::from_min_size(pos2(r.left() + space::L + 8.0, tog_y), vec2(132.0, 26.0));
+    controls::toggle(
+        ui,
+        params,
+        ParamId::CloseVoicing,
+        close_r,
+        "Close Voicing",
+        accent,
+    );
+    let latch_r = Rect::from_min_size(pos2(close_r.right() + space::S, tog_y), vec2(84.0, 26.0));
+    controls::toggle(ui, params, ParamId::Latch, latch_r, "Latch", accent);
+    text(
+        p,
+        pos2(latch_r.right() + space::M, latch_r.center().y),
+        Align2::LEFT_CENTER,
+        match mode {
+            HarmonyMode::Midi => "The sustain pedal holds notes too",
+            HarmonyMode::Chord => "Latch or pedal hold the chord",
+            _ => "For the MIDI and Chord modes",
+        },
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
+
+    // Second row: what makes several singers out of one, and the doubler.
+    let row2 = r.bottom() - 60.0;
     let ms = |v: f64| {
         if v < 0.5 {
             "Off".to_owned()
@@ -815,16 +840,17 @@ fn harmony_panel(
         }
     };
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String);
-    let knobs: [Knob; 5] = [
+    let knobs: [Knob; 6] = [
         (ParamId::Spread, "Spread", &pct),
         (ParamId::HarmonyHumanize, "Humanize", &off),
         (ParamId::Character, "Character", &off),
         (ParamId::Expression, "Expression", &pct),
         (ParamId::Glide, "Glide", &ms),
+        (ParamId::Double, "Double", &off),
     ];
     for (i, (id, label, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
-        let cx = r.left() + space::L + kw2 * (i as f32 + 0.5);
+        let cx = r.left() + space::L + kw * (i as f32 + 0.5);
         controls::knob_named(
             ui,
             params,

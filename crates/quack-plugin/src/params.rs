@@ -515,6 +515,22 @@ pub struct QuackParams {
     )]
     pub glide: FloatParam,
 
+    #[param(
+        id = 412,
+        name = "Double",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub double: FloatParam,
+
+    #[param(id = 413, name = "Close Voicing")]
+    pub close_voicing: BoolParam,
+
+    #[param(id = 414, name = "Latch")]
+    pub latch: BoolParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -629,9 +645,15 @@ impl QuackParams {
             (ParamId::Character, &self.character),
             (ParamId::Expression, &self.expression),
             (ParamId::Glide, &self.glide),
+            (ParamId::Double, &self.double),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }
+        v.set(
+            ParamId::CloseVoicing,
+            f64::from(u8::from(self.close_voicing.value())),
+        );
+        v.set(ParamId::Latch, f64::from(u8::from(self.latch.value())));
         v
     }
 }

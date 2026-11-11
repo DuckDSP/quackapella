@@ -33,8 +33,12 @@
 
 use crate::midi::NoteStack;
 
-/// Most harmony voices at once.
-pub const MAX_VOICES: usize = 8;
+/// Harmony voices played over MIDI, at most.
+pub const MIDI_VOICES: usize = 8;
+/// Doubler voices (unison, left and right), after the harmony voices.
+pub const DOUBLE_VOICES: usize = 2;
+/// Voice streams in all: harmonies then doublers.
+pub const MAX_VOICES: usize = MIDI_VOICES + DOUBLE_VOICES;
 /// Interval voices in the Scale and Chord modes.
 pub const INTERVAL_VOICES: usize = 4;
 /// Interval range, in scale steps either way (±9 = a tenth).
@@ -62,9 +66,24 @@ const WANDER_S: f64 = 0.6;
 const WANDER_TAU_S: f64 = 0.35;
 /// Character at 100 %: formant offset of each voice (semitones), so
 /// each sounds like another throat.
-const CHARACTER_ST: [f64; MAX_VOICES] = [1.6, -1.8, 0.9, -1.1, 2.2, -2.4, 0.5, -0.6];
+const CHARACTER_ST: [f64; MAX_VOICES] = [
+    1.6, -1.8, 0.9, -1.1, 2.2, -2.4, 0.5, -0.6, // harmonies
+    0.6, -0.7, // doublers
+];
 /// Place of each voice in the stereo field at full spread.
-const PAN: [f32; MAX_VOICES] = [-1.0, 1.0, -0.5, 0.5, -0.75, 0.75, -0.25, 0.25];
+const PAN: [f32; MAX_VOICES] = [
+    -1.0, 1.0, -0.5, 0.5, -0.75, 0.75, -0.25, 0.25, // harmonies
+    -1.0, 1.0, // doublers
+];
+/// Doublers: lag (ms, always some: a second take is never on time),
+/// detune (cents, opposite ways) and the least spread they keep.
+const DOUBLE_LAG_MIN_MS: f64 = 9.0;
+const DOUBLE_LAG_RANGE_MS: f64 = 14.0;
+const DOUBLE_CENTS: f64 = 7.0;
+const DOUBLE_MIN_SPREAD: f32 = 0.6;
+/// Close voicing: a played note is moved by octaves next to the lead,
+/// and stays in that octave until it is this far from it (semitones).
+const CLOSE_RANGE_ST: f64 = 9.0;
 /// Level of a MIDI voice at velocity 0 (127 = full).
 const MIN_VELOCITY_GAIN: f32 = 0.3;
 /// A pause this long ends a phrase.
@@ -208,6 +227,10 @@ pub struct HarmonySettings {
     pub character: f64,
     /// Stereo spread, 0 to 1.
     pub spread: f32,
+    /// MIDI mode: move the played notes next to the lead.
+    pub close: bool,
+    /// Doubler on (its level comes with [`Harmonizer::tick`]).
+    pub double: bool,
 }
 
 impl Default for HarmonySettings {
@@ -222,6 +245,8 @@ impl Default for HarmonySettings {
             humanize: 0.3,
             character: 0.25,
             spread: 0.6,
+            close: false,
+            double: false,
         }
     }
 }
@@ -283,6 +308,10 @@ struct Slot {
     drift: Wander,
     /// Press order (MIDI): the oldest released slot is reused first.
     stamp: u64,
+    /// Close voicing: octaves the played note is moved by.
+    fold: i32,
+    /// Note sung for the last grain (for the editor).
+    sung: Option<f64>,
 }
 
 /// The harmony voices. See the module docs.
@@ -353,6 +382,7 @@ impl Harmonizer {
         for (i, s) in self.slots.iter_mut().enumerate() {
             *s = Slot {
                 pan: PAN[i],
+                fold: i32::MIN,
                 ..Slot::default()
             };
         }
@@ -378,7 +408,7 @@ impl Harmonizer {
     /// Whether any voice can sound.
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.settings.mode != HarmonyMode::Off
+        self.settings.mode != HarmonyMode::Off || self.settings.double
     }
 
     /// Follow the MIDI input (MIDI mode): every held note gets a voice,
@@ -386,7 +416,7 @@ impl Harmonizer {
     pub fn set_notes(&mut self, notes: &NoteStack) {
         let midi = self.settings.mode == HarmonyMode::Midi;
         // Release the voices whose note is gone.
-        for s in &mut self.slots {
+        for s in &mut self.slots[..MIDI_VOICES] {
             if !s.gate {
                 continue;
             }
@@ -407,8 +437,7 @@ impl Harmonizer {
         for h in notes.held() {
             let n = f64::from(h.note);
             let vel = MIN_VELOCITY_GAIN + (1.0 - MIN_VELOCITY_GAIN) * f32::from(h.velocity) / 127.0;
-            if let Some(s) = self
-                .slots
+            if let Some(s) = self.slots[..MIDI_VOICES]
                 .iter_mut()
                 .find(|s| s.gate && s.note.is_some_and(|x| (x - n).abs() < 0.5))
             {
@@ -416,8 +445,7 @@ impl Harmonizer {
                 continue;
             }
             // A free slot: silent first, then the one released longest ago.
-            let pick = self
-                .slots
+            let pick = self.slots[..MIDI_VOICES]
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| !s.gate)
@@ -438,6 +466,7 @@ impl Harmonizer {
             s.gate = true;
             s.velocity = vel;
             s.stamp = self.stamp;
+            s.fold = i32::MIN;
         }
     }
 
@@ -448,12 +477,16 @@ impl Harmonizer {
         let mode = self.settings.mode;
         if mode != self.applied {
             self.applied = mode;
-            for s in &mut self.slots {
+            for s in &mut self.slots[..MIDI_VOICES] {
                 s.gate = false;
             }
         }
+        for s in &mut self.slots[MIDI_VOICES..] {
+            s.gate = self.settings.double;
+            s.velocity = 1.0;
+        }
         if matches!(mode, HarmonyMode::Scale | HarmonyMode::Chord) {
-            for (i, s) in self.slots.iter_mut().enumerate() {
+            for (i, s) in self.slots[..MIDI_VOICES].iter_mut().enumerate() {
                 s.gate = i < INTERVAL_VOICES && self.settings.intervals[i] != 0;
                 s.velocity = 1.0;
             }
@@ -561,8 +594,30 @@ impl Harmonizer {
     pub fn voice_note(&mut self, v: usize, dt: f64) -> Option<f64> {
         let lead = self.lead?;
         let st = self.settings;
+        if v >= MIDI_VOICES {
+            // Doubler: the lead itself, a little off, both ways.
+            let s = &mut self.slots[v];
+            let sign = if v.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let cents = DOUBLE_CENTS * (0.5 + s.drift.value) * sign;
+            s.sung = Some(lead);
+            return Some(lead + cents / 100.0);
+        }
         let target = match st.mode {
             HarmonyMode::Off => return None,
+            HarmonyMode::Midi if st.close => {
+                let base = self.slots[v].note?;
+                let reference = self.lead_ref;
+                let s = &mut self.slots[v];
+                let far = s.fold == i32::MIN
+                    || (base + 12.0 * f64::from(s.fold) - reference).abs() > CLOSE_RANGE_ST;
+                if far {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        s.fold = ((reference - base) / 12.0).round() as i32;
+                    }
+                }
+                base + 12.0 * f64::from(s.fold)
+            }
             HarmonyMode::Midi => self.slots[v].note?,
             HarmonyMode::Scale | HarmonyMode::Chord => {
                 if v >= INTERVAL_VOICES {
@@ -591,11 +646,14 @@ impl Harmonizer {
             s.current = target;
         }
         let drift = st.humanize * DRIFT_CENTS / 100.0 * (2.0 * s.drift.value - 1.0);
+        s.sung = Some(target);
         Some(s.current + st.expression * dev + drift)
     }
 
-    /// One sample: fades, pans, humanize. Returns what the shifter needs.
-    pub fn tick(&mut self) -> &[VoiceMix; MAX_VOICES] {
+    /// One sample: fades, pans, humanize, with the harmonies' level and
+    /// the doubler's (0 to 1, smoothed by the caller). Returns what the
+    /// shifter needs.
+    pub fn tick(&mut self, level: f32, double: f32) -> &[VoiceMix; MAX_VOICES] {
         let st = self.settings;
         self.wander_tick += 1;
         let wander = self.wander_tick >= WANDER_EVERY;
@@ -606,27 +664,41 @@ impl Harmonizer {
         let dt = f64::from(WANDER_EVERY) / self.sample_rate;
         let mut power = 0.0f32;
         for (i, s) in self.slots.iter_mut().enumerate() {
-            let on = s.gate && st.mode != HarmonyMode::Off;
+            let doubler = i >= MIDI_VOICES;
+            let on = s.gate && (doubler || st.mode != HarmonyMode::Off);
             s.env = if on {
                 (s.env + self.attack).min(1.0)
             } else {
                 (s.env - self.release).max(0.0)
             };
-            let pan = PAN[i] * st.spread;
+            let spread = if doubler {
+                st.spread.max(DOUBLE_MIN_SPREAD)
+            } else {
+                st.spread
+            };
+            let pan = PAN[i] * spread;
             s.pan += (pan - s.pan) * self.pan_coef;
             if wander && (on || s.env > 0.0) {
                 s.lag.tick(&mut self.rng, dt);
                 s.drift.tick(&mut self.rng, dt);
             }
-            let g = s.env * s.velocity;
-            power += g * g;
+            if !doubler {
+                let g = s.env * s.velocity;
+                power += g * g;
+            }
         }
         // Several voices stack up, but not linearly: four voices are
         // about twice as loud as one.
         let norm = power.max(1.0).powf(-0.25);
         for (i, s) in self.slots.iter().enumerate() {
             let active = s.env > 0.0;
-            let g = s.env * s.velocity * norm;
+            let doubler = i >= MIDI_VOICES;
+            let g = if doubler {
+                // Two takes, each a little under the lead.
+                s.env * double * std::f32::consts::FRAC_1_SQRT_2
+            } else {
+                s.env * s.velocity * norm * level
+            };
             // Equal power, 1 in the centre.
             let a = (f64::from(s.pan) + 1.0) * std::f64::consts::FRAC_PI_4;
             #[allow(clippy::cast_possible_truncation)]
@@ -634,12 +706,22 @@ impl Harmonizer {
                 (a.cos() * std::f64::consts::SQRT_2) as f32,
                 (a.sin() * std::f64::consts::SQRT_2) as f32,
             );
-            let lag_ms = st.humanize * (LAG_MIN_MS + LAG_RANGE_MS * s.lag.value);
+            let (lag_ms, character) = if doubler {
+                (
+                    DOUBLE_LAG_MIN_MS + DOUBLE_LAG_RANGE_MS * s.lag.value,
+                    st.character.max(0.5),
+                )
+            } else {
+                (
+                    st.humanize * (LAG_MIN_MS + LAG_RANGE_MS * s.lag.value),
+                    st.character,
+                )
+            };
             self.mix[i] = VoiceMix {
                 active,
                 gain: [g * gl, g * gr],
                 lag: lag_ms * 0.001 * self.sample_rate,
-                formant: (st.character * CHARACTER_ST[i] / 12.0).exp2(),
+                formant: (character * CHARACTER_ST[i] / 12.0).exp2(),
             };
         }
         &self.mix
@@ -652,10 +734,10 @@ impl Harmonizer {
         if self.lead.is_none() || self.settings.mode == HarmonyMode::Off {
             return 0;
         }
-        self.slots
+        self.slots[..MIDI_VOICES]
             .iter()
             .filter(|s| s.env > 0.5 && s.gate)
-            .filter_map(|s| s.note)
+            .filter_map(|s| s.sung)
             .filter(|n| (0.0..128.0).contains(n))
             .fold(0u128, |m, n| {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -719,7 +801,7 @@ mod tests {
         h.apply_settings();
         h.lead(64.2, 0.005);
         for _ in 0..2000 {
-            h.tick();
+            h.tick(1.0, 0.0);
         }
         // Lead on E, 20 cents sharp: G and B below, both 20 cents sharp
         // (parallel), a minor third above E.
@@ -741,7 +823,7 @@ mod tests {
         notes.note_on(0, 55, 100);
         h.set_notes(&notes);
         h.lead(60.0, 0.005);
-        let mut got: Vec<f64> = (0..MAX_VOICES)
+        let mut got: Vec<f64> = (0..MIDI_VOICES)
             .filter_map(|v| h.voice_note(v, 0.005))
             .collect();
         got.sort_by(f64::total_cmp);
@@ -749,10 +831,54 @@ mod tests {
         notes.note_off(0, 48);
         h.set_notes(&notes);
         for _ in 0..48_000 {
-            h.tick();
+            h.tick(1.0, 0.0);
         }
         assert_eq!(h.mix.iter().filter(|m| m.active).count(), 1);
         assert_eq!(h.sounding(), 1u128 << 55);
+    }
+
+    #[test]
+    fn close_voicing_sings_next_to_the_lead() {
+        let mut h = harm(HarmonyMode::Midi);
+        h.settings.close = true;
+        let mut notes = NoteStack::default();
+        notes.note_on(0, 40, 100); // E2, played low
+        notes.note_on(0, 79, 100); // G5, played high
+        h.set_notes(&notes);
+        h.lead(60.0, 0.005);
+        let mut got: Vec<f64> = (0..MIDI_VOICES)
+            .filter_map(|v| h.voice_note(v, 0.005))
+            .collect();
+        got.sort_by(f64::total_cmp);
+        assert_eq!(got, [55.0, 64.0]);
+        // The lead moving a little does not flip the octave.
+        h.lead(62.0, 0.5);
+        let mut got: Vec<f64> = (0..MIDI_VOICES)
+            .filter_map(|v| h.voice_note(v, 0.005))
+            .collect();
+        got.sort_by(f64::total_cmp);
+        assert_eq!(got, [55.0, 64.0]);
+    }
+
+    #[test]
+    fn doubler_sings_the_lead_wide_and_late() {
+        let mut h = harm(HarmonyMode::Off);
+        h.settings.double = true;
+        h.apply_settings();
+        assert!(h.enabled());
+        h.lead(60.0, 0.005);
+        for _ in 0..4800 {
+            h.tick(1.0, 1.0);
+        }
+        let a = h.voice_note(MIDI_VOICES, 0.005).unwrap();
+        let b = h.voice_note(MIDI_VOICES + 1, 0.005).unwrap();
+        assert!(a > 60.0 && a < 60.15 && b < 60.0 && b > 59.85, "{a} {b}");
+        let m = h.mix[MIDI_VOICES];
+        assert!(m.active && m.gain[0] > m.gain[1]);
+        assert!(m.lag > 0.008 * 48_000.0);
+        // No harmony voice with the harmonies off.
+        assert!(h.voice_note(0, 0.005).is_none());
+        assert_eq!(h.sounding(), 0);
     }
 
     #[test]
@@ -779,7 +905,7 @@ mod tests {
         h.settings.spread = 1.0;
         h.apply_settings();
         for _ in 0..48_000 {
-            h.tick();
+            h.tick(1.0, 0.0);
         }
         let m = h.mix;
         assert!(m[0].gain[0] > m[0].gain[1]);

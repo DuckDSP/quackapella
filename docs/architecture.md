@@ -19,7 +19,7 @@ quack-plugin   adaptateur Truce : paramètres hôte, MIDI, buffers, latence
 - `quack_dsp::params` est la source de vérité des paramètres ; la
   déclaration Truce est vérifiée contre elle par test. Plages d'ids
   réservées : 100 détection, 200 pitch/formants, 300 autotune,
-  400 harmoniseur (400 à 411), 500 vocodeur, 600 effets façon Manipulator.
+  400 harmoniseur (400 à 414), 500 vocodeur, 600 effets façon Manipulator.
 
 ## Chaîne (étape 1)
 
@@ -288,6 +288,17 @@ principale, dans le budget déjà gelé.
   décalage de formants (jusqu'à ±2,4 demi-tons : d'autres gorges) ;
   *Spread* (id 407) les place dans le champ stéréo (puissance constante) ;
   *Glide* (id 411, 0-500 ms) les fait glisser d'une note à l'autre.
+- **Doubleur** (*Double*, id 412) : deux prises de la voix elle-même, à
+  gauche et à droite (au moins 60 % d'écart), en retard de 9 à 23 ms qui
+  errent, désaccordées de quelques cents en sens opposés, avec leurs
+  propres formants : un double tracking. Indépendant de la source
+  d'harmonie (marche aussi avec *Harmony* sur Off).
+- **Jeu au clavier** : *Close Voicing* (id 413, mode MIDI) ramène chaque
+  note jouée à l'octave la plus proche de la voix, et l'y garde tant
+  qu'elle reste à moins de 9 demi-tons (pas de saut d'octave quand la
+  voix bouge un peu) : on joue les accords n'importe où sur le clavier.
+  *Latch* (id 414) garde l'accord après relâchement, jusqu'au suivant.
+  La pédale de sustain (CC 64) garde aussi les notes, dans tous les modes.
 - **Niveaux** : *Lead* (id 405, la voix principale) et *Harmony Level*
   (id 406). Plusieurs voix s'additionnent sans s'empiler linéairement
   (quatre voix ≈ deux fois la puissance d'une).
