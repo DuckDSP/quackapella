@@ -583,22 +583,17 @@ fn tune_panel(
         (ParamId::Humanize, &pct),
         (ParamId::Vibrato, &pct),
     ];
+    // Natural keeps the retune at 30 ms or slower: the knob stops there.
+    let natural_floor = quack_dsp::engine::NATURAL_MIN_RETUNE_S * 1000.0;
     for (i, (id, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let cx = r.left() + kw * (i as f32 + 0.5);
-        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 74.0, accent, fmt);
-    }
-    if mode == VoiceMode::Natural
-        && params.get_plain(ParamId::Retune) < quack_dsp::engine::NATURAL_MIN_RETUNE_S * 1000.0
-    {
-        text(
-            ui.painter(),
-            pos2(r.left() + kw * 1.5, r.bottom() - 10.0),
-            Align2::CENTER_CENTER,
-            "30 ms min. in Natural",
-            size::CAPTION - 1.5,
-            color::TEXT_FAINT,
-        );
+        let floor = if id == ParamId::Retune && mode == VoiceMode::Natural {
+            natural_floor
+        } else {
+            id.spec().kind.min()
+        };
+        controls::knob_floor(ui, params, st, id, pos2(cx, ky), 74.0, floor, accent, fmt);
     }
 }
 

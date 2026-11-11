@@ -41,9 +41,29 @@ pub(crate) fn knob_sized(
     accent: Color32,
     fmt: &dyn Fn(f64) -> String,
 ) {
+    let floor = id.spec().kind.min();
+    knob_floor(ui, params, st, id, centre, size_pt, floor, accent, fmt);
+}
+
+/// [`knob_sized`] that cannot go below `floor` (a mode's limit inside
+/// the parameter's range): drags, wheel and double-click stop there,
+/// and a lower stored value shows as `floor`, the value in effect.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn knob_floor(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    id: ParamId,
+    centre: egui::Pos2,
+    size_pt: f32,
+    floor: f64,
+    accent: Color32,
+    fmt: &dyn Fn(f64) -> String,
+) {
     let spec = id.spec();
     let kind = spec.kind;
-    let plain = params.get_plain(id);
+    let raw = params.get_plain(id);
+    let plain = raw.max(floor);
     let area = Rect::from_center_size(centre, vec2(size_pt, size_pt));
     let resp = ui.interact(
         area,
@@ -70,8 +90,8 @@ pub(crate) fn knob_sized(
         };
         let moved = (now.x - from.x) - (now.y - from.y);
         let n = (n0 + f64::from(moved / KNOB_TRAVEL) * fine).clamp(0.0, 1.0);
-        let target = kind.denormalize(n);
-        if target != plain {
+        let target = kind.denormalize(n).max(floor);
+        if target != raw {
             params.set_plain(id, target);
         }
     }
@@ -80,12 +100,12 @@ pub(crate) fn knob_sized(
         params.end_edit(id);
     }
     if resp.double_clicked() {
-        set_once(params, id, kind.default_plain());
+        set_once(params, id, kind.default_plain().max(floor));
     } else if resp.hovered() && st.drag.is_none() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             let n = kind.normalize(plain) + f64::from(scroll.signum()) * WHEEL_STEP;
-            set_once(params, id, kind.denormalize(n));
+            set_once(params, id, kind.denormalize(n).max(floor));
         }
     }
     if resp.hovered() {
@@ -94,9 +114,15 @@ pub(crate) fn knob_sized(
 
     let p = ui.painter();
     #[allow(clippy::cast_possible_truncation)]
-    let t = kind.normalize(params.get_plain(id)) as f32;
+    let t = kind.normalize(params.get_plain(id).max(floor)) as f32;
     paint_knob(p, centre, size_pt, t, accent);
-    knob_value(p, area, &fmt(params.get_plain(id)), spec.unit, size::VALUE);
+    knob_value(
+        p,
+        area,
+        &fmt(params.get_plain(id).max(floor)),
+        spec.unit,
+        size::VALUE,
+    );
     text(
         p,
         centre + vec2(0.0, size_pt * 0.5 + 12.0),
