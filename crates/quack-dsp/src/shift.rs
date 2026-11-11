@@ -74,6 +74,34 @@ pub const MAX_PITCH_RATIO: f32 = 4.0;
 
 pub const CHANNELS: usize = 2;
 
+/// Decides the pitch ratio of each grain. The autotune
+/// ([`crate::autotune::Retuner`]) works here, on the grain's own period,
+/// so its correction is in time with the waveform; a plain `f32` is a
+/// fixed ratio.
+pub trait PitchControl {
+    /// Ratio for a voiced grain of `period` samples (distance between
+    /// its pulse marks), `dt` seconds after the previous grain.
+    fn voiced(&mut self, period: f64, dt: f64) -> f64;
+    /// An unvoiced grain (never transposed), `dt` seconds after the
+    /// previous one.
+    fn unvoiced(&mut self, _dt: f64) {}
+}
+
+impl PitchControl for f32 {
+    fn voiced(&mut self, _period: f64, _dt: f64) -> f64 {
+        f64::from(*self)
+    }
+}
+
+impl PitchControl for crate::autotune::Retuner {
+    fn voiced(&mut self, period: f64, dt: f64) -> f64 {
+        Self::voiced(self, period, dt)
+    }
+    fn unvoiced(&mut self, dt: f64) {
+        Self::unvoiced(self, dt);
+    }
+}
+
 /// Semitones to pitch ratio.
 #[must_use]
 pub fn semitones_to_ratio(st: f32) -> f32 {
@@ -92,6 +120,9 @@ struct Mark {
 /// Real-time pitch-synchronous shifter. See the module docs.
 #[derive(Debug, Clone, Default)]
 pub struct Psola {
+    sample_rate: f64,
+    /// Synthesis position of the previous grain (for `PitchControl`).
+    last_s: f64,
     latency: i64,
     unvoiced: i64,
     min_period: f64,
@@ -145,6 +176,7 @@ impl Psola {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn prepare(&mut self, sample_rate: f64, latency: usize) {
         let sr = sample_rate.max(8_000.0);
+        self.sample_rate = sr;
         self.latency = latency as i64;
         self.unvoiced = ((latency / UNVOICED_FRACTION).max(16)) as i64;
         self.min_period = sr / f64::from(MAX_HZ);
@@ -182,6 +214,7 @@ impl Psola {
         self.n = 0;
         self.count = 0;
         self.next_s = 0.0;
+        self.last_s = 0.0;
         self.voicing = 0.0;
         self.hold = 0;
         self.offset = 0.0;
@@ -217,6 +250,20 @@ impl Psola {
         pitch_ratio: f32,
         formant_ratio: f32,
     ) -> (f32, f32) {
+        let mut pr = pitch_ratio;
+        self.tick_with(left, right, period, &mut pr, formant_ratio)
+    }
+
+    /// [`Psola::tick`] with the pitch ratio decided per grain by `pitch`.
+    #[inline]
+    pub fn tick_with(
+        &mut self,
+        left: f32,
+        right: f32,
+        period: Option<f32>,
+        pitch: &mut impl PitchControl,
+        formant_ratio: f32,
+    ) -> (f32, f32) {
         let n = self.n;
         let i = self.in_index(n);
         self.input[0][i] = left;
@@ -248,12 +295,11 @@ impl Psola {
         };
         self.place_mark(period);
 
-        let pr = pitch_ratio.clamp(1.0 / MAX_PITCH_RATIO, MAX_PITCH_RATIO);
         let fr = formant_ratio.clamp(1.0 / MAX_FORMANT_RATIO, MAX_FORMANT_RATIO);
         #[allow(clippy::cast_precision_loss)]
         let c = (n - self.latency) as f64;
         while self.next_s <= c + self.lead {
-            if !self.place_grain(c, f64::from(pr), f64::from(fr)) {
+            if !self.place_grain(c, pitch, f64::from(fr)) {
                 break;
             }
         }
@@ -389,7 +435,7 @@ impl Psola {
     /// mark on by one output period.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     /// Returns `false` when the grain must wait for more input.
-    fn place_grain(&mut self, c: f64, pitch_ratio: f64, formant_ratio: f64) -> bool {
+    fn place_grain(&mut self, c: f64, pitch: &mut impl PitchControl, formant_ratio: f64) -> bool {
         let s = self.next_s;
         // The grains play the input `offset` samples behind the synthesis
         // marks. A voiced grain needs two periods of input, an unvoiced
@@ -433,9 +479,21 @@ impl Psola {
         // Only the pitch glides in, and unvoiced grains are never
         // transposed (noise put back at another spacing would buzz).
         let fr = formant_ratio;
+        let dt = ((s - self.last_s) / self.sample_rate).max(0.0);
+        self.last_s = s;
         let (ratio, hl, hr) = if m.voiced {
-            (pitch_ratio.powf(self.voicing), left / fr, right / fr)
+            let max = f64::from(MAX_PITCH_RATIO);
+            // The grain's own period, unless a mark landed off the
+            // pulses (consonant onsets): then the detector's.
+            let own = if (right / f64::from(m.period)).ln().abs() < 0.2 {
+                right
+            } else {
+                f64::from(m.period)
+            };
+            let pr = pitch.voiced(own, dt).clamp(1.0 / max, max);
+            (pr.powf(self.voicing), left / fr, right / fr)
         } else {
+            pitch.unvoiced(dt);
             // Kept at the analysis spacing, so the grains still sum to
             // one; each is read faster or slower, which moves its
             // envelope, without reading past the recorded input.
@@ -446,7 +504,10 @@ impl Psola {
         // A grain due late (after waiting, or wider than the previous one)
         // is moved, never cut on its rising edge; the delay follows so the
         // input plays on from where it was.
-        let late = (c + hl - s).max(0.0);
+        // (Sample `c` itself is still writable: it is read after this.
+        // Counting it as late would delay every grain by half a sample
+        // on average and leave the output a few cents flat.)
+        let late = (c - 1.0 + hl - s).max(0.0);
         let s = s + late;
         self.offset += late;
         let start = (s - hl).ceil() as i64;

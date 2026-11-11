@@ -12,15 +12,25 @@
 //! The shifter delays the voice by exactly the fixed latency
 //! ([`crate::latency::LATENCY_MS`]), like the dry delay lines, so
 //! dry/wet and bypass never comb and the host's compensation is always
-//! right. Autotune and harmonies (next steps) will steer the shifter.
+//! right.
+//!
+//! The autotune ([`Retuner`]) steers the shifter grain by grain: it
+//! gets each grain's own period and returns the grain's pitch ratio
+//! (correction plus transposition). Harmonies (next steps) will add
+//! voices on the same marks.
 
+use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
 use crate::db_to_gain;
 use crate::latency::{DelayLine, latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
-use crate::params::{ParamId, ParamValues};
+use crate::params::{NOTE_PARAMS, ParamId, ParamValues};
 use crate::pitch::{PitchDetector, PitchEstimate, Yin};
 use crate::shift::{Psola, semitones_to_ratio};
+
+/// Fastest retune in the Natural mode: below it the correction is
+/// heard as an effect, which is the Tune mode's job.
+pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
 
 /// Smoothing time for gains and mix.
@@ -48,6 +58,7 @@ pub struct Engine {
     notes: NoteStack,
     detector: Yin,
     shifter: Psola,
+    retuner: Retuner,
 }
 
 impl Default for Engine {
@@ -74,6 +85,7 @@ impl Engine {
             notes: NoteStack::default(),
             detector: Yin::default(),
             shifter: Psola::default(),
+            retuner: Retuner::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -98,8 +110,9 @@ impl Engine {
         self.bypass.prepare(sample_rate, BYPASS_MS);
         self.detector.prepare(sample_rate, max_block);
         self.shifter.prepare(sample_rate, self.latency);
-        self.apply_all(true);
+        self.retuner.prepare(sample_rate);
         self.notes.clear();
+        self.apply_all(true);
     }
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
@@ -109,8 +122,9 @@ impl Engine {
         }
         self.detector.reset();
         self.shifter.reset();
-        self.apply_all(true);
+        self.retuner.reset();
         self.notes.clear();
+        self.apply_all(true);
     }
 
     /// The latency the host must compensate, in samples. Constant for a
@@ -128,6 +142,20 @@ impl Engine {
     #[must_use]
     pub fn notes(&self) -> &NoteStack {
         &self.notes
+    }
+
+    /// What the autotune is doing (sung, target and output notes),
+    /// `None` while unvoiced or with the correction off.
+    #[must_use]
+    pub fn tune(&self) -> Option<TuneReading> {
+        self.retuner.reading()
+    }
+
+    /// Allowed pitch classes of the autotune right now (bit 0 = C),
+    /// MIDI notes included.
+    #[must_use]
+    pub fn tune_mask(&self) -> u16 {
+        self.retuner.settings.mask
     }
 
     /// Latest pitch reading of the input, `None` while unvoiced.
@@ -176,6 +204,11 @@ impl Engine {
             ParamId::Formant => (&mut self.formant, v),
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
+                self.update_tune();
+                return;
+            }
+            _ => {
+                self.update_tune();
                 return;
             }
         };
@@ -186,16 +219,52 @@ impl Engine {
         }
     }
 
+    /// Autotune settings from the parameters, the mode and the held
+    /// notes.
+    fn update_tune(&mut self) {
+        let v = &self.values;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let key = v.get(ParamId::Key).round().clamp(0.0, 11.0) as u8;
+        let scale = Scale::from_index(v.get(ParamId::Scale));
+        let source = Source::from_index(v.get(ParamId::Source));
+        let enabled = NOTE_PARAMS.iter().enumerate().fold(0u16, |m, (i, p)| {
+            if v.get(*p) >= 0.5 { m | (1 << i) } else { m }
+        });
+        let scale_notes = scale_mask(key, scale) & enabled;
+        let held = crate::autotune::held_mask(&self.notes);
+        let (mask, exact) = match source {
+            Source::Scale => (scale_notes, None),
+            _ if held == 0 => (scale_notes, None),
+            Source::Midi => (held, None),
+            Source::MidiExact => (held, self.notes.latest().map(|n| f64::from(n.note))),
+        };
+        let mut retune_s = v.get(ParamId::Retune) / 1000.0;
+        if self.mode == VoiceMode::Natural {
+            retune_s = retune_s.max(NATURAL_MIN_RETUNE_S);
+        }
+        self.retuner.settings = TuneSettings {
+            amount: v.get(ParamId::Correction) / 100.0,
+            retune_s,
+            humanize: v.get(ParamId::Humanize) / 100.0,
+            vibrato: v.get(ParamId::Vibrato) / 100.0,
+            mask,
+            exact,
+        };
+    }
+
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
         self.notes.note_on(channel, note, velocity);
+        self.update_tune();
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
         self.notes.note_off(channel, note);
+        self.update_tune();
     }
 
     pub fn all_notes_off(&mut self) {
         self.notes.clear();
+        self.update_tune();
     }
 
     /// Process a stereo block in place. A mono host passes the same
@@ -210,13 +279,15 @@ impl Engine {
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
-            let pitch = semitones_to_ratio(self.pitch.tick());
+            self.retuner.transpose = f64::from(self.pitch.tick());
             let formant = semitones_to_ratio(self.formant.tick());
             let (in_l, in_r) = (*l * g_in, *r * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
-            let (wet_l, wet_r) = self.shifter.tick(in_l, in_r, period, pitch, formant);
+            let (wet_l, wet_r) =
+                self.shifter
+                    .tick_with(in_l, in_r, period, &mut self.retuner, formant);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
