@@ -262,17 +262,22 @@ impl Engine {
         };
         let gated = v.get(ParamId::MidiGate) >= 0.5 && source != Source::Scale && held == 0;
         self.gate.set(if gated { 0.0 } else { 1.0 });
+        let natural = self.mode == VoiceMode::Natural;
         let mut retune_s = v.get(ParamId::Retune) / 1000.0;
-        if self.mode == VoiceMode::Natural {
+        let mut vibrato = v.get(ParamId::Vibrato) / 100.0;
+        if natural {
             retune_s = retune_s.max(NATURAL_MIN_RETUNE_S);
+            vibrato = vibrato.max(crate::autotune::NATURAL_MIN_VIBRATO);
         }
         self.retuner.settings = TuneSettings {
             amount: v.get(ParamId::Correction) / 100.0,
             retune_s,
             humanize: v.get(ParamId::Humanize) / 100.0,
-            vibrato: v.get(ParamId::Vibrato) / 100.0,
+            vibrato,
             mask,
             exact,
+            natural,
+            transition_s: v.get(ParamId::Transition) / 1000.0,
         };
     }
 

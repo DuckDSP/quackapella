@@ -132,10 +132,10 @@ pub fn mode_accent(mode: VoiceMode) -> Color32 {
 fn mode_blurb(mode: VoiceMode) -> &'static str {
     match mode {
         VoiceMode::Natural => {
-            "Transparent correction and transposition, formants preserved, even for large intervals."
+            "Unheard correction: vibrato and scoops kept, short notes left alone, formants preserved."
         }
         VoiceMode::Tune => {
-            "Pitch correction to a scale or to MIDI notes, from gentle to hard tune."
+            "The audible effect, from pop tune to robot: fast retune, set note transitions."
         }
         VoiceMode::Creative => {
             "Pitch and formants apart: monster, chipmunk, freeze, glitch, octaves."
@@ -576,24 +576,46 @@ fn tune_panel(
         }
     };
     let ky = r.bottom() - 78.0;
-    let kw = r.width() / 4.0;
-    let knobs: [(ParamId, &dyn Fn(f64) -> String); 4] = [
+    let kw = r.width() / 5.0;
+    let trans = |v: f64| {
+        if v < 0.5 {
+            "Jump".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 5] = [
         (ParamId::Correction, &pct),
         (ParamId::Retune, &ms),
+        (ParamId::Transition, &trans),
         (ParamId::Humanize, &pct),
         (ParamId::Vibrato, &pct),
     ];
-    // Natural keeps the retune at 30 ms or slower: the knob stops there.
-    let natural_floor = quack_dsp::engine::NATURAL_MIN_RETUNE_S * 1000.0;
+    // Natural has floors (the knobs stop there) and no transition: its
+    // notes glide at the retune speed.
+    let natural = mode == VoiceMode::Natural;
     for (i, (id, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let cx = r.left() + kw * (i as f32 + 0.5);
-        let floor = if id == ParamId::Retune && mode == VoiceMode::Natural {
-            natural_floor
-        } else {
-            id.spec().kind.min()
+        let floor = match id {
+            ParamId::Retune if natural => quack_dsp::engine::NATURAL_MIN_RETUNE_S * 1000.0,
+            ParamId::Vibrato if natural => quack_dsp::autotune::NATURAL_MIN_VIBRATO * 100.0,
+            _ => id.spec().kind.min(),
         };
-        controls::knob_floor(ui, params, st, id, pos2(cx, ky), 74.0, floor, accent, fmt);
+        controls::knob_floor(ui, params, st, id, pos2(cx, ky), 70.0, floor, accent, fmt);
+        if natural && id == ParamId::Transition {
+            let veil = Rect::from_center_size(pos2(cx, ky + 10.0), vec2(kw, 100.0));
+            ui.painter()
+                .rect_filled(veil, 6.0, color::PANEL.gamma_multiply(0.7));
+            text(
+                ui.painter(),
+                pos2(cx, ky),
+                Align2::CENTER_CENTER,
+                "Tune only",
+                size::CAPTION - 2.0,
+                color::TEXT_FAINT,
+            );
+        }
     }
 }
 

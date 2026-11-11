@@ -129,9 +129,10 @@ pub enum ParamId {
     NoteAs,
     NoteB,
     MidiGate,
+    Transition,
 }
 
-pub const PARAM_COUNT: usize = 28;
+pub const PARAM_COUNT: usize = 29;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -398,6 +399,17 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Bool { default: false },
     },
+    ParamSpec {
+        key: "transition",
+        host_id: 320,
+        name: "Transition",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 300.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -430,6 +442,7 @@ impl ParamId {
         Self::NoteAs,
         Self::NoteB,
         Self::MidiGate,
+        Self::Transition,
     ];
 
     #[must_use]

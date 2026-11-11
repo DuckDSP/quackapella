@@ -245,6 +245,16 @@ pub struct QuackParams {
     #[param(id = 319, name = "MIDI Gate")]
     pub midi_gate: BoolParam,
 
+    #[param(
+        id = 320,
+        name = "Transition",
+        range = "linear(0, 300)",
+        default = 0.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub transition: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -300,6 +310,10 @@ impl QuackParams {
         for (id, p) in quack_dsp::params::NOTE_PARAMS.into_iter().zip(notes) {
             v.set(id, f64::from(u8::from(p.value())));
         }
+        v.set(
+            ParamId::Transition,
+            FloatParamReadF64::value(&self.transition),
+        );
         v.set(
             ParamId::MidiGate,
             f64::from(u8::from(self.midi_gate.value())),

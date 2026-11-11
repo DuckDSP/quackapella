@@ -202,8 +202,17 @@ pub fn nearest_held(note: f32, held: &NoteStack) -> Option<f32> {
 }
 
 /// How far past the midpoint between two notes the voice must go
-/// before the target changes, in semitones.
-const HYSTERESIS_ST: f64 = 0.2;
+/// before the target changes, in semitones: wide in the Natural style,
+/// so a note held a little low stays on its note; tighter in Tune, so
+/// runs land on every note.
+const HYSTERESIS_NATURAL_ST: f64 = 0.35;
+const HYSTERESIS_TUNE_ST: f64 = 0.2;
+/// Natural style: the correction eases in over the first part of each
+/// note, so scoops into the note and very short notes keep their own
+/// pitch (they are heard as expression, not as errors).
+const NATURAL_EASE_S: f64 = 0.08;
+/// Natural style: share of the vibrato always kept.
+pub const NATURAL_MIN_VIBRATO: f64 = 0.5;
 /// Smoothing of the sung pitch used to choose the note.
 const CHOICE_S: f64 = 0.012;
 /// Cutoff of the vibrato centre (vibrato is 4 to 8 Hz).
@@ -251,6 +260,11 @@ pub struct TuneSettings {
     pub mask: u16,
     /// Exact target note (MIDI Exact with a note held).
     pub exact: Option<f64>,
+    /// Natural style (see the consts above); otherwise Tune.
+    pub natural: bool,
+    /// Tune style: time the target takes to move from one note to the
+    /// next, on top of the retune (0 = a jump).
+    pub transition_s: f64,
 }
 
 impl Default for TuneSettings {
@@ -262,6 +276,8 @@ impl Default for TuneSettings {
             vibrato: 1.0,
             mask: 0xFFF,
             exact: None,
+            natural: false,
+            transition_s: 0.0,
         }
     }
 }
@@ -290,6 +306,11 @@ pub struct Retuner {
     centre: [f64; 2],
     lp: f64,
     held_s: f64,
+    /// Target in effect (gliding during a transition), where the glide
+    /// started, and how far into it we are.
+    glided: f64,
+    from: f64,
+    trans_s: f64,
     /// Vibrato detector: side of the last swing (+1, -1, 0), time since
     /// it, swings in a row at a vibrato's pace, gate (0 to 1).
     swing: f64,
@@ -382,6 +403,8 @@ impl Retuner {
             // A MIDI Exact note starts on the played note; a sung one
             // starts as sung and glides in at the retune speed.
             self.lp = if s.exact.is_some() { dev } else { 0.0 };
+            self.glided = self.target;
+            self.trans_s = f64::INFINITY;
         } else {
             self.choice += coef(dt, CHOICE_S) * (robust - self.choice);
             let cand = self.choose(self.choice);
@@ -390,20 +413,37 @@ impl Retuner {
             } else {
                 (cand - self.target).abs() > 1e-6
                     && (self.choice - self.target).abs() - (self.choice - cand).abs()
-                        > 2.0 * HYSTERESIS_ST
+                        > 2.0
+                            * if s.natural {
+                                HYSTERESIS_NATURAL_ST
+                            } else {
+                                HYSTERESIS_TUNE_ST
+                            }
             };
             if switch {
-                let jump = cand - self.target;
+                self.from = self.glided;
+                self.trans_s = 0.0;
                 self.target = cand;
-                // The vibrato centre follows the note; the correction
-                // does not, so it glides at the retune speed.
-                self.centre[0] -= jump;
-                self.centre[1] -= jump;
                 self.held_s = 0.0;
             }
         }
         self.held_s += dt;
-        let dev = robust - self.target;
+        // The target in effect: in Tune it moves to a new note over the
+        // transition time; in Natural it jumps and the retune glides.
+        self.trans_s += dt;
+        let glided = if s.natural || s.transition_s <= 0.0 || self.trans_s >= s.transition_s {
+            self.target
+        } else {
+            let x = self.trans_s / s.transition_s;
+            self.from + (self.target - self.from) * x * x * (3.0 - 2.0 * x)
+        };
+        // The vibrato centre follows the target; the correction does
+        // not, so it glides at the retune speed.
+        let moved = glided - self.glided;
+        self.centre[0] -= moved;
+        self.centre[1] -= moved;
+        self.glided = glided;
+        let dev = robust - glided;
         // Two one-pole stages: a gentle, critically damped centre.
         let a = coef(dt, 1.0 / (std::f64::consts::TAU * CENTRE_HZ));
         self.centre[0] += a * (dev - self.centre[0]);
@@ -434,10 +474,16 @@ impl Retuner {
         // Hard tune works on the raw grain, so the grains land exactly
         // one target period apart (no jitter left); otherwise the grain's
         // own jitter is the voice's and passes through.
-        let corr = if s.retune_s + human <= 0.0 && s.vibrato <= 0.0 {
-            s.amount * (self.target - sung)
+        let amount = if s.natural && s.exact.is_none() {
+            let x = (self.age_s / NATURAL_EASE_S).min(1.0);
+            s.amount * x * x * (3.0 - 2.0 * x)
         } else {
-            -s.amount * self.lp
+            s.amount
+        };
+        let corr = if s.retune_s + human <= 0.0 && s.vibrato <= 0.0 {
+            amount * (glided - sung)
+        } else {
+            -amount * self.lp
         };
         #[allow(clippy::cast_possible_truncation)]
         let reading = TuneReading {
@@ -627,5 +673,40 @@ mod tests {
         r.settings.mask = 0;
         let out = run(&mut r, &[57.3; 10]);
         assert!(out.iter().all(|o| (o - 64.3).abs() < 1e-9));
+    }
+
+    #[test]
+    fn transition_glides_between_notes() {
+        let mut r = retuner(TuneSettings {
+            amount: 1.0,
+            retune_s: 0.0,
+            vibrato: 0.0,
+            transition_s: 0.1,
+            ..TuneSettings::default()
+        });
+        run(&mut r, &[60.0; 60]);
+        // Jump to D: the output takes ~100 ms to get there, not a step.
+        let out = run(&mut r, &[62.0; 60]);
+        let mid = out.iter().position(|o| *o > 61.0).unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        let t = mid as f64 * period_of(62.0) / SR;
+        assert!((0.03..0.09).contains(&t), "{t}");
+        assert!((out[59] - 62.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn natural_eases_in_and_keeps_scoops() {
+        let s = TuneSettings {
+            amount: 1.0,
+            retune_s: 0.03,
+            vibrato: 0.5,
+            natural: true,
+            ..TuneSettings::default()
+        };
+        let mut r = retuner(s);
+        // A note starting 40 ct flat: its first 40 ms stay near as sung.
+        let out = run(&mut r, &[59.6; 120]);
+        assert!((out[4] - 59.6).abs() < 0.1, "{}", out[4]);
+        assert!((out[119] - 60.0).abs() < 0.03, "{}", out[119]);
     }
 }

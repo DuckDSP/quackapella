@@ -151,7 +151,16 @@ fixe).
 - Choix de note avec hystérésis (0,2 demi-ton au-delà du milieu) et phase
   d'attaque de 20 ms où la note est rechoisie librement ; un saut de plus
   de 3 demi-tons ou un silence de 60 ms recommence une note.
-- Mode Natural : Retune plancher de 30 ms.
+- Deux caractères distincts :
+  - **Natural** (correction qu'on n'entend pas) : Retune ≥ 30 ms, Vibrato
+    ≥ 50 %, hystérésis large (0,35 demi-ton), correction qui s'installe
+    sur les 80 premières ms de chaque note (scoops et notes courtes
+    gardés), pas de Transition.
+  - **Tune** (l'effet) : toute la plage, hystérésis 0,2, **Transition**
+    (0-300 ms) : la cible glisse d'une note à l'autre en ce temps,
+    indépendamment du Retune ; 0 = saut net.
+- **MIDI Gate** : avec une source MIDI, la sortie est coupée tant
+  qu'aucune note n'est tenue (fondus de 8 ms, retardés de la latence).
 - Corrigé au passage dans le shifter : chaque grain était retardé d'un
   demi-échantillon en moyenne (sortie basse de 4 à 12 cents).
 
