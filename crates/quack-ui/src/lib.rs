@@ -1034,7 +1034,8 @@ fn vocoder_panel(
         (ParamId::CarrierNoise, "Noise", &off, pitched),
         (ParamId::CarrierRelease, "Release", &ms, synth),
         (ParamId::CarrierGlide, "Glide", &off, pitched),
-        (ParamId::BendRange, "Bend", &st_fmt, pitched),
+        // Bend Range stays a host parameter (rarely changed live).
+        (ParamId::VocoderLofi, "Lo-Fi", &off, true),
     ];
     let kw = (r.width() - 2.0 * space::L) / 6.0;
     let y1 = r.top() + 156.0;

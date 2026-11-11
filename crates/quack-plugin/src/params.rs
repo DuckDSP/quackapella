@@ -726,6 +726,16 @@ pub struct QuackParams {
     )]
     pub vocoder_width: FloatParam,
 
+    #[param(
+        id = 517,
+        name = "Vocoder Lo-Fi",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vocoder_lofi: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -894,6 +904,10 @@ impl QuackParams {
         v.set(
             ParamId::VocoderWidth,
             FloatParamReadF64::value(&self.vocoder_width),
+        );
+        v.set(
+            ParamId::VocoderLofi,
+            FloatParamReadF64::value(&self.vocoder_lofi),
         );
         v
     }

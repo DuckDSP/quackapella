@@ -22,7 +22,8 @@
 //! *Band Shift* moves the "mouth" (the talkbox reads its analysis frame
 //! faster or slower); *Hold* freezes the timbre on the carrier, played
 //! by MIDI; *Width* spreads the result in stereo by phase only, so the
-//! mono sum is untouched.
+//! mono sum is untouched; *Lo-Fi* lowers the rate and the bits (a
+//! talking toy at the top).
 //!
 //! The carrier synth: up to [`CARRIER_VOICES`] voices, one per held MIDI
 //! note (saw, square, supersaw, or noise for a whisper), *Detune*
@@ -281,6 +282,9 @@ pub struct VocoderSettings {
     pub bend_range: f64,
     /// Stereo width of the vocoded voice, 0..1 (mono-safe).
     pub width: f64,
+    /// Lo-fi: sample rate and bit depth come down together, 0..1
+    /// (talking-toy voice at the top).
+    pub lofi: f64,
 }
 
 impl Default for VocoderSettings {
@@ -303,6 +307,7 @@ impl Default for VocoderSettings {
             hold: false,
             bend_range: 2.0,
             width: 0.5,
+            lofi: 0.0,
         }
     }
 }
@@ -470,6 +475,9 @@ pub struct Vocoder {
     leap_hold: usize,
     /// Allpass chain for the width (side = allpassed - direct).
     wide: [f64; WIDE_STAGES],
+    /// Lo-fi sample and hold: phase and held value.
+    crush_phase: f64,
+    crush_held: f64,
     // Output alignment.
     out_delay: DelayLine,
     latency: usize,
@@ -522,6 +530,8 @@ impl Default for Vocoder {
             leap_count: 0,
             leap_hold: 0,
             wide: [0.0; WIDE_STAGES],
+            crush_phase: 0.0,
+            crush_held: 0.0,
             out_delay: DelayLine::default(),
             latency: 0,
             level: 0.0,
@@ -629,6 +639,8 @@ impl Vocoder {
         self.follow_note = None;
         self.last_hz = 0.0;
         self.wide = [0.0; WIDE_STAGES];
+        self.crush_phase = 0.0;
+        self.crush_held = 0.0;
         self.out_delay.reset();
         self.level = 0.0;
     }
@@ -743,6 +755,24 @@ impl Vocoder {
                 }
             }
         }
+    }
+
+    /// Lo-fi: hold the signal at a lower rate (down to 4 kHz) and round
+    /// it to fewer bits (down to 4).
+    fn crush(&mut self, x: f64) -> f64 {
+        let a = self.settings.lofi;
+        if a <= 0.0 {
+            return x;
+        }
+        let rate = (self.sample_rate * (1.0 - a) + 4_000.0 * a).min(self.sample_rate);
+        self.crush_phase += rate / self.sample_rate;
+        if self.crush_phase >= 1.0 {
+            self.crush_phase -= 1.0;
+            let bits = 16.0 - 12.0 * a;
+            let steps = bits.exp2() / 2.0;
+            self.crush_held = (x * steps).round() / steps;
+        }
+        self.crush_held
     }
 
     /// Spread the vocoded voice in stereo: left and right differ in
@@ -959,6 +989,7 @@ impl Vocoder {
         let h0 = self.sib_hp[0].tick(d);
         let hp = self.sib_hp[1].tick(h0);
         let sib = hp * s.sibilance * self.unvoiced;
+        let wet = self.crush(wet);
         let y = self.out_delay.tick(soft_limit(wet * self.level) as f32);
         #[allow(clippy::cast_possible_truncation)]
         let out = y + (sib * self.level) as f32;
@@ -1267,6 +1298,18 @@ mod tests {
             band(1600.0),
             band(800.0)
         );
+    }
+
+    #[test]
+    fn lofi_steps_the_signal() {
+        let mut v = played(VocoderMode::Vocoder);
+        v.settings.lofi = 1.0;
+        v.apply_settings();
+        let x = vowel(24_000, 700.0, 1200.0);
+        let y = run(&mut v, &x, Some(60.0));
+        // Held for whole steps: many repeated samples in a row.
+        let held = y[12_000..].windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(held > 6_000, "{held}");
     }
 
     #[test]

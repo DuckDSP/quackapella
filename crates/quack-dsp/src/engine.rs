@@ -359,7 +359,8 @@ impl Engine {
             | ParamId::VocoderHold
             | ParamId::FollowChord
             | ParamId::BendRange
-            | ParamId::VocoderWidth => {
+            | ParamId::VocoderWidth
+            | ParamId::VocoderLofi => {
                 self.update_vocoder(snap);
                 return;
             }
@@ -543,6 +544,7 @@ impl Engine {
         s.hold = v.get(ParamId::VocoderHold) >= 0.5;
         s.bend_range = v.get(ParamId::BendRange);
         s.width = pct(ParamId::VocoderWidth);
+        s.lofi = pct(ParamId::VocoderLofi);
         self.vocoder.apply_settings();
         self.vocoder.set_notes(&self.notes);
         #[allow(clippy::cast_possible_truncation)]

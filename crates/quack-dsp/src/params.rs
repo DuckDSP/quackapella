@@ -174,9 +174,10 @@ pub enum ParamId {
     FollowChord,
     BendRange,
     VocoderWidth,
+    VocoderLofi,
 }
 
-pub const PARAM_COUNT: usize = 73;
+pub const PARAM_COUNT: usize = 74;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -897,6 +898,17 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 50.0,
         },
     },
+    ParamSpec {
+        key: "vocoder_lofi",
+        host_id: 517,
+        name: "Vocoder Lo-Fi",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -974,6 +986,7 @@ impl ParamId {
         Self::FollowChord,
         Self::BendRange,
         Self::VocoderWidth,
+        Self::VocoderLofi,
     ];
 
     #[must_use]
