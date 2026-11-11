@@ -122,6 +122,7 @@ impl PluginLogic for Quackapella {
             .shared
             .publish_config(state.engine.latency_samples() as u32, config.sample_rate);
         params.shared.publish_notes(0);
+        params.shared.publish_pitch(None);
     }
 
     fn process(
@@ -164,6 +165,7 @@ impl PluginLogic for Quackapella {
             state.run(buffer, pos, total - pos);
         }
         params.shared.publish_notes(state.engine.notes().mask());
+        params.shared.publish_pitch(state.engine.pitch());
         ProcessStatus::Normal
     }
 

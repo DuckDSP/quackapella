@@ -31,6 +31,31 @@ toujours juste. Les notes MIDI (note on/off, CC 120/123) sont appliquées à
 leur position dans le bloc et tenues dans une pile de 16 notes, lue par
 l'éditeur (clavier) et, plus tard, par l'autotune et l'harmoniseur.
 
+## Détection de pitch (étape 2)
+
+`quack_dsp::pitch::Yin`, lancé par le moteur sur l'entrée (après gain
+d'entrée, somme mono), en lecture seule :
+
+- filtre passe-bas 2 kHz (4ᵉ ordre) puis décimation vers environ 11 kHz,
+  passe-haut 40 Hz ; plage 60 Hz à 1,5 kHz ;
+- YIN toutes les 2,5 ms sur une fenêtre de deux périodes à 60 Hz
+  (environ 33 ms), seuil de 0,15 sur la différence normalisée (évite
+  les erreurs d'octave vers le bas), interpolation parabolique ;
+- voisé / non voisé avec hystérésis (apériodicité < 0,25 pour entrer,
+  > 0,40 pour sortir) et porte à -55 dBFS : consonnes, souffle et
+  silence ne donnent aucune lecture ;
+- médiane sur 5 lectures, en demi-tons : un saut d'octave isolé est
+  rejeté, un vrai changement de note passe 5 ms plus tard ;
+- confiance = 1 - apériodicité, que le pitch shift (étape 3) et
+  l'autotune (étape 4) utiliseront pour doser la correction.
+
+La lecture suit la voix d'environ 25 ms (`latency_samples`). C'est un
+retard de commande, pas de latence audio : l'étape 3 en tiendra compte
+dans son budget de 10 ms (les marques de période du PSOLA seront
+calculées sur le signal plein débit, guidées par cette lecture).
+L'éditeur affiche la note, l'écart en cents, la fréquence et la
+confiance.
+
 ## Modes
 
 | Mode | Intention | Formants |
@@ -54,10 +79,10 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
 
 ## Feuille de route
 
-1. **Socle** (cette étape) : workspace, AU v2 / VST3 / CLAP, passthrough,
+1. **Socle** : workspace, AU v2 / VST3 / CLAP, passthrough,
    MIDI, latence déclarée, interface DuckDSP, script de bundle, CI.
-2. Détection de pitch robuste et basse latence (YIN / pYIN), décision
-   voisé / non voisé.
+2. **Détection de pitch** (cette étape) : YIN, décision voisé / non
+   voisé, confiance, lissage, affichage dans l'éditeur.
 3. Pitch shift naturel avec préservation des formants (cœur du mode
    Natural), mesure et gel du budget de latence.
 4. Autotune : gammes, notes MIDI, vitesse de retune, humanisation.

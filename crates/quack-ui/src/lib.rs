@@ -9,7 +9,8 @@
 //! touching the UI.
 //!
 //! Step 1 shows the mode, the level controls, bypass, the MIDI notes
-//! received and the latency. Panels for pitch, formants, autotune,
+//! received and the latency; step 2 adds the detected pitch (note,
+//! cents, Hz, confidence) as a tuner strip. Panels for pitch, formants, autotune,
 //! harmonies and vocoder come with their DSP steps (roadmap step 8 for
 //! presets, macros and MIDI learn).
 
@@ -27,7 +28,7 @@ use theme::{color, size, space};
 /// Editor size in points (fixed for now; zoom comes with step 8, with
 /// the AUv2 resize patch already in `vendor/`).
 pub const BASE_W: u32 = 760;
-pub const BASE_H: u32 = 440;
+pub const BASE_H: u32 = 520;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -53,6 +54,9 @@ pub struct View {
     /// Reported latency in samples, and the rate it was computed at.
     pub latency_samples: u32,
     pub sample_rate: f64,
+    /// Detected pitch in Hz, 0 while unvoiced, and its confidence (0-1).
+    pub pitch_hz: f32,
+    pub pitch_confidence: f32,
 }
 
 /// Editor state kept between frames.
@@ -204,8 +208,15 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         accent,
     );
 
+    // Pitch strip.
+    let pitch_r = Rect::from_min_size(
+        pos2(inner.left(), mode_r.bottom() + space::L),
+        vec2(inner.width(), 64.0),
+    );
+    pitch_strip(&p, pitch_r, view, accent);
+
     // Level panel.
-    let row_top = mode_r.bottom() + space::L;
+    let row_top = pitch_r.bottom() + space::L;
     let foot_h = 28.0;
     let row_h = inner.bottom() - foot_h - row_top;
     let level_r = Rect::from_min_size(
@@ -297,6 +308,134 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     if st.drag.is_some() && !ui.input(|i| i.pointer.any_down()) {
         st.end_open_edits(params);
     }
+}
+
+/// Nearest note and the offset from it in cents, for a pitch in Hz.
+#[must_use]
+pub fn nearest_note(hz: f32) -> Option<(u8, f32)> {
+    if !(hz.is_finite() && hz > 0.0) {
+        return None;
+    }
+    let m = quack_dsp::pitch::hz_to_midi(hz);
+    let n = m.round();
+    if !(0.0..=127.0).contains(&n) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some((n as u8, (m - n) * 100.0))
+}
+
+/// Detected note, cents, Hz and confidence, with a ±50 cent meter.
+fn pitch_strip(p: &egui::Painter, r: Rect, view: &View, accent: Color32) {
+    panel(p, r);
+    let cy = r.center().y;
+    text(
+        p,
+        pos2(r.left() + space::L, cy),
+        Align2::LEFT_CENTER,
+        "Pitch",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let reading = nearest_note(view.pitch_hz);
+    let note_x = r.left() + 84.0;
+    match reading {
+        Some((n, c)) => {
+            value(
+                p,
+                pos2(note_x, cy),
+                Align2::LEFT_CENTER,
+                &note_name(n),
+                size::READOUT,
+                accent,
+            );
+            value(
+                p,
+                pos2(note_x + 76.0, cy - 9.0),
+                Align2::LEFT_CENTER,
+                &format!("{c:+.0} ct"),
+                size::VALUE,
+                color::TEXT,
+            );
+            value(
+                p,
+                pos2(note_x + 76.0, cy + 10.0),
+                Align2::LEFT_CENTER,
+                &format!("{:.1} Hz", view.pitch_hz),
+                size::VALUE,
+                color::TEXT_DIM,
+            );
+        }
+        None => {
+            value(
+                p,
+                pos2(note_x, cy),
+                Align2::LEFT_CENTER,
+                "-",
+                size::READOUT,
+                color::TEXT_FAINT,
+            );
+            text(
+                p,
+                pos2(note_x + 76.0, cy),
+                Align2::LEFT_CENTER,
+                "Unvoiced",
+                size::CAPTION,
+                color::TEXT_FAINT,
+            );
+        }
+    }
+
+    // Meter.
+    let m = Rect::from_min_max(
+        pos2(r.left() + 280.0, cy - 10.0),
+        pos2(r.right() - 150.0, cy + 10.0),
+    );
+    well(p, m);
+    for k in -2..=2_i8 {
+        let x = m.center().x + f32::from(k) * m.width() / 4.0;
+        let h = if k == 0 { 7.0 } else { 4.0 };
+        p.line_segment(
+            [pos2(x, m.top() + 2.0), pos2(x, m.top() + 2.0 + h)],
+            egui::Stroke::new(1.0_f32, color::GRID_STRONG),
+        );
+        p.line_segment(
+            [pos2(x, m.bottom() - 2.0 - h), pos2(x, m.bottom() - 2.0)],
+            egui::Stroke::new(1.0_f32, color::GRID_STRONG),
+        );
+    }
+    if let Some((_, c)) = reading {
+        let x = m.center().x + c.clamp(-50.0, 50.0) / 100.0 * (m.width() - 8.0);
+        let alpha = 0.35 + 0.65 * view.pitch_confidence.clamp(0.0, 1.0);
+        p.rect_filled(
+            Rect::from_center_size(pos2(x, cy), vec2(4.0, m.height() - 4.0)),
+            2.0,
+            accent.gamma_multiply(alpha),
+        );
+    }
+
+    // Confidence.
+    text(
+        p,
+        pos2(r.right() - space::L - 44.0, cy),
+        Align2::RIGHT_CENTER,
+        "Confidence",
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+    let conf = if reading.is_some() {
+        format!("{:.0}%", view.pitch_confidence * 100.0)
+    } else {
+        "-".to_owned()
+    };
+    value(
+        p,
+        pos2(r.right() - space::L, cy),
+        Align2::RIGHT_CENTER,
+        &conf,
+        size::VALUE,
+        color::TEXT_DIM,
+    );
 }
 
 /// Three octaves from C3, held notes lit (any octave folds in).
@@ -400,6 +539,8 @@ mod tests {
                 held_notes: (1 << 60) | (1 << 76),
                 latency_samples: 480,
                 sample_rate: 48_000.0,
+                pitch_hz: if mode % 2 == 0 { 0.0 } else { 223.1 },
+                pitch_confidence: 0.92,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));
@@ -413,5 +554,14 @@ mod tests {
         assert_eq!(note_name(60), "C4");
         assert_eq!(note_name(69), "A4");
         assert_eq!(note_name(0), "C-1");
+    }
+
+    #[test]
+    fn nearest_notes() {
+        let (n, c) = nearest_note(223.1).unwrap();
+        assert_eq!(n, 57);
+        assert!((c - 24.2).abs() < 0.5, "{c}");
+        assert_eq!(nearest_note(0.0), None);
+        assert_eq!(nearest_note(f32::NAN), None);
     }
 }
