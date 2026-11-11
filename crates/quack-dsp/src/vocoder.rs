@@ -18,14 +18,19 @@
 //!   a vocoder, closer to a real talkbox.
 //!
 //! In both, *Sibilance* adds the high part of the voice back in
-//! unvoiced parts (s, t, ch), which a pitched carrier cannot say.
+//! unvoiced parts (s, t, ch), which a pitched carrier cannot say;
+//! *Band Shift* moves the "mouth" (the talkbox reads its analysis frame
+//! faster or slower); *Hold* freezes the timbre on the carrier, played
+//! by MIDI; *Width* spreads the result in stereo by phase only, so the
+//! mono sum is untouched.
 //!
 //! The carrier synth: up to [`CARRIER_VOICES`] voices, one per held MIDI
 //! note (saw, square, supersaw, or noise for a whisper), *Detune*
 //! between the oscillators, *Carrier Noise* mixed in, *Carrier Release*.
-//! With *Carrier Follow* and no note held, one voice sings the tuned
-//! note of the singer (autotune output plus Pitch), so the vocoder works
-//! without a keyboard.
+//! With *Carrier Follow* and no note held, the carrier sings the tuned
+//! note of the singer (autotune output plus Pitch), alone or as a chord
+//! (*Follow Chord*), so the vocoder works without a keyboard. MIDI
+//! notes glide (*Carrier Glide*) and follow the pitch bend.
 //!
 //! Latency: none added. The filters are causal; the output is delayed
 //! to line up with the rest of the engine, by the engine's latency minus
@@ -73,6 +78,10 @@ const FOLLOW_GLIDE_S: f64 = 0.02;
 /// Follow voice: a leap wider than this must last [`LEAP_HOLD_S`].
 const LEAP_ST: f64 = 7.0;
 const LEAP_HOLD_S: f64 = 0.04;
+/// Width: first-order allpass coefficients (a phase smear, no level
+/// change, so left plus right is the mono voice exactly).
+const WIDE_STAGES: usize = 4;
+const WIDE_COEFS: [f64; WIDE_STAGES] = [0.62, -0.35, 0.8, -0.55];
 /// Soft limit of the vocoded voice (a low, whitened carrier is spiky).
 const SOFT_KNEE: f64 = 0.5;
 /// Level calibration: a voice at some level comes out about as loud.
@@ -270,6 +279,8 @@ pub struct VocoderSettings {
     pub hold: bool,
     /// Pitch bend range, semitones.
     pub bend_range: f64,
+    /// Stereo width of the vocoded voice, 0..1 (mono-safe).
+    pub width: f64,
 }
 
 impl Default for VocoderSettings {
@@ -291,6 +302,7 @@ impl Default for VocoderSettings {
             glide_s: 0.0,
             hold: false,
             bend_range: 2.0,
+            width: 0.5,
         }
     }
 }
@@ -456,6 +468,8 @@ pub struct Vocoder {
     last_hz: f64,
     leap_count: usize,
     leap_hold: usize,
+    /// Allpass chain for the width (side = allpassed - direct).
+    wide: [f64; WIDE_STAGES],
     // Output alignment.
     out_delay: DelayLine,
     latency: usize,
@@ -507,6 +521,7 @@ impl Default for Vocoder {
             last_hz: 0.0,
             leap_count: 0,
             leap_hold: 0,
+            wide: [0.0; WIDE_STAGES],
             out_delay: DelayLine::default(),
             latency: 0,
             level: 0.0,
@@ -541,7 +556,9 @@ impl Vocoder {
             })
             .collect();
         self.window_power = self.window.iter().map(|w| w * w).sum::<f64>().max(1e-9);
-        self.ring = vec![0.0; w];
+        // Room for a frame read twice as slowly (Band Shift down to
+        // an octave up).
+        self.ring = vec![0.0; 2 * w + 2];
         self.frame = vec![0.0; w];
         self.out_delay.prepare(max_latency);
         self.rms_coef = coef(sample_rate, 0.01);
@@ -575,7 +592,12 @@ impl Vocoder {
     #[must_use]
     pub fn analysis_lag(&self) -> usize {
         match self.settings.mode {
-            VocoderMode::Talkbox => self.window.len() / 2,
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            VocoderMode::Talkbox => (self.window.len() as f64 * self.talk_shift() / 2.0) as usize,
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             _ => (0.25 * self.settings.response_s * self.sample_rate) as usize,
         }
@@ -606,6 +628,7 @@ impl Vocoder {
         self.notes.clear();
         self.follow_note = None;
         self.last_hz = 0.0;
+        self.wide = [0.0; WIDE_STAGES];
         self.out_delay.reset();
         self.level = 0.0;
     }
@@ -655,7 +678,9 @@ impl Vocoder {
         } else {
             1.0
         };
-        if old.is_none_or(|o| o.mode != s.mode || o.response_s != s.response_s) {
+        if old.is_none_or(|o| {
+            o.mode != s.mode || o.response_s != s.response_s || o.shift_st != s.shift_st
+        }) {
             self.set_latency(self.latency);
         }
     }
@@ -718,6 +743,27 @@ impl Vocoder {
                 }
             }
         }
+    }
+
+    /// Spread the vocoded voice in stereo: left and right differ in
+    /// phase only, their sum is the mono voice.
+    pub fn widen(&mut self, y: f32) -> (f32, f32) {
+        let x = f64::from(y);
+        let mut a = x;
+        for (z, c) in self.wide.iter_mut().zip(WIDE_COEFS) {
+            let out = c * a + *z;
+            *z = a - c * out;
+            a = out;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let side = (0.5 * self.settings.width * (a - x)) as f32;
+        (y + side, y - side)
+    }
+
+    /// Talkbox frame reading rate from the Band Shift (an octave either
+    /// way).
+    fn talk_shift(&self) -> f64 {
+        (self.settings.shift_st / 12.0).exp2().clamp(0.5, 2.0)
     }
 
     /// MIDI pitch bend, -1 to 1 (bends the carrier by the bend range).
@@ -1007,9 +1053,23 @@ impl Vocoder {
     /// LPC of the last window (Levinson-Durbin): reflection coefficients
     /// and residual level, reached over the next hop.
     fn analyse(&mut self) {
-        let w = self.ring.len();
+        // The frame is read at the Band Shift's rate: read faster, the
+        // voice's formants come out higher (and slower, lower).
+        let n = self.ring.len();
+        let w = self.window.len();
+        let q = self.talk_shift();
+        #[allow(clippy::cast_precision_loss)]
+        let newest = (self.ring_pos + n - 1) as f64;
         for i in 0..w {
-            self.frame[i] = self.ring[(self.ring_pos + i) % w] * self.window[i];
+            #[allow(clippy::cast_precision_loss)]
+            let back = (w - 1 - i) as f64 * q;
+            let t = newest - back;
+            let t = if t < 0.0 { t + n as f64 } else { t };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let a = t.floor() as usize % n;
+            let f = t - t.floor();
+            let x = self.ring[a] + (self.ring[(a + 1) % n] - self.ring[a]) * f;
+            self.frame[i] = x * self.window[i];
         }
         let p = self.order;
         let mut r = [0.0; MAX_ORDER + 1];
@@ -1183,6 +1243,44 @@ mod tests {
             band(800.0),
             band(1600.0)
         );
+    }
+
+    #[test]
+    fn talkbox_shift_moves_the_formant() {
+        let mut v = played(VocoderMode::Talkbox);
+        v.settings.shift_st = 12.0;
+        v.apply_settings();
+        let x = vowel(48_000, 800.0, 800.0);
+        let y = run(&mut v, &x, Some(48.0));
+        let band = |hz: f64| {
+            let mut b = Band::default();
+            b.set(SR, hz, 4.0);
+            let o: Vec<f32> = y[24_000..]
+                .iter()
+                .map(|s| b.tick(f64::from(*s)) as f32)
+                .collect();
+            rms(&o)
+        };
+        assert!(
+            band(1600.0) > 2.0 * band(800.0),
+            "{} {}",
+            band(1600.0),
+            band(800.0)
+        );
+    }
+
+    #[test]
+    fn width_is_mono_safe() {
+        let mut v = Vocoder::default();
+        v.settings.width = 1.0;
+        let x = vowel(4800, 700.0, 1200.0);
+        let mut side = 0.0f32;
+        for s in x {
+            let (l, r) = v.widen(s);
+            assert!((l + r - 2.0 * s).abs() < 1e-6);
+            side = side.max((l - r).abs());
+        }
+        assert!(side > 1e-3);
     }
 
     #[test]

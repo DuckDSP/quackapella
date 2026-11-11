@@ -358,7 +358,8 @@ impl Engine {
             | ParamId::CarrierGlide
             | ParamId::VocoderHold
             | ParamId::FollowChord
-            | ParamId::BendRange => {
+            | ParamId::BendRange
+            | ParamId::VocoderWidth => {
                 self.update_vocoder(snap);
                 return;
             }
@@ -541,6 +542,7 @@ impl Engine {
         s.glide_s = v.get(ParamId::CarrierGlide) / 1000.0;
         s.hold = v.get(ParamId::VocoderHold) >= 0.5;
         s.bend_range = v.get(ParamId::BendRange);
+        s.width = pct(ParamId::VocoderWidth);
         self.vocoder.apply_settings();
         self.vocoder.set_notes(&self.notes);
         #[allow(clippy::cast_possible_truncation)]
@@ -741,7 +743,8 @@ impl Engine {
                         .map(|n| f64::from(n + transpose));
                     let dry = 0.5 * (dry_l + dry_r) * g_in;
                     let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
-                    (wet_l + v, wet_r + v)
+                    let (vl, vr) = self.vocoder.widen(v);
+                    (wet_l + vl, wet_r + vr)
                 } else {
                     (wet_l, wet_r)
                 };

@@ -1001,7 +1001,7 @@ fn vocoder_panel(
         },
     );
 
-    let knob_d = 58.0;
+    let knob_d = 54.0;
     let pct = |v: f64| format!("{v:.0}");
     let off = |v: f64| {
         if v < 0.5 {
@@ -1018,23 +1018,25 @@ fn vocoder_panel(
     let vocoder_only = mode != VocoderMode::Talkbox;
     let dim = accent.gamma_multiply(0.35);
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, bool);
-    let row1: [Knob; 5] = [
+    let row1: [Knob; 6] = [
         (ParamId::VocoderLevel, "Level", &pct, true),
         (ParamId::Bands, "Bands", &bands, vocoder_only),
         (ParamId::Response, "Response", &ms, vocoder_only),
-        (ParamId::BandShift, "Shift", &st_fmt, vocoder_only),
+        (ParamId::BandShift, "Shift", &st_fmt, true),
         (ParamId::Sibilance, "Sibilance", &off, true),
+        (ParamId::VocoderWidth, "Width", &off, true),
     ];
     let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
     let synth = carrier != Carrier::Sidechain;
-    let row2: [Knob; 5] = [
+    let row2: [Knob; 6] = [
         (ParamId::CarrierOctave, "Octave", &octave, pitched),
         (ParamId::Detune, "Detune", &off, pitched),
         (ParamId::CarrierNoise, "Noise", &off, pitched),
         (ParamId::CarrierRelease, "Release", &ms, synth),
         (ParamId::CarrierGlide, "Glide", &off, pitched),
+        (ParamId::BendRange, "Bend", &st_fmt, pitched),
     ];
-    let kw = (r.width() - 2.0 * space::L) / 5.0;
+    let kw = (r.width() - 2.0 * space::L) / 6.0;
     let y1 = r.top() + 156.0;
     let y2 = r.bottom() - 64.0;
     for (row, y) in [(&row1[..], y1), (&row2[..], y2)] {

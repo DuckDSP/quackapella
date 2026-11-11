@@ -716,6 +716,16 @@ pub struct QuackParams {
     )]
     pub bend_range: FloatParam,
 
+    #[param(
+        id = 516,
+        name = "Vocoder Width",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vocoder_width: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -880,6 +890,10 @@ impl QuackParams {
         v.set(
             ParamId::BendRange,
             FloatParamReadF64::value(&self.bend_range),
+        );
+        v.set(
+            ParamId::VocoderWidth,
+            FloatParamReadF64::value(&self.vocoder_width),
         );
         v
     }
