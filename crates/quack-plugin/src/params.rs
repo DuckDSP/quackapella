@@ -242,6 +242,9 @@ pub struct QuackParams {
     #[param(id = 318, name = "Note B", default = true)]
     pub note_b: BoolParam,
 
+    #[param(id = 319, name = "MIDI Gate")]
+    pub midi_gate: BoolParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -297,6 +300,10 @@ impl QuackParams {
         for (id, p) in quack_dsp::params::NOTE_PARAMS.into_iter().zip(notes) {
             v.set(id, f64::from(u8::from(p.value())));
         }
+        v.set(
+            ParamId::MidiGate,
+            f64::from(u8::from(self.midi_gate.value())),
+        );
         v
     }
 }

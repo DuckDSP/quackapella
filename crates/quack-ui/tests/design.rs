@@ -45,6 +45,7 @@ fn editor_captures() {
             v.set(ParamId::Key, 9.0);
             v.set(ParamId::Scale, 2.0);
             v.set(ParamId::NoteF, 0.0);
+            v.set(ParamId::Source, 1.0);
         }
         let params = Values(RefCell::new(v));
         let view = View {

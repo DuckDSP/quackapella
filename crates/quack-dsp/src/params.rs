@@ -128,9 +128,10 @@ pub enum ParamId {
     NoteA,
     NoteAs,
     NoteB,
+    MidiGate,
 }
 
-pub const PARAM_COUNT: usize = 27;
+pub const PARAM_COUNT: usize = 28;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -390,6 +391,13 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Bool { default: true },
     },
+    ParamSpec {
+        key: "midi_gate",
+        host_id: 319,
+        name: "MIDI Gate",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 impl ParamId {
@@ -421,6 +429,7 @@ impl ParamId {
         Self::NoteA,
         Self::NoteAs,
         Self::NoteB,
+        Self::MidiGate,
     ];
 
     #[must_use]

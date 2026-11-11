@@ -37,6 +37,8 @@ use crate::smooth::Ramp;
 const SMOOTH_MS: f64 = 20.0;
 /// Bypass crossfade.
 const BYPASS_MS: f64 = 10.0;
+/// MIDI Gate fade in and out.
+const GATE_MS: f64 = 8.0;
 
 pub const CHANNELS: usize = 2;
 
@@ -59,6 +61,10 @@ pub struct Engine {
     detector: Yin,
     shifter: Psola,
     retuner: Retuner,
+    /// MIDI Gate: 1 = open. Delayed by the latency, so it opens and
+    /// closes with the audio the notes were played against.
+    gate: Ramp,
+    gate_delay: DelayLine,
 }
 
 impl Default for Engine {
@@ -86,6 +92,8 @@ impl Engine {
             detector: Yin::default(),
             shifter: Psola::default(),
             retuner: Retuner::default(),
+            gate: Ramp::new(1.0),
+            gate_delay: DelayLine::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -108,6 +116,9 @@ impl Engine {
             r.prepare(sample_rate, SMOOTH_MS);
         }
         self.bypass.prepare(sample_rate, BYPASS_MS);
+        self.gate.prepare(sample_rate, GATE_MS);
+        self.gate_delay.prepare(self.latency);
+        self.prime_gate();
         self.detector.prepare(sample_rate, max_block);
         self.shifter.prepare(sample_rate, self.latency);
         self.retuner.prepare(sample_rate);
@@ -125,6 +136,7 @@ impl Engine {
         self.retuner.reset();
         self.notes.clear();
         self.apply_all(true);
+        self.prime_gate();
     }
 
     /// The latency the host must compensate, in samples. Constant for a
@@ -219,6 +231,16 @@ impl Engine {
         }
     }
 
+    /// Fill the gate's delay with its current state (after a reset, the
+    /// gate does not fade in from closed).
+    fn prime_gate(&mut self) {
+        let g = self.gate.target();
+        self.gate.snap(g);
+        for _ in 0..self.gate_delay.delay() {
+            self.gate_delay.tick(g);
+        }
+    }
+
     /// Autotune settings from the parameters, the mode and the held
     /// notes.
     fn update_tune(&mut self) {
@@ -238,6 +260,8 @@ impl Engine {
             Source::Midi => (held, None),
             Source::MidiExact => (held, self.notes.latest().map(|n| f64::from(n.note))),
         };
+        let gated = v.get(ParamId::MidiGate) >= 0.5 && source != Source::Scale && held == 0;
+        self.gate.set(if gated { 0.0 } else { 1.0 });
         let mut retune_s = v.get(ParamId::Retune) / 1000.0;
         if self.mode == VoiceMode::Natural {
             retune_s = retune_s.max(NATURAL_MIN_RETUNE_S);
@@ -285,6 +309,7 @@ impl Engine {
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
+            let g_out = g_out * self.gate_delay.tick(self.gate.tick());
             let (wet_l, wet_r) =
                 self.shifter
                     .tick_with(in_l, in_r, period, &mut self.retuner, formant);
@@ -484,6 +509,31 @@ mod tests {
         v.set(ParamId::Correction, 0.0);
         let got = tuned_note(&v, 38.0, None);
         assert!((got - 57.38).abs() < 0.05, "{got}");
+    }
+
+    #[test]
+    fn midi_gate_mutes_without_a_note() {
+        let mut e = Engine::new();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Source, 1.0);
+        v.set(ParamId::MidiGate, 1.0);
+        e.set_all(&v, true);
+        e.reset();
+        let n = 4_800;
+        let run = |e: &mut Engine| {
+            let mut l = vec![0.5; n];
+            let mut r = vec![0.5; n];
+            e.process(&mut l, &mut r);
+            l[n - 1]
+        };
+        assert!(run(&mut e).abs() < 1e-6);
+        e.note_on(0, 60, 100);
+        assert!((run(&mut e) - 0.5).abs() < 1e-3);
+        e.note_off(0, 60);
+        assert!(run(&mut e).abs() < 1e-6);
+        // Scale source: the gate does not apply.
+        e.set_param(ParamId::Source, 0.0);
+        assert!((run(&mut e) - 0.5).abs() < 1e-3);
     }
 
     #[test]

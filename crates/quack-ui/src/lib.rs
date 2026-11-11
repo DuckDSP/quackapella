@@ -94,6 +94,8 @@ pub struct UiState {
     history: Vec<Sample>,
     head: usize,
     centre: f32,
+    /// Scale list open.
+    scale_menu: bool,
 }
 
 impl Default for UiState {
@@ -103,6 +105,7 @@ impl Default for UiState {
             history: vec![Sample::default(); HISTORY_LEN],
             head: 0,
             centre: 60.0,
+            scale_menu: false,
         }
     }
 }
@@ -440,10 +443,21 @@ fn tune_panel(
     );
     let sources: Vec<&str> = Source::ALL.iter().map(|s| s.name()).collect();
     let src_r = Rect::from_min_size(
-        pos2(r.right() - space::L - 270.0, r.top() + 8.0),
-        vec2(270.0, 28.0),
+        pos2(r.right() - space::L - 260.0, r.top() + 8.0),
+        vec2(260.0, 28.0),
     );
     controls::segmented(ui, params, ParamId::Source, src_r, &sources, &[accent]);
+    let source = Source::from_index(params.get_plain(ParamId::Source));
+    let gate_on = params.get_plain(ParamId::MidiGate) >= 0.5;
+    let gate_r = Rect::from_min_size(
+        pos2(src_r.left() - space::S - 96.0, src_r.top()),
+        vec2(96.0, 28.0),
+    );
+    controls::toggle(ui, params, ParamId::MidiGate, gate_r, "MIDI Gate", accent);
+    if source == Source::Scale {
+        // The gate only acts on the MIDI sources.
+        p.rect_filled(gate_r, 5.0, color::PANEL.gamma_multiply(0.6));
+    }
 
     // Key and scale.
     let row = r.top() + 48.0;
@@ -457,7 +471,9 @@ fn tune_panel(
         pos2(key_r.left(), key_r.bottom() + space::S),
         vec2(190.0, 30.0),
     );
-    controls::stepper(ui, params, ParamId::Scale, scale_r, scale.name(), accent);
+    if controls::stepper(ui, params, ParamId::Scale, scale_r, scale.name(), accent) {
+        st.scale_menu = !st.scale_menu;
+    }
 
     // Note switches: the scale in its key, a click takes a note out.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -475,20 +491,80 @@ fn tune_panel(
         view.tune_mask,
         accent,
     );
-    let source = Source::from_index(params.get_plain(ParamId::Source));
-    let hint = match source {
-        Source::Scale => "Notes from the scale",
-        Source::Midi => "Held notes, any octave",
-        Source::MidiExact => "Sings the held note",
-    };
-    text(
+    // Reset the note switches.
+    let scale_notes = scale_mask(key, scale);
+    let edited =
+        (0..12).any(|pc| scale_notes & (1 << pc) != 0 && params.get_plain(NOTE_PARAMS[pc]) < 0.5);
+    let reset_r = Rect::from_min_size(
+        pos2(scale_r.left(), scale_r.bottom() + space::S),
+        vec2(scale_r.width(), 26.0),
+    );
+    let resp = ui.interact(
+        reset_r,
+        ui.id().with("quack-reset-notes"),
+        egui::Sense::click(),
+    );
+    if resp.clicked() && edited {
+        for id in NOTE_PARAMS {
+            if params.get_plain(id) < 0.5 {
+                set_once(params, id, 1.0);
+            }
+        }
+    }
+    paint::pill(
         p,
-        pos2(scale_r.left() + 2.0, scale_r.bottom() + 17.0),
+        reset_r,
+        "Reset notes",
+        false,
+        resp.hovered() && edited,
+        accent,
+    );
+    if !edited {
+        p.rect_filled(reset_r, 5.0, color::PANEL.gamma_multiply(0.6));
+    }
+
+    // In the MIDI sources the scale steps back: it only fills in while
+    // no note is held, or not at all behind the gate.
+    let (hint, hint2) = match (source, gate_on) {
+        (Source::Scale, _) => ("Notes from the scale, minus the ones switched off", ""),
+        (Source::Midi, false) => ("Held notes, any octave", "  ·  scale while none is held"),
+        (Source::MidiExact, false) => ("Sings the held note", "  ·  scale while none is held"),
+        (Source::Midi, true) => ("Held notes, any octave", "  ·  silent while none is held"),
+        (Source::MidiExact, true) => ("Sings the held note", "  ·  silent while none is held"),
+    };
+    if source != Source::Scale {
+        let veil = Rect::from_min_max(
+            pos2(key_r.left() - 2.0, key_r.top() - 2.0),
+            pos2(key_r.right() + 2.0, notes_r.bottom() + 2.0),
+        );
+        let alpha = if gate_on { 0.75 } else { 0.55 };
+        p.rect_filled(veil, 6.0, color::PANEL.gamma_multiply(alpha));
+    }
+    let hy = notes_r.bottom() + 16.0;
+    let h1 = text(
+        p,
+        pos2(key_r.left() + 2.0, hy),
         Align2::LEFT_CENTER,
         hint,
         size::CAPTION,
+        if source == Source::Scale {
+            color::TEXT_FAINT
+        } else {
+            accent
+        },
+    );
+    text(
+        p,
+        pos2(h1.right(), hy),
+        Align2::LEFT_CENTER,
+        hint2,
+        size::CAPTION,
         color::TEXT_FAINT,
     );
+    if st.scale_menu {
+        let names: Vec<&str> = Scale::ALL.iter().map(|s| s.name()).collect();
+        st.scale_menu = controls::choice_menu(ui, params, ParamId::Scale, scale_r, &names, accent);
+    }
 
     // Knobs.
     let pct = |v: f64| format!("{v:.0}");

@@ -188,7 +188,7 @@ pub(crate) fn stepper(
     r: Rect,
     name: &str,
     accent: Color32,
-) {
+) -> bool {
     let kind = id.spec().kind;
     let count = kind.max() + 1.0;
     let at = params.get_plain(id);
@@ -235,27 +235,115 @@ pub(crate) fn stepper(
         pos2(r.left() + arrow_w, r.top()),
         pos2(r.right() - arrow_w, r.bottom()),
     );
-    let resp = ui.interact(
+    let name_resp = ui.interact(
         mid,
         ui.id().with(("quack-step", id.index(), 2)),
         Sense::click(),
     );
-    if resp.clicked() {
-        step(1.0);
-    } else if resp.hovered() {
+    let open = name_resp.clicked();
+    if name_resp.hovered() {
+        rounded(
+            p,
+            mid.shrink(2.0),
+            radius::CONTROL - 1,
+            color::RAISED,
+            color::RAISED,
+        );
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             step(-f64::from(scroll.signum()));
         }
     }
-    text(
+    let t = text(
         p,
-        mid.center(),
+        mid.center() - vec2(5.0, 0.0),
         Align2::CENTER_CENTER,
         name,
         size::BODY,
         accent,
     );
+    // Small down arrow: the name opens the list.
+    let (x, y) = (t.right() + 8.0, t.center().y);
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(x - 4.0, y - 2.0),
+            pos2(x + 4.0, y - 2.0),
+            pos2(x, y + 3.0),
+        ],
+        accent.gamma_multiply(0.8),
+        egui::Stroke::NONE,
+    ));
+    open
+}
+
+/// Pop-up list of an enum parameter's choices, below `anchor`. A click
+/// on a choice is one edit and closes it, as does a click elsewhere.
+/// Returns whether it stays open.
+pub(crate) fn choice_menu(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    id: ParamId,
+    anchor: Rect,
+    labels: &[&str],
+    accent: Color32,
+) -> bool {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lit = params.get_plain(id).max(0.0).round() as usize;
+    let row = 26.0;
+    #[allow(clippy::cast_precision_loss)]
+    let r = Rect::from_min_size(
+        pos2(anchor.left(), anchor.bottom() + 4.0),
+        vec2(anchor.width(), row * labels.len() as f32 + 8.0),
+    );
+    let mut open = true;
+    egui::Area::new(ui.id().with(("quack-menu", id.index())))
+        .fixed_pos(r.min)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            let (r, _) = ui.allocate_exact_size(r.size(), Sense::hover());
+            let p = ui.painter();
+            rounded(p, r, radius::CONTROL, color::RAISED, color::BORDER);
+            for (i, label) in labels.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss)]
+                let item = Rect::from_min_size(
+                    pos2(r.left() + 4.0, r.top() + 4.0 + row * i as f32),
+                    vec2(r.width() - 8.0, row),
+                );
+                let resp = ui.interact(item, ui.id().with(("quack-menu-item", i)), Sense::click());
+                if resp.hovered() || i == lit {
+                    let fill = if i == lit {
+                        accent.gamma_multiply(0.22)
+                    } else {
+                        color::BORDER
+                    };
+                    rounded(p, item, radius::CONTROL - 1, fill, fill);
+                }
+                if resp.clicked() {
+                    #[allow(clippy::cast_precision_loss)]
+                    set_once(params, id, i as f64);
+                    open = false;
+                }
+                let c = if i == lit { accent } else { color::TEXT };
+                text(
+                    p,
+                    pos2(item.left() + 10.0, item.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    size::BODY,
+                    c,
+                );
+            }
+            let clicked_out = ui.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|q| !r.contains(q) && !anchor.contains(q))
+            });
+            if clicked_out {
+                open = false;
+            }
+        });
+    open
 }
 
 /// One octave of note switches, drawn as a keyboard. `scale` is the
@@ -292,17 +380,21 @@ pub(crate) fn note_switches(
     }
     // Whites first, blacks on top; blacks take the clicks they cover.
     let order: Vec<usize> = WHITES.iter().copied().chain([1, 3, 6, 8, 10]).collect();
+    // One hit area for the whole keyboard; the key under the pointer is
+    // found by hand, black keys first since they sit on top. (Separate
+    // overlapping hit areas let the white keys steal the black ones'
+    // clicks.)
     let mut hit = [false; 12];
-    let pointer = ui.input(|i| i.pointer.interact_pos());
-    for pc in [1usize, 3, 6, 8, 10] {
-        let resp = ui.interact(rects[pc], ui.id().with(("quack-note", pc)), Sense::click());
-        hit[pc] = resp.clicked();
-    }
-    for &pc in &WHITES {
-        let resp = ui.interact(rects[pc], ui.id().with(("quack-note", pc)), Sense::click());
-        let on_black =
-            pointer.is_some_and(|q| [1usize, 3, 6, 8, 10].iter().any(|&b| rects[b].contains(q)));
-        hit[pc] = resp.clicked() && !on_black;
+    let all = rects.iter().fold(Rect::NOTHING, |a, k| a.union(*k));
+    let resp = ui.interact(all, ui.id().with("quack-notes"), Sense::click());
+    if resp.clicked()
+        && let Some(q) = resp.interact_pointer_pos()
+        && let Some(pc) = [1usize, 3, 6, 8, 10]
+            .into_iter()
+            .chain(WHITES)
+            .find(|&pc| rects[pc].contains(q))
+    {
+        hit[pc] = true;
     }
     for pc in order {
         let in_scale = scale & (1 << pc) != 0;
