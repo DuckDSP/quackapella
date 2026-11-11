@@ -1,0 +1,19 @@
+[package]
+name = "quack-ui"
+description = "Quackapella's editor (egui), in the DuckDSP look shared with Sonder: parameters only through ParamAccess, no plugin framework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+quack-dsp = { workspace = true }
+egui = { workspace = true }
+tiny-skia = { workspace = true }
+
+[dev-dependencies]
+# The design captures (tests/design.rs): the value font the plugin ships
+# and a PNG encoder already in truce's dependency graph.
+truce-font = { workspace = true }
+png = "=0.18.1"

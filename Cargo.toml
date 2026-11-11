@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+# Patched third-party crates (see vendor/*/PATCHES.md), not workspace members.
+exclude = ["vendor"]
+members = [
+    "crates/quack-dsp",
+    "crates/quack-ui",
+    "crates/quack-plugin",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.92"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+quack-dsp = { path = "crates/quack-dsp" }
+quack-ui = { path = "crates/quack-ui" }
+# Same framework and versions as Sonder (DuckDSP ADR 0001): pinned exactly,
+# truce moves fast between majors.
+truce = { version = "=6.3.0", default-features = false }
+truce-core = "=6.3.0"
+truce-params = "=6.3.0"
+truce-clap = "=6.3.0"
+truce-vst3 = "=6.3.0"
+truce-au = "=6.3.0"
+truce-egui = "=6.3.0"
+truce-font = "=6.3.0"
+truce-test = "=6.3.0"
+truce-driver = "=6.3.0"
+egui = "0.34"
+clap-sys = "0.5"
+# Brand marks rasterised once on the UI thread (already in truce's graph).
+tiny-skia = "=0.12.0"
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 1
+
+# truce 6.3.0 crates with DuckDSP's local patches, shared with Sonder
+# (AUv2 resize in Logic, sample-accurate AUv2 automation, macOS resize
+# settle). See vendor/*/PATCHES.md.
+[patch.crates-io]
+truce-au = { path = "vendor/truce-au" }
+truce-egui = { path = "vendor/truce-egui" }

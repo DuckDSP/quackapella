@@ -1,0 +1,5 @@
+/target
+.DS_Store
+/validation-logs
+/dist
+.cargo/config.toml
