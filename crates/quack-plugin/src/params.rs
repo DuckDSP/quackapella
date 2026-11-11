@@ -102,6 +102,30 @@ pub enum SourceParam {
     MidiExact,
 }
 
+#[derive(ParamEnum)]
+pub enum GlitchRateParam {
+    #[name = "1/4"]
+    Quarter,
+    #[name = "1/8"]
+    Eighth,
+    #[name = "1/16"]
+    Sixteenth,
+    #[name = "1/32"]
+    ThirtySecond,
+}
+
+#[derive(ParamEnum)]
+pub enum GlitchModeParam {
+    #[name = "Repeat"]
+    Repeat,
+    #[name = "Stutter"]
+    Stutter,
+    #[name = "Reverse"]
+    Reverse,
+    #[name = "Tape"]
+    Tape,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -268,6 +292,78 @@ pub struct QuackParams {
     )]
     pub transition: FloatParam,
 
+    #[param(
+        id = 600,
+        name = "Formant Follow",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub formant_follow: FloatParam,
+
+    #[param(
+        id = 601,
+        name = "Octave Down",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub octave_down: FloatParam,
+
+    #[param(
+        id = 602,
+        name = "Sub",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub sub: FloatParam,
+
+    #[param(
+        id = 603,
+        name = "Octave Up",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub octave_up: FloatParam,
+
+    #[param(id = 604, name = "Freeze")]
+    pub freeze: BoolParam,
+
+    #[param(
+        id = 605,
+        name = "Robot",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub robot: FloatParam,
+
+    #[param(
+        id = 606,
+        name = "Glitch",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub glitch: FloatParam,
+
+    #[param(id = 607, name = "Glitch Rate", default = 2)]
+    pub glitch_rate: EnumParam<GlitchRateParam>,
+
+    #[param(id = 608, name = "Glitch Mode", default = 0)]
+    pub glitch_mode: EnumParam<GlitchModeParam>,
+
+    #[param(id = 609, name = "Glitch Hold")]
+    pub glitch_hold: BoolParam,
+
     /// Lowest note of the voice: sets the latency.
     #[param(id = 100, name = "Voice", default = 1)]
     pub voice: EnumParam<VoiceParam>,
@@ -339,6 +435,31 @@ impl QuackParams {
         v.set(
             ParamId::MidiGate,
             f64::from(u8::from(self.midi_gate.value())),
+        );
+        for (id, p) in [
+            (ParamId::FormantFollow, &self.formant_follow),
+            (ParamId::OctaveDown, &self.octave_down),
+            (ParamId::Sub, &self.sub),
+            (ParamId::OctaveUp, &self.octave_up),
+            (ParamId::Robot, &self.robot),
+            (ParamId::Glitch, &self.glitch),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
+        v.set(ParamId::Freeze, f64::from(u8::from(self.freeze.value())));
+        v.set(
+            ParamId::GlitchHold,
+            f64::from(u8::from(self.glitch_hold.value())),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::GlitchMode,
+            self.glitch_mode.value().to_index() as f64,
+        );
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::GlitchRate,
+            self.glitch_rate.value().to_index() as f64,
         );
         #[allow(clippy::cast_precision_loss)]
         v.set(ParamId::Voice, self.voice.value().to_index() as f64);

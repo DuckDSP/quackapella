@@ -24,6 +24,7 @@ pub mod theme;
 
 use egui::{Align2, Color32, Rect, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
+use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
 use quack_dsp::latency::VoiceRange;
 use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::{ParamId, VoiceMode};
@@ -70,6 +71,8 @@ pub struct View {
     pub tune_target: f32,
     pub tune_out: f32,
     pub tune_mask: u16,
+    /// A frozen grain is sounding (Creative mode).
+    pub frozen: bool,
 }
 
 /// Seconds of pitch history in the graph.
@@ -301,7 +304,11 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     if now > 0.0 {
         st.record(view, now);
     }
-    pitch_graph(&p, graph_r, view, st, accent);
+    if mode == VoiceMode::Creative {
+        creative_panel(ui, params, st, view, graph_r, accent);
+    } else {
+        pitch_graph(&p, graph_r, view, st, accent);
+    }
 
     // Bottom row: voice, level, MIDI.
     let row_top = tune_r.bottom() + space::M;
@@ -455,6 +462,187 @@ fn voice_panel(
         let cx = r.left() + kw * (i as f32 + 0.5);
         controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
     }
+}
+
+/// The Creative mode's effects: layers, formant follow, robot, freeze,
+/// glitch. Takes the pitch graph's place in that mode.
+fn creative_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 22.0),
+        Align2::LEFT_CENTER,
+        "Manipulate",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    // Freeze: the big switch, with its state.
+    let fz = Rect::from_min_size(
+        pos2(r.right() - space::L - 120.0, r.top() + 8.0),
+        vec2(120.0, 28.0),
+    );
+    controls::toggle(ui, params, ParamId::Freeze, fz, "Freeze", accent);
+    let asked = params.get_plain(ParamId::Freeze) >= 0.5;
+    let state = match (asked, view.frozen) {
+        (_, true) if view.held_notes != 0 => "Frozen · played by MIDI",
+        (_, true) => "Frozen",
+        (true, false) => "Waiting for a sung note",
+        (false, false) => "Holds the last sung grain",
+    };
+    text(
+        p,
+        pos2(fz.left() - space::M, fz.center().y),
+        Align2::RIGHT_CENTER,
+        state,
+        size::CAPTION,
+        if view.frozen {
+            accent
+        } else {
+            color::TEXT_FAINT
+        },
+    );
+
+    let pct = |v: f64| format!("{v:.0}");
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let knob_d = 64.0;
+    let row1 = r.top() + 100.0;
+    let kw = (r.width() - 2.0 * space::L) / 5.0;
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 5] = [
+        (ParamId::Sub, &off),
+        (ParamId::OctaveDown, &off),
+        (ParamId::OctaveUp, &off),
+        (ParamId::FormantFollow, &pct),
+        (ParamId::Robot, &off),
+    ];
+    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+        controls::knob_sized(ui, params, st, id, pos2(cx, row1), knob_d, accent, fmt);
+    }
+    // Group captions over the knobs.
+    let cap_y = row1 - knob_d * 0.5 - 14.0;
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 1.5, cap_y),
+        Align2::CENTER_CENTER,
+        "Layers",
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
+    let follow = params.get_plain(ParamId::FormantFollow);
+    let shift = params.get_plain(ParamId::Pitch);
+    let character = if follow < 1.0 || shift.abs() < 0.5 {
+        "Formants in place"
+    } else if shift > 0.0 {
+        "Chipmunk"
+    } else {
+        "Monster"
+    };
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 3.5, cap_y),
+        Align2::CENTER_CENTER,
+        character,
+        size::CAPTION - 1.0,
+        if character == "Formants in place" {
+            color::TEXT_FAINT
+        } else {
+            accent
+        },
+    );
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 4.5, cap_y),
+        Align2::CENTER_CENTER,
+        if params.get_plain(ParamId::Robot) >= 0.5 {
+            "One note per phrase"
+        } else {
+            "Monotone"
+        },
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
+
+    // Glitch: density, effect, slice length, hold.
+    let row2 = r.bottom() - 66.0;
+    let gx = r.left() + space::L + kw * 0.5;
+    controls::knob_sized(
+        ui,
+        params,
+        st,
+        ParamId::Glitch,
+        pos2(gx, row2),
+        knob_d,
+        accent,
+        &off,
+    );
+    let left = gx + kw * 0.5 + space::S;
+    let width = r.right() - space::L - left;
+    let modes: Vec<&str> = GlitchMode::ALL.iter().map(|g| g.name()).collect();
+    let mode_r = Rect::from_min_size(pos2(left, row2 - 50.0), vec2(width, 28.0));
+    controls::segmented(ui, params, ParamId::GlitchMode, mode_r, &modes, &[accent]);
+    let rates: Vec<&str> = GlitchRate::ALL.iter().map(|g| g.name()).collect();
+    let hold_w = 84.0;
+    let rate_r = Rect::from_min_size(
+        pos2(left, mode_r.bottom() + space::S),
+        vec2(width - hold_w - space::S, 28.0),
+    );
+    controls::segmented(ui, params, ParamId::GlitchRate, rate_r, &rates, &[accent]);
+    let hold_r = Rect::from_min_size(
+        pos2(rate_r.right() + space::S, rate_r.top()),
+        vec2(hold_w, 28.0),
+    );
+    controls::toggle(ui, params, ParamId::GlitchHold, hold_r, "Hold", accent);
+    // The bar's steps: the glitched ones lit, the same every bar.
+    let rate = GlitchRate::from_index(params.get_plain(ParamId::GlitchRate));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let steps = (4.0 / rate.beats()).round() as u32;
+    let amount = params.get_plain(ParamId::Glitch) / 100.0;
+    let hold = params.get_plain(ParamId::GlitchHold) >= 0.5;
+    let strip = Rect::from_min_size(
+        pos2(left, rate_r.bottom() + space::S + 2.0),
+        vec2(width, 8.0),
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let cell = strip.width() / steps as f32;
+    for i in 0..steps {
+        #[allow(clippy::cast_precision_loss)]
+        let c = Rect::from_min_size(
+            pos2(strip.left() + cell * i as f32 + 1.0, strip.top()),
+            vec2(cell - 2.0, strip.height()),
+        );
+        let on = hold || glitch_step(i, steps, amount);
+        let fill = if on {
+            accent
+        } else if i % (steps / 4).max(1) == 0 {
+            color::TEXT_FAINT.gamma_multiply(0.5)
+        } else {
+            color::TEXT_FAINT.gamma_multiply(0.25)
+        };
+        p.rect_filled(c, 2.0, fill);
+    }
+    text(
+        p,
+        pos2(left + 2.0, strip.bottom() + 14.0),
+        Align2::LEFT_CENTER,
+        "Same steps every bar  ·  Hold: every step  ·  MIDI plays the freeze",
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
 }
 
 /// Key, scale, target source, note switches and the retune knobs.
@@ -1029,6 +1217,7 @@ mod tests {
                 tune_target: 57.0,
                 tune_out: 57.02,
                 tune_mask: 0b1010_1011_0101,
+                frozen: mode == 2,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

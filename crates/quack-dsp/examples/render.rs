@@ -8,7 +8,8 @@
 //! `key` is a parameter key of `quack_dsp::params` (`mode=1`,
 //! `retune=0`, `scale=2`, `key=9`, `pitch=-5`...); `midi=60,64@1.5`
 //! holds notes 60 and 64 from 1.5 s (repeat for a sequence, `midi=@4`
-//! releases everything at 4 s). `--demo` writes a synthetic singer
+//! releases everything at 4 s); `key=value@t` changes a parameter at
+//! `t` seconds (`freeze=1@2.1 freeze=0@4`). `--demo` writes a synthetic singer
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
 //! 32-bit float, mono or stereo; out: 32-bit float, same channels.
@@ -49,6 +50,7 @@ fn main() {
     let (sr, chans) = read_wav(&args[0]);
     let mut values = ParamValues::default();
     let mut midi: Vec<(f64, Vec<u8>)> = Vec::new();
+    let mut autos: Vec<(f64, ParamId, f64)> = Vec::new();
     for kv in &args[2..] {
         let (k, v) = kv.split_once('=').expect("key=value");
         if k == "midi" {
@@ -65,10 +67,16 @@ fn main() {
             .into_iter()
             .find(|p| p.spec().key == k)
             .unwrap_or_else(|| panic!("unknown parameter {k}"));
-        values.set(id, v.parse().expect("number"));
+        match v.split_once('@') {
+            Some((v, at)) => {
+                autos.push((at.parse().expect("time"), id, v.parse().expect("number")))
+            }
+            None => values.set(id, v.parse().expect("number")),
+        }
     }
     midi.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let out = process(f64::from(sr), &chans, &values, &midi);
+    autos.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let out = process(f64::from(sr), &chans, &values, &midi, &autos);
     write_wav(&args[1], sr, &out);
 }
 
@@ -77,6 +85,7 @@ fn process(
     chans: &[Vec<f32>],
     values: &ParamValues,
     midi: &[(f64, Vec<u8>)],
+    autos: &[(f64, ParamId, f64)],
 ) -> Vec<Vec<f32>> {
     let mut e = Engine::new();
     e.prepare(sr, 512);
@@ -97,8 +106,18 @@ fn process(
         .collect();
     let mut held: Vec<u8> = Vec::new();
     let mut next = 0;
+    let mut next_auto = 0;
     let mut pos = 0;
     while pos < l.len() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let due_auto = autos
+            .get(next_auto)
+            .map_or(usize::MAX, |a| (a.0 * sr) as usize);
+        if due_auto <= pos {
+            e.set_param(autos[next_auto].1, autos[next_auto].2);
+            next_auto += 1;
+            continue;
+        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let due = midi.get(next).map_or(usize::MAX, |m| (m.0 * sr) as usize);
         if due <= pos {
@@ -112,7 +131,10 @@ fn process(
             next += 1;
             continue;
         }
-        let end = (pos + 256).min(l.len()).min(due.max(pos + 1));
+        let end = (pos + 256)
+            .min(l.len())
+            .min(due.max(pos + 1))
+            .min(due_auto.max(pos + 1));
         e.process(&mut l[pos..end], &mut r[pos..end]);
         pos = end;
     }

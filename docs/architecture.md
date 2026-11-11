@@ -201,6 +201,53 @@ IN.wav OUT.wav mode=1 retune=0 key=9 scale=2` (clés des paramètres,
 chanteur de synthèse ; `--track IN.wav` affiche la hauteur toutes les
 10 ms.
 
+## Modes façon Manipulator (étape 5)
+
+Tout est actif **seulement en mode Creative** : en Natural et en Tune les
+réglages 600 à 609 sont ignorés (un test le vérifie à l'échantillon
+près), le mode Natural reste naturel. **Aucun effet n'ajoute de
+latence** : tout travaille dans le budget de 10 ms déjà gelé.
+
+- **Couches d'octave** (*Sub* −2 oct, *Octave Down* −1 oct, *Octave Up*
+  +1 oct, 0-100 %) : construites sur les grains de la voix principale,
+  sur ses propres marques de synthèse (une sur deux à −1 octave, une sur
+  quatre à −2, deux fois plus à +1), avec le même grain d'analyse. Leurs
+  impulsions tombent donc sur celles de la voix : pas de fondamentale
+  annulée là où leurs harmoniques se rencontrent (c'était le cas avec des
+  voix indépendantes). Elles suivent la hauteur corrigée et transposée,
+  se taisent sur les consonnes et le souffle, et la somme est compensée
+  (1/√(1 + Σ niveau²)) pour ne pas saturer.
+- **Formant Follow** (0-100 %) : part du décalage de hauteur que suivent
+  les formants. 100 % = rééchantillonnage : chipmunk vers le haut, voix
+  de monstre vers le bas ; le bouton Formant s'ajoute par-dessus.
+- **Freeze** : garde le dernier grain voisé (ou attend le prochain) et le
+  rejoue en continu, fondu de 25 ms à l'entrée et à la sortie. Une note
+  MIDI tenue le **joue à sa hauteur** (Pitch par-dessus) ; sans note, il
+  garde la hauteur qu'il avait. Formant et Formant Follow s'y appliquent
+  en direct.
+- **Robot** (0-100 %) : voix monocorde. Chaque phrase (après 60 ms sans
+  voisement) est tenue sur sa première note corrigée, ou sur la note MIDI
+  tenue. Entre 0 et 100 %, mélange géométrique avec la correction.
+- **Glitch** : rien n'est laissé au hasard. *Glitch Mode* choisit
+  l'effet (Repeat, Stutter, Reverse, Tape = demi-vitesse), *Glitch Rate*
+  la longueur d'un pas (1/4 à 1/32, sur le tempo et les mesures de
+  l'hôte), *Glitch* la densité : la part des pas de chaque mesure qui
+  sont glitchés, toujours les mêmes (le dernier pas d'abord, comme un
+  fill, puis répartis sur la mesure), donc une mesure sonne pareil à
+  chaque fois et monter le bouton ne fait qu'ajouter des pas. L'éditeur
+  montre les pas allumés. *Glitch Hold* glitche tous les pas tant qu'il
+  est enfoncé (bouton de jeu live, automatisable). Des pas glitchés à la
+  suite gardent la tranche attrapée (beat repeat). Lecture dans le passé,
+  fondus de 3 ms : aucune latence, pas de clic.
+
+Le panneau **Manipulate** remplace le graphe de hauteur en mode Creative.
+Rendu hors ligne : `key=valeur@t` change un réglage au temps `t`
+(`freeze=1@1.0 freeze=0@4.6`). Rendus d'écoute dans `ecoute/creative/`.
+
+Plus tard : morphing entre réglages (étape 8, avec presets et macros),
+analyse partagée par l'harmoniseur (étape 6, sur la même mécanique que
+les couches).
+
 ## Modes
 
 | Mode | Intention | Formants |
@@ -232,8 +279,8 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
    (cœur du mode Natural), formant séparé ; latence ensuite ramenée à
    1,6 période de la note la plus grave (réglage *Voice*).
 4. Autotune : gammes, notes MIDI, vitesse de retune, humanisation.
-5. Formants indépendants et modes façon Manipulator (freeze, glitch,
-   octaves).
+5. **Modes façon Manipulator** : couches d'octave, formants qui suivent,
+   freeze jouable au MIDI, robot, glitch au tempo.
 6. Harmoniseur MIDI polyphonique.
 7. Vocodeur et talkbox avec porteuse interne.
 8. Interface complète, presets, macros, MIDI learn, zoom.

@@ -1,7 +1,7 @@
 //! What the audio thread publishes for the editor: lock-free atomics,
 //! written once per block, read once per frame.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 #[derive(Debug, Default)]
 pub struct Shared {
@@ -18,6 +18,8 @@ pub struct Shared {
     tune_target: AtomicU32,
     tune_out: AtomicU32,
     tune_mask: AtomicU32,
+    /// A frozen grain is sounding (Creative mode).
+    frozen: AtomicBool,
 }
 
 impl Shared {
@@ -41,6 +43,10 @@ impl Shared {
             .store(t.target.to_bits(), Ordering::Relaxed);
         self.tune_out.store(t.out.to_bits(), Ordering::Relaxed);
         self.tune_mask.store(u32::from(mask), Ordering::Relaxed);
+    }
+
+    pub fn publish_frozen(&self, frozen: bool) {
+        self.frozen.store(frozen, Ordering::Relaxed);
     }
 
     /// The latency moves with the voice range.
@@ -68,6 +74,7 @@ impl Shared {
             tune_out: f32::from_bits(self.tune_out.load(Ordering::Relaxed)),
             #[allow(clippy::cast_possible_truncation)]
             tune_mask: self.tune_mask.load(Ordering::Relaxed) as u16,
+            frozen: self.frozen.load(Ordering::Relaxed),
         }
     }
 }
