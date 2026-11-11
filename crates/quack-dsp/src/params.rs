@@ -106,9 +106,12 @@ pub enum ParamId {
     Mix,
     Mode,
     Bypass,
+    Pitch,
+    Fine,
+    Formant,
 }
 
-pub const PARAM_COUNT: usize = 5;
+pub const PARAM_COUNT: usize = 8;
 
 const SPECS: [ParamSpec; PARAM_COUNT] = [
     ParamSpec {
@@ -161,6 +164,39 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Bool { default: false },
     },
+    ParamSpec {
+        key: "pitch",
+        host_id: 200,
+        name: "Pitch",
+        unit: "st",
+        kind: ParamKind::Float {
+            min: -24.0,
+            max: 24.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "fine",
+        host_id: 201,
+        name: "Fine",
+        unit: "ct",
+        kind: ParamKind::Float {
+            min: -100.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "formant",
+        host_id: 202,
+        name: "Formant",
+        unit: "st",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -170,6 +206,9 @@ impl ParamId {
         Self::Mix,
         Self::Mode,
         Self::Bypass,
+        Self::Pitch,
+        Self::Fine,
+        Self::Formant,
     ];
 
     #[must_use]

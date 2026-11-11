@@ -34,6 +34,9 @@ fn editor_captures() {
         v.set(ParamId::Mode, mode);
         v.set(ParamId::InputGain, 3.0);
         v.set(ParamId::Mix, 80.0);
+        v.set(ParamId::Pitch, if mode == 0.0 { -5.0 } else { 12.0 });
+        v.set(ParamId::Fine, if mode == 0.0 { 12.0 } else { 0.0 });
+        v.set(ParamId::Formant, if mode == 0.0 { 0.0 } else { 4.5 });
         let params = Values(RefCell::new(v));
         let view = View {
             held_notes: (1 << 57) | (1 << 64),

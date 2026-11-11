@@ -56,6 +56,51 @@ calculées sur le signal plein débit, guidées par cette lecture).
 L'éditeur affiche la note, l'écart en cents, la fréquence et la
 confiance.
 
+## Pitch shift naturel (étape 3)
+
+`quack_dsp::shift::Psola`, un TD-PSOLA temps réel guidé par le
+détecteur, à la place de la ligne de retard du chemin traité :
+
+- **marques d'analyse** : une par période, sur le pic du signal passe-bas
+  (1 kHz) cherché à ±0,3 période autour de la position prédite (dernière
+  marque + période lue). Elles suivent l'onde elle-même, donc le retard
+  de lecture du détecteur et le vibrato ne les brouillent pas. En non
+  voisé, une marque toutes les 2,5 ms ;
+- **grains** : fenêtre de Hann asymétrique qui va de la marque précédente
+  à la suivante (deux périodes). Un grain contient une impulsion
+  glottique et la réponse du conduit vocal : sa forme *est* l'enveloppe
+  spectrale. Les grains voisins somment à exactement 1 sans transposition :
+  le shifter est transparent quand il ne fait rien ;
+- **synthèse** : grains replacés tous les `période / ratio`, chacun
+  prenant le grain d'analyse le plus proche dans le temps (répété en
+  montant, sauté en descendant). La hauteur bouge, la forme du grain non :
+  les formants restent en place, sans effet chipmunk ou monstre, et sans
+  le côté « phasy » d'un vocodeur de phase ;
+- **formant séparé** : lire le grain plus vite ou plus lentement déplace
+  l'enveloppe sans toucher la hauteur (±12 demi-tons) ;
+- **non voisé** (s, f, ch, souffle) : toujours replacé tel quel, jamais
+  transposé (du bruit transposé bourdonne) ;
+- niveau gardé à peu près constant (gain `√(formant / ratio)` par grain).
+
+Réglages : *Pitch* (±24 demi-tons), *Fine* (±100 cents), *Formant*
+(±12 demi-tons), lissés sur 20 ms dans le moteur. Ids hôte 200 à 202.
+
+**Latence.** Le budget de 10 ms est gardé et gelé : la sortie est
+l'entrée retardée d'exactement 10 ms. Un grain a besoin de ses deux
+périodes complètes ; sous environ 120 Hz c'est plus que le budget, et le
+shifter prend alors le dernier grain complet, ce qui retarde le contenu
+des voix graves de quelques millisecondes de plus (sans clic, sans
+changer la latence déclarée). À la reprise d'une note après un silence
+ou une consonne, les ~25 ms que met le détecteur à se décider passent
+sans transposition : à écouter sur de vraies prises, l'étape 4 pourra
+ajouter une estimation rapide locale si ça s'entend.
+
+Tests : transposition de -12 à +12 demi-tons à moins de 10 cents
+(voyelle synthétique de 130 à 330 Hz), formants en place à ±1 octave
+(centroïde spectral) mais déplacés quand on le demande, transparence
+sans transposition (bruit à l'échantillon près, voyelle à -23 dB
+d'erreur), voix grave à 70 Hz, pas d'allocation dans `process`.
+
 ## Modes
 
 | Mode | Intention | Formants |
@@ -81,10 +126,10 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
 
 1. **Socle** : workspace, AU v2 / VST3 / CLAP, passthrough,
    MIDI, latence déclarée, interface DuckDSP, script de bundle, CI.
-2. **Détection de pitch** (cette étape) : YIN, décision voisé / non
+2. **Détection de pitch** : YIN, décision voisé / non
    voisé, confiance, lissage, affichage dans l'éditeur.
-3. Pitch shift naturel avec préservation des formants (cœur du mode
-   Natural), mesure et gel du budget de latence.
+3. **Pitch shift naturel** (cette étape) avec préservation des formants
+   (cœur du mode Natural), formant séparé, budget de latence gelé à 10 ms.
 4. Autotune : gammes, notes MIDI, vitesse de retune, humanisation.
 5. Formants indépendants et modes façon Manipulator (freeze, glitch,
    octaves).
