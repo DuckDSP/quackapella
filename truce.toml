@@ -1,0 +1,24 @@
+# truce project configuration.
+# AU codes (provisional until the first release): manufacturer DKDS is
+# shared by every DuckDSP plugin, each plugin gets its own subtype. Once
+# shipped they are permanent: changing them makes Logic treat the plugin
+# as a different one and breaks saved projects.
+[vendor]
+name = "DuckDSP"
+id = "com.duckdsp"
+url = "https://example.invalid/"
+au_manufacturer = "DKDS"
+
+[[plugin]]
+name = "Quackapella"
+bundle_id = "quackapella"
+crate = "quack-plugin"
+category = "effect"
+# An effect with MIDI input: truce registers it as an AU `aumf`
+# (MusicEffect), so Logic can route a MIDI track to it (side-chain MIDI
+# for the autotune notes and the harmonizer).
+midi_input = true
+fourcc = "Qkpl"
+au3_subtype = "Qkp3"
+au_tag = "Effects"
+vst3_subcategory = "Pitch Shift"

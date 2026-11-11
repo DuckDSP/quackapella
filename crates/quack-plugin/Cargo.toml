@@ -1,0 +1,38 @@
+[package]
+name = "quack-plugin"
+description = "Plugin adapter: maps host formats (AUv2 first, VST3, CLAP) onto quack-dsp. No DSP lives here."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# AUv2 is opt-in (`--features au`, or `cargo truce build --au2`) because
+# truce-au only builds on macOS.
+default = ["clap", "vst3"]
+clap = ["dep:truce-clap", "dep:clap-sys", "truce/clap"]
+vst3 = ["dep:truce-vst3", "truce/vst3"]
+au = ["dep:truce-au"]
+# Counts allocations on the audio thread in tests.
+rt-paranoid = ["truce/rt-paranoid"]
+
+[dependencies]
+quack-dsp = { workspace = true }
+quack-ui = { workspace = true }
+truce = { workspace = true }
+truce-core = { workspace = true }
+truce-params = { workspace = true }
+truce-egui = { workspace = true }
+truce-font = { workspace = true }
+egui = { workspace = true }
+truce-clap = { workspace = true, optional = true }
+clap-sys = { workspace = true, optional = true }
+truce-vst3 = { workspace = true, optional = true }
+truce-au = { workspace = true, optional = true }
+
+[dev-dependencies]
+truce-test = { workspace = true }

@@ -1,0 +1,239 @@
+//! Parameter registry: the single source of truth for ids, names,
+//! ranges and defaults. The plugin adapter declares the same parameters
+//! to the host (a test checks they match) and the editor reads ranges
+//! from here.
+//!
+//! Host ids are permanent once a version ships (saved projects and
+//! automation refer to them). Ranges reserved for the next steps:
+//! `100..` pitch detection, `200..` pitch / formant shift, `300..`
+//! autotune, `400..` harmonizer, `500..` vocoder, `600..` Manipulator
+//! style effects.
+
+/// How a parameter maps between plain and normalized (0..1) values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamKind {
+    /// Linear range.
+    Float {
+        min: f64,
+        max: f64,
+        default: f64,
+    },
+    Bool {
+        default: bool,
+    },
+    /// Index into `count` choices.
+    Enum {
+        count: u32,
+        default: u32,
+    },
+}
+
+impl ParamKind {
+    #[must_use]
+    pub fn default_plain(self) -> f64 {
+        match self {
+            Self::Float { default, .. } => default,
+            Self::Bool { default } => f64::from(u8::from(default)),
+            Self::Enum { default, .. } => f64::from(default),
+        }
+    }
+
+    #[must_use]
+    pub fn min(self) -> f64 {
+        match self {
+            Self::Float { min, .. } => min,
+            Self::Bool { .. } | Self::Enum { .. } => 0.0,
+        }
+    }
+
+    #[must_use]
+    pub fn max(self) -> f64 {
+        match self {
+            Self::Float { max, .. } => max,
+            Self::Bool { .. } => 1.0,
+            Self::Enum { count, .. } => f64::from(count.saturating_sub(1)),
+        }
+    }
+
+    /// Clamp, and round the stepped kinds.
+    #[must_use]
+    pub fn sanitize(self, plain: f64) -> f64 {
+        let v = if plain.is_finite() {
+            plain
+        } else {
+            self.default_plain()
+        };
+        let v = v.clamp(self.min(), self.max());
+        match self {
+            Self::Float { .. } => v,
+            Self::Bool { .. } | Self::Enum { .. } => v.round(),
+        }
+    }
+
+    #[must_use]
+    pub fn normalize(self, plain: f64) -> f64 {
+        let span = self.max() - self.min();
+        if span <= 0.0 {
+            return 0.0;
+        }
+        ((self.sanitize(plain) - self.min()) / span).clamp(0.0, 1.0)
+    }
+
+    #[must_use]
+    pub fn denormalize(self, norm: f64) -> f64 {
+        self.sanitize(self.min() + norm.clamp(0.0, 1.0) * (self.max() - self.min()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParamSpec {
+    /// Stable text key (presets, tests).
+    pub key: &'static str,
+    /// Host parameter id (permanent once shipped).
+    pub host_id: u32,
+    /// Name shown by the host.
+    pub name: &'static str,
+    pub unit: &'static str,
+    pub kind: ParamKind,
+}
+
+/// The engine's parameters, in host order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ParamId {
+    InputGain,
+    OutputGain,
+    Mix,
+    Mode,
+    Bypass,
+}
+
+pub const PARAM_COUNT: usize = 5;
+
+const SPECS: [ParamSpec; PARAM_COUNT] = [
+    ParamSpec {
+        key: "input_gain",
+        host_id: 0,
+        name: "Input Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -24.0,
+            max: 24.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "output_gain",
+        host_id: 1,
+        name: "Output Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -24.0,
+            max: 24.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "mix",
+        host_id: 2,
+        name: "Mix",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "mode",
+        host_id: 3,
+        name: "Mode",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::mode::VoiceMode::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "bypass",
+        host_id: 4,
+        name: "Bypass",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+];
+
+impl ParamId {
+    pub const ALL: [Self; PARAM_COUNT] = [
+        Self::InputGain,
+        Self::OutputGain,
+        Self::Mix,
+        Self::Mode,
+        Self::Bypass,
+    ];
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[must_use]
+    pub const fn spec(self) -> &'static ParamSpec {
+        &SPECS[self as usize]
+    }
+
+    #[must_use]
+    pub fn from_host_id(id: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.spec().host_id == id)
+    }
+}
+
+/// Plain values of every parameter, indexed by [`ParamId::index`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParamValues(pub [f64; PARAM_COUNT]);
+
+impl Default for ParamValues {
+    fn default() -> Self {
+        Self(ParamId::ALL.map(|p| p.spec().kind.default_plain()))
+    }
+}
+
+impl ParamValues {
+    #[must_use]
+    pub fn get(&self, id: ParamId) -> f64 {
+        self.0[id.index()]
+    }
+
+    pub fn set(&mut self, id: ParamId, plain: f64) {
+        self.0[id.index()] = id.spec().kind.sanitize(plain);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_and_keys_are_unique_and_in_order() {
+        for (i, p) in ParamId::ALL.iter().enumerate() {
+            assert_eq!(p.index(), i);
+            assert_eq!(ParamId::from_host_id(p.spec().host_id), Some(*p));
+            for q in &ParamId::ALL[i + 1..] {
+                assert_ne!(p.spec().key, q.spec().key);
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_round_trips_and_clamps() {
+        for p in ParamId::ALL {
+            let k = p.spec().kind;
+            for n in [0.0, 0.25, 0.5, 1.0] {
+                let plain = k.denormalize(n);
+                assert!((k.denormalize(k.normalize(plain)) - plain).abs() < 1e-9);
+            }
+            assert_eq!(k.sanitize(f64::NAN), k.default_plain());
+            assert_eq!(k.sanitize(1e9), k.max());
+        }
+    }
+}
