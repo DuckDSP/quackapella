@@ -50,6 +50,10 @@ const VOICED_OFF: f32 = 0.40;
 const GATE_DB: f32 = -55.0;
 /// Shortest comparison window of the onset check, in seconds.
 const ONSET_WINDOW_S: f64 = 0.005;
+/// The onset check only takes clearly periodic readings...
+const ONSET_MAX_APERIODICITY: f32 = 0.1;
+/// ...that two hops in a row agree on, within this many semitones.
+const ONSET_AGREEMENT_ST: f32 = 0.5;
 /// Readings in the median smoother (odd).
 pub const MEDIAN_LEN: usize = 5;
 
@@ -155,6 +159,8 @@ pub struct Yin {
     window: usize,
     /// Shortest window of the onset check, in analysis samples.
     onset_window: usize,
+    /// Onset check's lag at the previous hop, waiting for confirmation.
+    onset_candidate: Option<f32>,
     tau_min: usize,
     tau_max: usize,
     /// Last `window + tau_max + 2` analysis samples, circular.
@@ -242,13 +248,24 @@ impl Yin {
         if !voiced {
             // The long frame still holds the silence before a note: look
             // at the last two periods only, so the note is read ~10 ms
-            // after it starts instead of ~30 ms.
-            if onset_ms >= self.gate
-                && let Some(r) = self.recent_period()
+            // after it starts instead of ~30 ms. A consonant burst can
+            // look periodic over so short a window once: only a clearly
+            // periodic reading confirmed by the next hop counts.
+            let candidate = if onset_ms >= self.gate {
+                self.recent_period()
+                    .filter(|r| r.1 < ONSET_MAX_APERIODICITY)
+            } else {
+                None
+            };
+            if let (Some(r), Some(prev)) = (candidate, self.onset_candidate)
+                && (12.0 * (r.0 / prev).log2()).abs() < ONSET_AGREEMENT_ST
             {
                 reading = Some(r);
                 voiced = true;
             }
+            self.onset_candidate = candidate.map(|r| r.0);
+        } else {
+            self.onset_candidate = None;
         }
         self.voiced = voiced;
         match reading {
@@ -411,6 +428,7 @@ impl PitchDetector for Yin {
         self.phase = 0;
         self.since_hop = 0;
         self.voiced = false;
+        self.onset_candidate = None;
         self.history_len = 0;
         self.history_pos = 0;
         self.current = None;
