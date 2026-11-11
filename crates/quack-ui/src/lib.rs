@@ -223,13 +223,26 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         range.name(),
         color::QUACK,
     );
-    text(
+    let voice_caption = text(
         &p,
         pos2(voice_r.left() - space::S, head_y),
         Align2::RIGHT_CENTER,
         "Voice",
         size::CAPTION,
         color::TEXT_FAINT,
+    );
+    // Shorter grain attacks for low voices: less latency.
+    let low_r = Rect::from_min_size(
+        pos2(voice_caption.left() - space::XL - 120.0, head_y - 15.0),
+        vec2(120.0, 30.0),
+    );
+    controls::toggle(
+        ui,
+        params,
+        ParamId::LowLatency,
+        low_r,
+        "Low Latency",
+        color::QUACK,
     );
 
     // Mode panel.

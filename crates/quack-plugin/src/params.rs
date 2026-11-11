@@ -272,6 +272,11 @@ pub struct QuackParams {
     #[param(id = 100, name = "Voice", default = 1)]
     pub voice: EnumParam<VoiceParam>,
 
+    /// Shorter grain attacks: less latency, formants a little less
+    /// faithful.
+    #[param(id = 101, name = "Low Latency")]
+    pub low_latency: BoolParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -337,6 +342,10 @@ impl QuackParams {
         );
         #[allow(clippy::cast_precision_loss)]
         v.set(ParamId::Voice, self.voice.value().to_index() as f64);
+        v.set(
+            ParamId::LowLatency,
+            f64::from(u8::from(self.low_latency.value())),
+        );
         v
     }
 }

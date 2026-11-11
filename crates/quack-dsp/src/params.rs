@@ -131,9 +131,10 @@ pub enum ParamId {
     MidiGate,
     Transition,
     Voice,
+    LowLatency,
 }
 
-pub const PARAM_COUNT: usize = 30;
+pub const PARAM_COUNT: usize = 31;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -421,6 +422,13 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 1,
         },
     },
+    ParamSpec {
+        key: "low_latency",
+        host_id: 101,
+        name: "Low Latency",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 impl ParamId {
@@ -455,6 +463,7 @@ impl ParamId {
         Self::MidiGate,
         Self::Transition,
         Self::Voice,
+        Self::LowLatency,
     ];
 
     #[must_use]

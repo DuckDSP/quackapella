@@ -61,17 +61,34 @@ impl VoiceRange {
     }
 }
 
-/// Latency at `sample_rate` for a voice in `range`, in samples.
+/// Share of a period the grains fade in over in the Low Latency mode
+/// (1 otherwise): 30 % less latency, formants a little less faithful
+/// (about 1 dB more envelope error on average, see the `latency`
+/// example).
+pub const LOW_LATENCY_ATTACK: f64 = 0.5;
+
+/// Grain attack for the Low Latency switch.
 #[must_use]
-pub fn latency_samples(sample_rate: f64, range: VoiceRange) -> usize {
-    Psola::latency_for(sample_rate.max(8_000.0), range.lowest_hz(), 1.0)
+pub fn attack(low_latency: bool) -> f64 {
+    if low_latency { LOW_LATENCY_ATTACK } else { 1.0 }
+}
+
+/// Latency at `sample_rate` for a voice in `range`, in samples, with the
+/// Low Latency switch on or off.
+#[must_use]
+pub fn latency_samples(sample_rate: f64, range: VoiceRange, low_latency: bool) -> usize {
+    Psola::latency_for(
+        sample_rate.max(8_000.0),
+        range.lowest_hz(),
+        attack(low_latency),
+    )
 }
 
 /// Longest latency at `sample_rate` (the lowest range): what the delay
 /// lines are allocated for.
 #[must_use]
 pub fn max_latency_samples(sample_rate: f64) -> usize {
-    latency_samples(sample_rate, VoiceRange::Bass)
+    latency_samples(sample_rate, VoiceRange::Bass, false)
 }
 
 /// Delay line, allocated once in [`DelayLine::prepare`], whose delay can
@@ -134,20 +151,25 @@ mod tests {
     #[test]
     fn latency_follows_the_lowest_note() {
         // 1.6 periods of the lowest note, plus a few samples.
-        assert_eq!(latency_samples(48_000.0, VoiceRange::Tenor), 591);
-        assert_eq!(latency_samples(48_000.0, VoiceRange::High), 443);
-        let ms = |r| latency_samples(48_000.0, r) as f64 / 48.0;
+        assert_eq!(latency_samples(48_000.0, VoiceRange::Tenor, false), 591);
+        assert_eq!(latency_samples(48_000.0, VoiceRange::High, false), 443);
+        let ms = |r| latency_samples(48_000.0, r, false) as f64 / 48.0;
         assert!(ms(VoiceRange::High) < 10.0);
+        // Low Latency: the Tenor range under 10 ms, and never longer.
+        assert!((latency_samples(48_000.0, VoiceRange::Tenor, true) as f64 / 48.0) < 9.0);
+        for r in VoiceRange::ALL {
+            assert!(latency_samples(48_000.0, r, true) < latency_samples(48_000.0, r, false));
+        }
         assert!(ms(VoiceRange::Bass) < 22.0);
         // Same time at any rate.
         for r in VoiceRange::ALL {
-            let a = latency_samples(44_100.0, r) as f64 / 44.1;
-            let b = latency_samples(96_000.0, r) as f64 / 96.0;
+            let a = latency_samples(44_100.0, r, false) as f64 / 44.1;
+            let b = latency_samples(96_000.0, r, false) as f64 / 96.0;
             assert!((a - ms(r)).abs() < 0.1 && (b - ms(r)).abs() < 0.1);
         }
         assert_eq!(
             max_latency_samples(48_000.0),
-            latency_samples(48_000.0, VoiceRange::Bass)
+            latency_samples(48_000.0, VoiceRange::Bass, false)
         );
     }
 

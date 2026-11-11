@@ -47,6 +47,7 @@ pub struct Engine {
     sample_rate: f64,
     latency: usize,
     range: VoiceRange,
+    low_latency: bool,
     values: ParamValues,
     mode: VoiceMode,
     in_gain: Ramp,
@@ -81,6 +82,7 @@ impl Engine {
             sample_rate: 48_000.0,
             latency: 0,
             range: VoiceRange::default(),
+            low_latency: false,
             values: ParamValues::default(),
             mode: VoiceMode::default(),
             in_gain: Ramp::new(1.0),
@@ -127,8 +129,21 @@ impl Engine {
         self.notes.clear();
         self.latency = max;
         self.range = VoiceRange::from_index(self.values.get(ParamId::Voice));
-        self.set_latency(latency_samples(sample_rate, self.range));
+        self.low_latency = self.values.get(ParamId::LowLatency) >= 0.5;
+        self.apply_latency();
         self.apply_all(true);
+    }
+
+    /// Latency and grain attack from the voice range and the Low Latency
+    /// switch.
+    fn apply_latency(&mut self) {
+        self.shifter
+            .set_attack(crate::latency::attack(self.low_latency));
+        self.set_latency(latency_samples(
+            self.sample_rate,
+            self.range,
+            self.low_latency,
+        ));
     }
 
     /// Move every delay to `latency` and clear the audio (the output
@@ -250,7 +265,15 @@ impl Engine {
                 let range = VoiceRange::from_index(f64::from(v));
                 if range != self.range {
                     self.range = range;
-                    self.set_latency(latency_samples(self.sample_rate, range));
+                    self.apply_latency();
+                }
+                return;
+            }
+            ParamId::LowLatency => {
+                let low = v >= 0.5;
+                if low != self.low_latency {
+                    self.low_latency = low;
+                    self.apply_latency();
                 }
                 return;
             }

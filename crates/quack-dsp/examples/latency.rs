@@ -140,7 +140,7 @@ fn main() {
             v.set(ParamId::Voice, f64::from(range as u8));
             v.set(ParamId::Pitch, 7.0);
             #[allow(clippy::cast_precision_loss)]
-            let reported = latency_samples(SR, range) as f64 / SR * 1000.0;
+            let reported = latency_samples(SR, range, false) as f64 / SR * 1000.0;
             let mut row = format!("{:<15} {reported:>9.2}", range.name());
             for hz in notes {
                 let (mean, _) = measure(&vowel(hz, 1.0), SR, &v, block);
@@ -149,7 +149,7 @@ fn main() {
             println!("{row}");
         }
     }
-    println!("-- short attack (not used by the engine): latency per range, ms");
+    println!("-- Low Latency switch off (attack 1) and on (0.5): latency per range, ms");
     for attack in [1.0, 0.5, 0.3] {
         let mut row = format!("attack {attack:<4}");
         for range in VoiceRange::ALL {

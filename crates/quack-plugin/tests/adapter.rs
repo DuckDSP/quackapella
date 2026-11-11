@@ -73,7 +73,7 @@ fn reported_latency_is_the_real_one() {
         let lat = Quackapella::latency(&dsp) as usize;
         assert_eq!(
             lat,
-            quack_dsp::latency::latency_samples(sr, VoiceRange::default())
+            quack_dsp::latency::latency_samples(sr, VoiceRange::default(), false)
         );
         assert_eq!(params.shared.view().latency_samples as usize, lat);
         // Longer than one scratch pass.
@@ -99,13 +99,26 @@ fn voice_range_moves_the_reported_latency() {
         // The range applies at the next block; the impulse comes after.
         run(&mut dsp, &params, &x, &EventList::default());
         let lat = Quackapella::latency(&dsp) as usize;
-        assert_eq!(lat, quack_dsp::latency::latency_samples(SR, *range));
+        assert_eq!(lat, quack_dsp::latency::latency_samples(SR, *range, false));
         assert_eq!(params.shared.view().latency_samples as usize, lat);
         x[100] = 0.5;
         let out = run(&mut dsp, &params, &x, &EventList::default());
         let at = out[0].iter().position(|&v| v != 0.0).expect("impulse out");
         assert_eq!(at, 100 + lat, "{}", range.name());
     }
+    // Low Latency: shorter, still the real one.
+    params.low_latency.set_value(true);
+    let mut x = vec![0.0f32; 2048];
+    run(&mut dsp, &params, &x, &EventList::default());
+    let lat = Quackapella::latency(&dsp) as usize;
+    assert_eq!(
+        lat,
+        quack_dsp::latency::latency_samples(SR, VoiceRange::Bass, true)
+    );
+    x[100] = 0.5;
+    let out = run(&mut dsp, &params, &x, &EventList::default());
+    let at = out[0].iter().position(|&v| v != 0.0).expect("impulse out");
+    assert_eq!(at, 100 + lat);
 }
 
 #[test]

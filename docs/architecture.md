@@ -139,9 +139,16 @@ change rien : tout est calculé échantillon par échantillon.
 
 Mesure : `cargo run --release -p quack-dsp --example latency` (tableau
 par voix et par note, blocs de 32 et 64), `-- PRISE.wav` (retard moyen et
-pire sur une vraie prise), `-- --attack` (option non activée : grains à
-attaque courte, 8,5 ms au lieu de 12,3 en Tenor, au prix d'environ 1 dB
-d'écart de formants en moyenne et 7 dB au pire).
+pire sur une vraie prise), `-- --attack` (coût en qualité de l'attaque
+courte).
+
+**Low Latency** (id 101, désactivé par défaut) : les grains montent sur
+une demi-période au lieu d'une période entière, puis restent pleins
+jusqu'au grain suivant (la somme reste exacte sans transposition). La
+latence tombe à 1,1 période : Soprano / Alto 6,4 ms, Tenor 8,5 ms,
+Baritone 11,3 ms, Bass 15,1 ms. En contrepartie, les formants sont un peu
+moins fidèles (environ 1 dB d'écart d'enveloppe en plus en moyenne, 7 dB
+au pire sur une voyelle de synthèse), et le choix se fait à l'oreille.
 
 À la reprise d'une note, les ~10 ms que met le détecteur à se décider
 passent sans transposition, puis le glissé prend le relais.
