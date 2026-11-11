@@ -44,6 +44,10 @@ d'entrée, somme mono), en lecture seule :
 - voisé / non voisé avec hystérésis (apériodicité < 0,25 pour entrer,
   > 0,40 pour sortir) et porte à -55 dBFS : consonnes, souffle et
   silence ne donnent aucune lecture ;
+- à l'attaque, tant que la longue fenêtre contient encore le silence
+  d'avant, une vérification courte compare seulement les deux dernières
+  périodes (au moins 5 ms) : la note est lue environ 10 ms après son
+  début au lieu de 30 ;
 - médiane sur 5 lectures, en demi-tons : un saut d'octave isolé est
   rejeté, un vrai changement de note passe 5 ms plus tard ;
 - confiance = 1 - apériodicité, que le pitch shift (étape 3) et
@@ -80,7 +84,13 @@ détecteur, à la place de la ligne de retard du chemin traité :
   l'enveloppe sans toucher la hauteur (±12 demi-tons) ;
 - **non voisé** (s, f, ch, souffle) : toujours replacé tel quel, jamais
   transposé (du bruit transposé bourdonne) ;
-- niveau gardé à peu près constant (gain `√(formant / ratio)` par grain).
+- niveau gardé à peu près constant (gain `√(formant / ratio)` par grain) ;
+- **attaques** : les premiers grains d'une note glissent en 12 ms de la
+  hauteur chantée vers la hauteur visée (un petit scoop, au lieu d'un saut
+  qui claque), une coupure du détecteur de moins de 10 ms garde la
+  dernière période (pas de va-et-vient entre grains transposés et non
+  transposés), et un grain plus large que le précédent est décalé plutôt
+  que coupé.
 
 Réglages : *Pitch* (±24 demi-tons), *Fine* (±100 cents), *Formant*
 (±12 demi-tons), lissés sur 20 ms dans le moteur. Ids hôte 200 à 202.
@@ -90,10 +100,9 @@ l'entrée retardée d'exactement 10 ms. Un grain a besoin de ses deux
 périodes complètes ; sous environ 120 Hz c'est plus que le budget, et le
 shifter prend alors le dernier grain complet, ce qui retarde le contenu
 des voix graves de quelques millisecondes de plus (sans clic, sans
-changer la latence déclarée). À la reprise d'une note après un silence
-ou une consonne, les ~25 ms que met le détecteur à se décider passent
-sans transposition : à écouter sur de vraies prises, l'étape 4 pourra
-ajouter une estimation rapide locale si ça s'entend.
+changer la latence déclarée). À la reprise d'une note, les ~10 ms que met
+le détecteur à se décider passent sans transposition, puis le glissé
+prend le relais.
 
 Tests : transposition de -12 à +12 demi-tons à moins de 10 cents
 (voyelle synthétique de 130 à 330 Hz), formants en place à ±1 octave

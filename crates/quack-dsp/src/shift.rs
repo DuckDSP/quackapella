@@ -48,6 +48,13 @@ const UNVOICED_FRACTION: usize = 4;
 const SEARCH: f64 = 0.3;
 /// Low-pass of the mark search signal: keeps the fundamental's peak.
 const MARK_LOWPASS_HZ: f64 = 1_000.0;
+/// Time the voicing glides over when the voice starts or stops: the
+/// first grains of a note move from the sung pitch to the target (a
+/// short scoop) instead of jumping, which would click.
+const GLIDE_S: f64 = 0.012;
+/// A detector dropout shorter than this keeps the last period, so a
+/// rough onset does not flip between shifted and unshifted grains.
+const HOLD_S: f64 = 0.010;
 /// Analysis marks remembered (several periods of the lowest voice).
 const MARKS: usize = 256;
 /// Widest formant shift supported by the buffers (ratio 0.5 to 2).
@@ -94,6 +101,13 @@ pub struct Psola {
     next_s: f64,
     /// How far ahead of the output the next grain must be placed.
     lead: f64,
+    /// 0 (unvoiced, unshifted) to 1 (voiced, fully shifted).
+    voicing: f64,
+    glide: f64,
+    /// Last detected period and how many samples it is still held for.
+    held_period: f32,
+    hold: usize,
+    hold_len: usize,
 }
 
 impl Psola {
@@ -127,6 +141,8 @@ impl Psola {
         self.marks = vec![Mark::default(); MARKS];
         self.out_mask = out_len - 1;
         self.lowpass = [Biquad::lowpass(sr, MARK_LOWPASS_HZ); 2];
+        self.glide = sr * GLIDE_S;
+        self.hold_len = (sr * HOLD_S) as usize;
         self.reset();
     }
 
@@ -142,6 +158,8 @@ impl Psola {
         self.n = 0;
         self.count = 0;
         self.next_s = 0.0;
+        self.voicing = 0.0;
+        self.hold = 0;
         #[allow(clippy::cast_precision_loss)]
         let u = self.unvoiced as f64;
         self.lead = u;
@@ -177,6 +195,18 @@ impl Psola {
         let mono = 0.5 * (left + right);
         let lp = self.lowpass[0].tick(mono);
         self.search[i] = self.lowpass[1].tick(lp);
+        let period = match period {
+            Some(p) => {
+                self.held_period = p;
+                self.hold = self.hold_len;
+                Some(p)
+            }
+            None if self.hold > 0 => {
+                self.hold -= 1;
+                Some(self.held_period)
+            }
+            None => None,
+        };
         self.place_mark(period);
 
         let pr = pitch_ratio.clamp(1.0 / MAX_PITCH_RATIO, MAX_PITCH_RATIO);
@@ -269,13 +299,27 @@ impl Psola {
         } else {
             right
         };
+        let step = right / self.glide;
+        self.voicing = if m.voiced {
+            (self.voicing + step).min(1.0)
+        } else {
+            (self.voicing - step).max(0.0)
+        };
+        // Unvoiced grains are never shifted: noise put back at another
+        // spacing would buzz.
         let (ratio, fr) = if m.voiced {
-            (pitch_ratio, formant_ratio)
+            (
+                pitch_ratio.powf(self.voicing),
+                formant_ratio.powf(self.voicing),
+            )
         } else {
             (1.0, 1.0)
         };
         let (hl, hr) = (left / fr, right / fr);
-        let start = (s - hl).ceil().max(c) as i64;
+        // A grain wider than the previous one (onset, pitch going down)
+        // may be due a little late: move it, never cut its rising edge.
+        let s = s.max(c + hl);
+        let start = (s - hl).ceil() as i64;
         let end = (s + hr).floor() as i64;
         let a = m.pos as f64;
         // More grains per second going up, fewer going down: keep the
@@ -552,5 +596,90 @@ mod tests {
         ps.reset();
         assert_eq!(ps.tick(0.0, 0.0, None, 1.0, 1.0), (0.0, 0.0));
         assert_eq!(ps.latency_samples(), 960);
+    }
+    /// Rough sung onset: breath, then a jittery vowel scooping up to hz.
+    fn sung(hz: f64, seed: u32) -> Vec<f32> {
+        let sr = 48_000.0;
+        let mut x = vec![0.0f32; 4800];
+        let mut s = seed;
+        let mut rnd = move || {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (s >> 8) as f64 / (1u32 << 24) as f64 - 0.5
+        };
+        let n = 28_800;
+        let mut ph = 0.0f64;
+        let mut src = vec![0.0f64; n];
+        let mut jit = 0.0;
+        for (i, v) in src.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f64 / sr;
+            let scoop = if t < 0.06 {
+                -1.5 * (1.0 - t / 0.06)
+            } else {
+                0.0
+            };
+            let f = hz * ((scoop + jit) / 12.0f64).exp2();
+            let prev = ph;
+            ph += f / sr;
+            if ph.floor() != prev.floor() {
+                jit = 0.15 * rnd() * if t < 0.08 { 3.0 } else { 1.0 };
+            }
+            let env_v = (t / 0.03).min(1.0);
+            let breath = 0.15 * (1.0 - (t / 0.08).min(1.0)) + 0.02;
+            *v = env_v * (1.0 - 2.0 * (ph - ph.floor())) + breath * rnd() * 4.0;
+        }
+        let mut out = vec![0.0f64; src.len()];
+        for (f, bw, g) in [
+            (700.0, 90.0, 1.0),
+            (1_150.0, 110.0, 0.6),
+            (2_600.0, 160.0, 0.2),
+        ] {
+            let r = (-std::f64::consts::PI * bw / sr).exp();
+            let a1 = -2.0 * r * (2.0 * std::f64::consts::PI * f / sr).cos();
+            let a2 = r * r;
+            let (mut y1, mut y2) = (0.0, 0.0);
+            for (o, &v) in out.iter_mut().zip(&src) {
+                let y = (1.0 - r) * v - a1 * y1 - a2 * y2;
+                y2 = y1;
+                y1 = y;
+                *o += g * y;
+            }
+        }
+        let peak = out.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        x.extend(out.iter().map(|v| (0.3 * v / peak) as f32));
+        x.extend(vec![0.0; 2400]);
+        x
+    }
+
+    /// High-frequency energy (second difference) per 5 ms block.
+    fn hf_blocks(y: &[f32]) -> Vec<f32> {
+        let d2: Vec<f32> = y
+            .windows(3)
+            .map(|w| (w[2] - 2.0 * w[1] + w[0]).powi(2))
+            .collect();
+        d2.chunks(240).map(|c| c.iter().sum()).collect()
+    }
+
+    #[test]
+    fn onsets_glide_without_clicks() {
+        for (hz, st) in [(196.0, 7.0), (220.0, -12.0), (330.0, 12.0), (120.0, 5.0)] {
+            let x = sung(hz, 3);
+            let y = shift(&x, st, 0.0);
+            let e = hf_blocks(&y);
+            let mut steady = e[100..130].to_vec();
+            steady.sort_by(f32::total_cmp);
+            let med = steady[15];
+            // Breath, scoop and the first 60 ms of the note.
+            for (b, v) in e[20..44].iter().enumerate() {
+                assert!(
+                    v / med < 2.5,
+                    "{hz} Hz {st:+} st, block {b}: {:.1}x",
+                    v / med
+                );
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let want = hz as f32 * semitones_to_ratio(st);
+            assert!(cents(median_pitch(&y[9_600..]), want).abs() < 20.0);
+        }
     }
 }
