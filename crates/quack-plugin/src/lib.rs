@@ -175,6 +175,10 @@ impl PluginLogic for Quackapella {
             state.run(buffer, pos, total - pos);
         }
         params.shared.publish_notes(state.engine.notes().mask());
+        #[allow(clippy::cast_possible_truncation)]
+        params
+            .shared
+            .publish_latency(state.engine.latency_samples() as u32);
         params.shared.publish_pitch(state.engine.pitch());
         params
             .shared

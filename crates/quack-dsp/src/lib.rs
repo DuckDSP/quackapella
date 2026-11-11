@@ -15,7 +15,7 @@
 //! |---|---|
 //! | [`params`] | Parameter registry: ids, ranges, defaults (source of truth) |
 //! | [`engine`] | Signal chain, latency compensation, dry/wet, bypass [1] |
-//! | [`latency`] | Fixed latency budget and delay lines [1] |
+//! | [`latency`] | Latency per voice range, delay lines [1] |
 //! | [`midi`] | Held notes from the MIDI input [1] |
 //! | [`mode`] | Voice modes, including the *Natural* mode [1] |
 //! | [`pitch`] | Real-time pitch detection (YIN), voicing, confidence [2] |

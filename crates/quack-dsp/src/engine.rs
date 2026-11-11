@@ -9,10 +9,10 @@
 //!      └──────────────────── dry delay ──────────────────────────────────────┘
 //! ```
 //!
-//! The shifter delays the voice by exactly the fixed latency
-//! ([`crate::latency::LATENCY_MS`]), like the dry delay lines, so
-//! dry/wet and bypass never comb and the host's compensation is always
-//! right.
+//! The shifter delays the voice by exactly the latency of the voice
+//! range ([`crate::latency`]), like the dry delay lines, so dry/wet and
+//! bypass never comb and the host's compensation is right (for notes
+//! within the range).
 //!
 //! The autotune ([`Retuner`]) steers the shifter grain by grain: it
 //! gets each grain's own period and returns the grain's pitch ratio
@@ -22,7 +22,7 @@
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
-use crate::latency::{DelayLine, latency_samples};
+use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
 use crate::params::{NOTE_PARAMS, ParamId, ParamValues};
@@ -47,6 +47,8 @@ pub const CHANNELS: usize = 2;
 pub struct Engine {
     sample_rate: f64,
     latency: usize,
+    range: VoiceRange,
+    low_latency: bool,
     values: ParamValues,
     mode: VoiceMode,
     in_gain: Ramp,
@@ -87,6 +89,8 @@ impl Engine {
         let mut e = Self {
             sample_rate: 48_000.0,
             latency: 0,
+            range: VoiceRange::default(),
+            low_latency: false,
             values: ParamValues::default(),
             mode: VoiceMode::default(),
             in_gain: Ramp::new(1.0),
@@ -115,9 +119,10 @@ impl Engine {
     /// Allocates delay lines and resets state. Not for the audio thread.
     pub fn prepare(&mut self, sample_rate: f64, max_block: usize) {
         self.sample_rate = sample_rate;
-        self.latency = latency_samples(sample_rate);
+        // Allocated for the lowest range; the voice range picks the delay.
+        let max = max_latency_samples(sample_rate);
         for d in &mut self.dry {
-            d.prepare(self.latency);
+            d.prepare(max);
         }
         for r in [
             &mut self.in_gain,
@@ -134,15 +139,43 @@ impl Engine {
         }
         self.bypass.prepare(sample_rate, BYPASS_MS);
         self.gate.prepare(sample_rate, GATE_MS);
-        self.gate_delay.prepare(self.latency);
-        self.prime_gate();
+        self.gate_delay.prepare(max);
         self.detector.prepare(sample_rate, max_block);
-        self.shifter.prepare(sample_rate, self.latency);
+        self.shifter.prepare(sample_rate, max);
         self.retuner.prepare(sample_rate);
         self.robot.prepare(sample_rate);
         self.glitch.prepare(sample_rate);
         self.notes.clear();
+        self.latency = max;
+        self.range = VoiceRange::from_index(self.values.get(ParamId::Voice));
+        self.low_latency = self.values.get(ParamId::LowLatency) >= 0.5;
+        self.apply_latency();
         self.apply_all(true);
+    }
+
+    /// Latency and grain attack from the voice range and the Low Latency
+    /// switch.
+    fn apply_latency(&mut self) {
+        self.shifter
+            .set_attack(crate::latency::attack(self.low_latency));
+        self.set_latency(latency_samples(
+            self.sample_rate,
+            self.range,
+            self.low_latency,
+        ));
+    }
+
+    /// Move every delay to `latency` and clear the audio (the output
+    /// timeline moves: the host re-aligns). Real-time safe.
+    fn set_latency(&mut self, latency: usize) {
+        self.latency = latency;
+        for d in &mut self.dry {
+            d.set_delay(latency);
+        }
+        self.gate_delay.set_delay(latency);
+        self.shifter.set_latency(latency);
+        self.shifter.reset();
+        self.prime_gate();
     }
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
@@ -160,11 +193,20 @@ impl Engine {
         self.prime_gate();
     }
 
-    /// The latency the host must compensate, in samples. Constant for a
-    /// given sample rate, whatever the mode or parameters.
+    /// The latency the host must compensate, in samples. Depends on the
+    /// sample rate and the voice range only.
     #[must_use]
     pub fn latency_samples(&self) -> usize {
         self.latency
+    }
+
+    /// Delay the voiced (shifted) voice really has right now, in samples:
+    /// the reported latency plus what a low voice adds.
+    #[must_use]
+    pub fn voice_latency(&self) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let l = self.latency as f64;
+        l + self.shifter.grain_delay()
     }
 
     #[must_use]
@@ -252,6 +294,22 @@ impl Engine {
             | ParamId::GlitchMode
             | ParamId::GlitchHold => {
                 self.update_creative(snap);
+                return;
+            }
+            ParamId::Voice => {
+                let range = VoiceRange::from_index(f64::from(v));
+                if range != self.range {
+                    self.range = range;
+                    self.apply_latency();
+                }
+                return;
+            }
+            ParamId::LowLatency => {
+                let low = v >= 0.5;
+                if low != self.low_latency {
+                    self.low_latency = low;
+                    self.apply_latency();
+                }
                 return;
             }
             _ => {

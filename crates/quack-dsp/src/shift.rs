@@ -25,12 +25,13 @@
 //! 5. **Unvoiced** grains are always put back at ratio 1: noise is never
 //!    pitched (it would buzz), consonants and breath stay intact.
 //!
-//! Latency: the output is the input timeline delayed by exactly
-//! [`crate::latency::latency_samples`], so dry, wet and bypass line up.
-//! A grain needs its full two periods of input before it is placed;
-//! below about 120 Hz that is more than the budget, and the shifter then
-//! uses the newest complete grain, which delays the content of low
-//! voices by a few milliseconds more (no click, no change of reported
+//! Latency: the output is the input timeline delayed by the latency
+//! set with [`Psola::set_latency`], so dry, wet and bypass line up. A
+//! grain starts sounding as soon as its pulse mark is placed and reads
+//! its right half while it plays, so a voice of period `P` needs
+//! [`MARK_DELAY`] + 1 periods (1.6 P: 8.2 ms at 196 Hz, 14.6 ms at
+//! 110 Hz), see [`Psola::latency_for`]. A voice lower than the latency
+//! allows is delayed a little more (no click, no change of reported
 //! latency).
 //!
 //! Real-time: every buffer is allocated in [`Psola::prepare`]; `tick`
@@ -40,12 +41,15 @@ use std::f64::consts::PI;
 
 use crate::pitch::{Biquad, MAX_HZ, MIN_HZ};
 
-/// Spacing of the unvoiced marks, as a fraction of the latency budget
-/// (2.5 ms at the 10 ms budget). Grains of unvoiced input are put back
-/// unshifted; the spacing only has to leave the grain complete in time.
-const UNVOICED_FRACTION: usize = 4;
+/// Spacing of the unvoiced marks. Grains of unvoiced input are put back
+/// unshifted; the spacing only has to be shorter than the latency.
+const UNVOICED_S: f64 = 0.0025;
 /// Peak search around the predicted mark, in periods.
 const SEARCH: f64 = 0.3;
+/// Longest time between a pulse and its mark being placed, in periods:
+/// the search looks `SEARCH` past the predicted pulse, which can come
+/// up to `SEARCH` early.
+pub const MARK_DELAY: f64 = 2.0 * SEARCH;
 /// Low-pass of the mark search signal: keeps the fundamental's peak.
 const MARK_LOWPASS_HZ: f64 = 1_000.0;
 /// Time the voicing glides over when the voice starts or stops: the
@@ -67,6 +71,9 @@ const NOISY_RATIO_44K: f64 = 0.15;
 const NOISY_S: f64 = 0.002;
 /// Analysis marks remembered (several periods of the lowest voice).
 const MARKS: usize = 256;
+/// Grains sounding at once, at most (two octaves up with the formant
+/// down still fit).
+const GRAINS: usize = 128;
 /// Widest formant shift supported by the buffers (ratio 0.5 to 2).
 pub const MAX_FORMANT_RATIO: f32 = 2.0;
 /// Widest pitch shift supported (ratio 0.25 to 4, two octaves).
@@ -85,6 +92,43 @@ pub const LAYER_RATIOS: [f64; LAYERS] = [0.5, 0.25, 2.0];
 const FREEZE_FADE_S: f64 = 0.025;
 /// How far back a freeze looks for a voiced grain to hold (marks).
 const FREEZE_LOOKBACK: usize = 48;
+
+/// Which stream a grain belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Stream {
+    #[default]
+    Main,
+    /// One of the layers (index into [`LAYER_RATIOS`]).
+    Layer(u8),
+    /// The frozen grain, read from its own buffer.
+    Frozen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FreezeState {
+    #[default]
+    Off,
+    /// Asked for, waiting for a voiced grain to hold.
+    Waiting,
+    On,
+}
+
+/// The held grain of a freeze and its own synthesis marks.
+#[derive(Debug, Clone, Default)]
+struct Frozen {
+    state: FreezeState,
+    /// The grain (two periods plus the interpolator's reach).
+    buf: [Vec<f32>; CHANNELS],
+    centre: f64,
+    period: f64,
+    /// Output ratio and transposition when it was taken.
+    ratio: f64,
+    transpose: f64,
+    /// Crossfade from the live voice (0) to the frozen one (1).
+    fade: f32,
+    /// Next synthesis mark of the frozen grains.
+    next_s: f64,
+}
 
 /// Decides the pitch ratio of each grain. The autotune
 /// ([`crate::autotune::Retuner`]) works here, on the grain's own period,
@@ -120,6 +164,31 @@ pub fn semitones_to_ratio(st: f32) -> f32 {
     (st / 12.0).exp2()
 }
 
+/// A grain being played: placed as soon as its pulse mark is known,
+/// read from the input while it sounds (its right half is still being
+/// recorded when it starts).
+#[derive(Debug, Clone, Copy, Default)]
+struct Grain {
+    /// Synthesis centre, on the output timeline.
+    s: f64,
+    /// Analysis centre (its mark), input index.
+    a: f64,
+    /// Left and right half widths, in output samples.
+    hl: f64,
+    hr: f64,
+    /// Input samples read per output sample (the formant ratio).
+    fr: f64,
+    gain: f32,
+    /// Share of each half that fades (1: Hann halves). Below 1 the
+    /// grain rises over that share of the previous period only, and its
+    /// right half stays flat until the next grain's rise.
+    attack: f64,
+    /// Its mark, to size the right half once the next mark is known.
+    k: usize,
+    right_known: bool,
+    stream: Stream,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Mark {
     /// Input sample index.
@@ -129,81 +198,21 @@ struct Mark {
     voiced: bool,
 }
 
-/// One synthesis stream: grains overlap-added on its own marks.
-#[derive(Debug, Clone, Default)]
-struct Voice {
-    /// Output accumulators, indexed by output-timeline sample.
-    acc: [Vec<f32>; CHANNELS],
-    /// Next synthesis mark, on the input timeline.
-    next_s: f64,
-    /// Synthesis position of the previous grain (for `PitchControl`).
-    last_s: f64,
-    /// How far ahead of the output the next grain must be placed.
-    lead: f64,
-    /// 0 (unvoiced, unshifted) to 1 (voiced, fully shifted).
-    voicing: f64,
-    /// Delay of the grains behind the synthesis marks, in samples.
-    offset: f64,
-    /// Layers and freeze only run while they are heard.
-    active: bool,
-}
-
-impl Voice {
-    fn alloc(&mut self, len: usize) {
-        self.acc = [vec![0.0; len], vec![0.0; len]];
-    }
-
-    fn clear(&mut self, lead: f64) {
-        for b in &mut self.acc {
-            b.fill(0.0);
-        }
-        self.next_s = 0.0;
-        self.last_s = 0.0;
-        self.voicing = 0.0;
-        self.offset = 0.0;
-        self.lead = lead;
-    }
-
-    /// Read and clear output sample `o`.
-    #[inline]
-    fn take(&mut self, o: usize) -> (f32, f32) {
-        let out = (self.acc[0][o], self.acc[1][o]);
-        self.acc[0][o] = 0.0;
-        self.acc[1][o] = 0.0;
-        out
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum FreezeState {
-    #[default]
-    Off,
-    /// Asked for, waiting for a voiced grain to hold.
-    Waiting,
-    On,
-}
-
-/// The held grain of a freeze and its own synthesis stream.
-#[derive(Debug, Clone, Default)]
-struct Frozen {
-    state: FreezeState,
-    /// The grain (two periods plus the interpolator's reach).
-    buf: [Vec<f32>; CHANNELS],
-    centre: f64,
-    period: f64,
-    /// Output ratio and transposition when it was taken.
-    ratio: f64,
-    transpose: f64,
-    /// Crossfade from the live voice (0) to the frozen one (1).
-    fade: f32,
-    voice: Voice,
-}
-
 /// Real-time pitch-synchronous shifter. See the module docs.
 #[derive(Debug, Clone, Default)]
 pub struct Psola {
     sample_rate: f64,
+    /// Synthesis position of the previous grain (for `PitchControl`).
+    last_s: f64,
+    /// Share of a period the voiced grains fade in over (see
+    /// [`Psola::set_attack`]).
+    attack: f64,
+    /// Mark and pitch ratio of the previous grain: the next synthesis
+    /// mark is one of its periods later, measured once its next mark is
+    /// placed.
+    last_grain: Option<(usize, f64)>,
     latency: i64,
+    max_latency: usize,
     unvoiced: i64,
     min_period: f64,
     max_period: f64,
@@ -217,9 +226,31 @@ pub struct Psola {
     marks: Vec<Mark>,
     /// Marks placed since reset; the newest is `marks[(count - 1) % MARKS]`.
     count: usize,
-    out_mask: usize,
-    main: Voice,
-    layers: [Voice; LAYERS],
+    /// Grains sounding, `active` of them.
+    grains: Vec<Grain>,
+    active: usize,
+    /// Next synthesis mark, on the input timeline.
+    next_s: f64,
+    /// Synthesis spacing of the last grain (the time it played).
+    step: f64,
+    /// 0 (unvoiced, unshifted) to 1 (voiced, fully shifted).
+    voicing: f64,
+    glide: f64,
+    /// Last detected period and how many samples it is still held for.
+    held_period: f32,
+    hold: usize,
+    hold_len: usize,
+    /// Delay of the grains behind the synthesis marks, in samples.
+    offset: f64,
+    /// Smoothed voiced period, kept through consonants and pauses.
+    sung_period: f64,
+    /// Noisiness measure: last two mono samples, band energies.
+    prev: [f32; 2],
+    e_full: f32,
+    e_high: f32,
+    noisy_coef: f32,
+    noisy_ratio: f32,
+    /// Levels of the layers, 0 to 1.
     layer_level: [f32; LAYERS],
     /// Last pitch ratio of the main voice (the freeze starts from it).
     main_ratio: f64,
@@ -229,24 +260,11 @@ pub struct Psola {
     /// like resampling: chipmunk up, monster down).
     follow: f64,
     frozen: Frozen,
+    frozen_on: bool,
     freeze_step: f32,
     /// Freeze pitch: a played note (Hz), or the transposition now.
     freeze_hz: Option<f32>,
     freeze_transpose: f64,
-    frozen_on: bool,
-    glide: f64,
-    /// Last detected period and how many samples it is still held for.
-    held_period: f32,
-    hold: usize,
-    hold_len: usize,
-    /// Smoothed voiced period, kept through consonants and pauses.
-    sung_period: f64,
-    /// Noisiness measure: last two mono samples, band energies.
-    prev: [f32; 2],
-    e_full: f32,
-    e_high: f32,
-    noisy_coef: f32,
-    noisy_ratio: f32,
 }
 
 impl Psola {
@@ -257,36 +275,48 @@ impl Psola {
         s
     }
 
-    /// Allocates for `sample_rate` and an output delay of `latency`
-    /// samples. Not for the audio thread.
+    /// Latency a voice down to `lowest_hz` needs at `sample_rate`, in
+    /// samples, with grains fading in over `attack` of a period (1 for
+    /// the default grains).
+    #[must_use]
+    pub fn latency_for(sample_rate: f64, lowest_hz: f64, attack: f64) -> usize {
+        let p = sample_rate / lowest_hz.max(1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = (p * (attack.clamp(0.1, 1.0) + MARK_DELAY) + 3.0).ceil() as usize;
+        n.max(Self::unvoiced_spacing(sample_rate) + 1)
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn unvoiced_spacing(sample_rate: f64) -> usize {
+        ((sample_rate * UNVOICED_S).round() as usize).max(16)
+    }
+
+    /// Allocates for `sample_rate` and output delays up to `latency`
+    /// samples, and sets that delay. Not for the audio thread.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn prepare(&mut self, sample_rate: f64, latency: usize) {
         let sr = sample_rate.max(8_000.0);
         self.sample_rate = sr;
+        if self.attack == 0.0 {
+            self.attack = 1.0;
+        }
+        self.max_latency = latency;
         self.latency = latency as i64;
-        self.unvoiced = ((latency / UNVOICED_FRACTION).max(16)) as i64;
+        self.unvoiced = Self::unvoiced_spacing(sr) as i64;
         self.min_period = sr / f64::from(MAX_HZ);
         self.max_period = sr / f64::from(MIN_HZ);
         let pmax = self.max_period.ceil() as usize;
         // Oldest read: an output delay, the extra delay of low voices
         // and a grain's left half, all at most a few long periods.
         let in_len = (2 * (latency + 6 * pmax)).next_power_of_two();
-        // Furthest write: lead plus a grain's right half, both widened by
-        // the formant ratio.
-        let out_len = (8 * pmax * MAX_FORMANT_RATIO as usize + latency).next_power_of_two();
         self.input = [vec![0.0; in_len], vec![0.0; in_len]];
         self.search = vec![0.0; in_len];
         self.in_mask = in_len - 1;
-        self.main.alloc(out_len);
-        for v in &mut self.layers {
-            v.alloc(out_len);
-        }
-        self.frozen.voice.alloc(out_len);
+        self.grains = vec![Grain::default(); GRAINS];
         let grain = 2 * pmax + 8;
         self.frozen.buf = [vec![0.0; grain], vec![0.0; grain]];
         self.freeze_step = (1.0 / (sr * FREEZE_FADE_S)) as f32;
         self.marks = vec![Mark::default(); MARKS];
-        self.out_mask = out_len - 1;
         self.lowpass = [Biquad::lowpass(sr, MARK_LOWPASS_HZ); 2];
         self.glide = sr * GLIDE_S;
         self.noisy_coef = (1.0 - (-1.0 / (sr * NOISY_S)).exp()) as f32;
@@ -300,48 +330,36 @@ impl Psola {
         for b in &mut self.input {
             b.fill(0.0);
         }
+        self.active = 0;
         self.search.fill(0.0);
         for b in &mut self.lowpass {
             b.reset();
         }
         self.n = 0;
         self.count = 0;
+        self.next_s = 0.0;
+        self.last_s = 0.0;
+        self.last_grain = None;
+        self.voicing = 0.0;
         self.hold = 0;
-        self.main_ratio = 1.0;
+        self.offset = 0.0;
         self.sung_period = 0.0;
         self.prev = [0.0; 2];
         self.e_full = 0.0;
         self.e_high = 0.0;
         #[allow(clippy::cast_precision_loss)]
         let u = self.unvoiced as f64;
-        self.main.clear(u);
-        self.main.active = true;
-        for v in &mut self.layers {
-            v.clear(u);
-            v.active = false;
-        }
-        self.frozen.voice.clear(u);
-        self.frozen.voice.active = false;
+        self.step = u;
+        self.main_ratio = 1.0;
         self.frozen.state = FreezeState::Off;
         self.frozen.fade = 0.0;
     }
 
     /// Levels of the layers (see [`LAYER_RATIOS`]), 0 to 1, already
-    /// smoothed by the caller. A layer starts on the main voice's marks
-    /// when its level leaves 0. Real-time safe.
+    /// smoothed by the caller. Real-time safe.
     pub fn set_layers(&mut self, levels: [f32; LAYERS]) {
-        for (i, &l) in levels.iter().enumerate() {
-            let l = l.clamp(0.0, 1.0);
-            let v = &mut self.layers[i];
-            if l > 0.0 && !v.active {
-                for b in &mut v.acc {
-                    b.fill(0.0);
-                }
-                v.active = true;
-            } else if l <= 0.0 {
-                v.active = false;
-            }
-            self.layer_level[i] = l;
+        for (l, v) in self.layer_level.iter_mut().zip(levels) {
+            *l = v.clamp(0.0, 1.0);
         }
     }
 
@@ -363,10 +381,6 @@ impl Psola {
             (false, FreezeState::Waiting) => self.frozen.state = FreezeState::Off,
             _ => {}
         }
-        if !on && self.frozen.state == FreezeState::On && self.frozen.fade <= 0.0 {
-            self.frozen.state = FreezeState::Off;
-            self.frozen.voice.active = false;
-        }
         self.frozen_on = on;
     }
 
@@ -376,12 +390,38 @@ impl Psola {
         self.frozen.state == FreezeState::On
     }
 
+    /// Output delay, up to the one given to [`Psola::prepare`]. Clears
+    /// the audio state (the output timeline moves). Real-time safe.
+    pub fn set_latency(&mut self, latency: usize) {
+        #[allow(clippy::cast_possible_wrap)]
+        let l = latency.min(self.max_latency) as i64;
+        if l != self.latency {
+            self.latency = l;
+            self.reset();
+        }
+    }
+
     /// Output delay in samples.
     #[must_use]
     pub fn latency_samples(&self) -> usize {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let l = self.latency as usize;
         l
+    }
+
+    /// Share of the previous period a voiced grain fades in over, 0.1
+    /// to 1 (1, the default: classic two-period Hann grains). Shorter
+    /// attacks let a grain start sooner after its pulse is found, which
+    /// is what low voices need to stay within the latency.
+    pub fn set_attack(&mut self, attack: f64) {
+        self.attack = attack.clamp(0.1, 1.0);
+    }
+
+    /// Extra delay of the grains behind the output delay, in samples
+    /// (what low voices add to [`Psola::latency_samples`]).
+    #[must_use]
+    pub fn grain_delay(&self) -> f64 {
+        self.offset
     }
 
     /// One stereo sample in, one out (`latency` samples later).
@@ -447,28 +487,79 @@ impl Psola {
         let fr = formant_ratio.clamp(1.0 / MAX_FORMANT_RATIO, MAX_FORMANT_RATIO);
         #[allow(clippy::cast_precision_loss)]
         let c = (n - self.latency) as f64;
-        let fr = f64::from(fr);
-        let mut v = std::mem::take(&mut self.main);
-        while v.next_s <= c + v.lead {
-            if !self.place_grain(&mut v, c, pitch, fr) {
+        // A grain is placed when its left half starts, not before: its
+        // mark must be known by then, and no earlier.
+        while self.due(c, f64::from(fr)) {
+            if !self.place_grain(c, pitch, f64::from(fr)) {
                 break;
             }
         }
-        self.main = v;
-        self.run_freeze(c, fr);
-        #[allow(clippy::cast_possible_truncation)]
-        let o = self.out_index(n - self.latency);
-        let (mut l, mut r) = self.main.take(o);
-        let mut power = 1.0;
-        for i in 0..LAYERS {
-            if self.layers[i].active {
-                let (a, b) = self.layers[i].take(o);
-                let g = self.layer_level[i];
-                l += g * a;
-                r += g * b;
-                power += g * g;
+        self.run_freeze(c, f64::from(fr));
+        let out = self.render(c);
+        self.n += 1;
+        out
+    }
+
+    /// Output sample `c`: the sum of the grains sounding there.
+    #[inline]
+    fn render(&mut self, c: f64) -> (f32, f32) {
+        // Never read input that is not recorded yet (the Hermite reads
+        // two samples past the index).
+        #[allow(clippy::cast_precision_loss)]
+        let newest = (self.n - 2) as f64;
+        let (mut l, mut r) = (0.0f32, 0.0f32);
+        let (mut fl, mut fz) = (0.0f32, 0.0f32);
+        let mut i = 0;
+        while i < self.active {
+            let mut g = self.grains[i];
+            let d = c - g.s;
+            if d < -g.hl {
+                i += 1;
+                continue;
             }
+            if !g.right_known && d >= (1.0 - g.attack) * g.hr {
+                // The right half reaches the next mark, known by now
+                // (or the expected period if the voice just stopped).
+                if g.k + 1 < self.count {
+                    g.hr = self.right(g.k) / g.fr;
+                    g.right_known = true;
+                }
+                self.grains[i] = g;
+            }
+            if d > g.hr {
+                self.active -= 1;
+                self.grains[i] = self.grains[self.active];
+                continue;
+            }
+            let fall = g.attack * g.hr;
+            let w = if d < 0.0 {
+                0.5 + 0.5 * (PI * d / g.hl).cos()
+            } else if d <= g.hr - fall {
+                1.0
+            } else {
+                0.5 + 0.5 * (PI * (d - (g.hr - fall)) / fall).cos()
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let w = w as f32 * g.gain;
+            match g.stream {
+                Stream::Frozen => {
+                    let src = g.a + d * g.fr;
+                    fl += w * read_buf(&self.frozen.buf[0], src);
+                    fz += w * read_buf(&self.frozen.buf[1], src);
+                }
+                stream => {
+                    let w = match stream {
+                        Stream::Layer(j) => w * self.layer_level[usize::from(j)],
+                        _ => w,
+                    };
+                    let src = (g.a + d * g.fr).min(newest);
+                    l += w * self.read(0, src);
+                    r += w * self.read(1, src);
+                }
+            }
+            i += 1;
         }
+        let power: f32 = 1.0 + self.layer_level.iter().map(|g| g * g).sum::<f32>();
         if power > 1.0 {
             // Layers stack up without pushing the level (or clipping):
             // the sum keeps about the main voice's loudness.
@@ -476,13 +567,11 @@ impl Psola {
             l *= k;
             r *= k;
         }
-        if self.frozen.voice.active {
-            let (a, b) = self.frozen.voice.take(o);
-            let f = self.frozen.fade;
-            l += f * (a - l);
-            r += f * (b - r);
+        let f = self.frozen.fade;
+        if f > 0.0 {
+            l += f * (fl - l);
+            r += f * (fz - r);
         }
-        self.n += 1;
         (l, r)
     }
 
@@ -490,12 +579,6 @@ impl Psola {
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn in_index(&self, i: i64) -> usize {
         (i as usize) & self.in_mask
-    }
-
-    #[inline]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn out_index(&self, i: i64) -> usize {
-        (i as usize) & self.out_mask
     }
 
     fn mark(&self, k: usize) -> Mark {
@@ -606,17 +689,12 @@ impl Psola {
     }
 
     /// Overlap-add the grain for the next synthesis mark, then move the
-    /// mark on by one output period. Returns `false` when the grain must
-    /// wait for more input.
+    /// mark on by one output period.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn place_grain(
-        &mut self,
-        v: &mut Voice,
-        c: f64,
-        pitch: &mut impl PitchControl,
-        formant_ratio: f64,
-    ) -> bool {
-        let s = v.next_s;
+    /// Returns `false` when the grain must wait for more input.
+    fn place_grain(&mut self, c: f64, pitch: &mut impl PitchControl, formant_ratio: f64) -> bool {
+        self.next_s = self.next_centre();
+        let s = self.next_s;
         // The grains play the input `offset` samples behind the synthesis
         // marks. A voiced grain needs two periods of input, an unvoiced
         // one much less: following that difference at every consonant
@@ -626,85 +704,139 @@ impl Psola {
         // slowly. When a grain needs more (first note, a lower note), the
         // output waits for it: a few milliseconds of gap instead of a
         // repeat.
+        //
+        // A grain starts sounding (its left half) as soon as its mark is
+        // placed, and its right half is read while it plays: the input
+        // it needs arrives as fast as it is played. So the delay only has
+        // to cover the left half and the time a mark takes to be placed
+        // (the peak search looks up to `SEARCH` periods past it, twice
+        // that when the peak comes early), not the whole grain.
+        let p = self.sung_period;
+        let fr = formant_ratio;
         #[allow(clippy::cast_precision_loss)]
-        let floor = (self.sung_period * (2.0 + SEARCH + 1.0 / formant_ratio) + 2.0
+        let floor = ((p * (self.attack / fr + MARK_DELAY)).max(p * (1.0 - 1.0 / fr)) + 3.0
             - self.latency as f64)
             .max(0.0);
-        v.offset = (v.offset - OFFSET_RECOVERY * v.lead).max(floor);
-        let target = s - v.offset;
-        let Some(k) = self.nearest_complete(target) else {
-            // Nothing complete yet (just after a reset): silence.
-            v.next_s += self.unvoiced as f64;
+        self.offset = (self.offset - OFFSET_RECOVERY * self.step).max(floor);
+        let target = s - self.offset;
+        let Some(k) = self.nearest_mark(target) else {
+            // No mark yet (just after a reset): silence.
+            self.next_s += self.unvoiced as f64;
+            self.last_grain = None;
             return true;
         };
-        if k + 1 < self.count && target - (self.mark(k).pos as f64) > 0.5 * self.right(k) {
-            // A nearer grain is still being recorded.
+        let m = self.mark(k);
+        if k + 1 == self.count && target - (m.pos as f64) > 0.5 * f64::from(m.period) {
+            // The next mark, nearer, is not placed yet: wait for it rather
+            // than repeat this one.
             return false;
         }
-        let m = self.mark(k);
         let right = self.right(k);
-        let left = if k + MARKS > self.count && k > 0 {
-            self.interval(k)
-        } else {
-            right
-        };
+        let left = self.left(k);
         let step = right / self.glide;
-        v.voicing = if m.voiced {
-            (v.voicing + step).min(1.0)
+        self.voicing = if m.voiced {
+            (self.voicing + step).min(1.0)
         } else {
-            (v.voicing - step).max(0.0)
+            (self.voicing - step).max(0.0)
         };
         // The formant applies from the first sample, voiced or not: the
         // timbre does not switch when the detector makes up its mind.
         // Only the pitch glides in, and unvoiced grains are never
         // transposed (noise put back at another spacing would buzz).
-        let fr = formant_ratio;
-        let dt = ((s - v.last_s) / self.sample_rate).max(0.0);
-        v.last_s = s;
-        let (ratio, fr, hl, hr) = if m.voiced {
+        // A grain due late (after waiting, or wider than the previous one)
+        // is moved, never cut on its rising edge; the delay follows so the
+        // input plays on from where it was.
+        // (Sample `c` itself is still to be played: it is rendered after
+        // this. Counting it as late would delay every grain by half a
+        // sample on average and leave the output a few cents flat.)
+        let hl = self.rise(k, fr);
+        let late = (c - 1.0 + hl - s).max(0.0);
+        let s = s + late;
+        self.offset += late;
+        let dt = ((s - self.last_s) / self.sample_rate).max(0.0);
+        self.last_s = s;
+        let (ratio, hr, right_known) = if m.voiced {
             let max = f64::from(MAX_PITCH_RATIO);
-            // The grain's own period, unless a mark landed off the
-            // pulses (consonant onsets): then the detector's.
-            let own = if (right / f64::from(m.period)).ln().abs() < 0.2 {
-                right
+            // The grain's own period (the last one, its next mark is not
+            // placed yet), unless a mark landed off the pulses (consonant
+            // onsets): then the detector's.
+            let last = if k + 1 < self.count { right } else { left };
+            let own = if (last / f64::from(m.period)).ln().abs() < 0.2 {
+                last
             } else {
                 f64::from(m.period)
             };
             let pr = pitch.voiced(own, dt).clamp(1.0 / max, max);
             self.main_ratio = pr;
-            let ratio = pr.powf(v.voicing);
-            let fr = self.followed(fr, ratio);
-            (ratio, fr, left / fr, right / fr)
+            (pr.powf(self.voicing), right, k + 1 < self.count)
         } else {
             pitch.unvoiced(dt);
             // Kept at the analysis spacing, so the grains still sum to
             // one; each is read faster or slower, which moves its
             // envelope, without reading past the recorded input.
             #[allow(clippy::cast_precision_loss)]
-            let room = ((self.n - 2 - m.pos) as f64 / fr).max(1.0);
-            (1.0, fr, left, right.min(room))
+            let room = if fr > 1.0 {
+                ((s - m.pos as f64 + self.latency as f64 - 3.0) / (fr - 1.0)).max(1.0)
+            } else {
+                f64::MAX
+            };
+            (1.0, right.min(room), true)
         };
-        // A grain due late (after waiting, or wider than the previous one)
-        // is moved, never cut on its rising edge; the delay follows so the
-        // input plays on from where it was.
-        // (Sample `c` itself is still writable: it is read after this.
-        // Counting it as late would delay every grain by half a sample
-        // on average and leave the output a few cents flat.)
-        let late = (c - 1.0 + hl - s).max(0.0);
-        let s = s + late;
-        v.offset += late;
-        let a = m.pos as f64;
+        // Formants following the pitch (chipmunk, monster): the grain is
+        // read faster or slower. Its rise keeps its length (it has
+        // started), so only the right half widens or narrows.
+        let (fr, hr) = if m.voiced {
+            let f = self.followed(fr, ratio);
+            (f, hr / f)
+        } else {
+            (fr, hr)
+        };
         // More grains per second going up, fewer going down: keep the
         // loudness where it was (same for narrower or wider grains).
         let gain = if m.voiced { (fr / ratio).sqrt() } else { 1.0 };
-        self.add_grain(&mut v.acc, s, hl, hr, a, fr, gain);
-        let spacing = right / ratio;
         if m.voiced {
-            self.layer_grains(s, a, left, right, formant_ratio, ratio, spacing, v.voicing);
+            self.layer_grains(
+                s,
+                m.pos as f64,
+                k,
+                hl,
+                right,
+                formant_ratio,
+                ratio,
+                right_known,
+            );
         }
-        v.next_s = s + spacing;
-        v.lead = hl.max(hr);
+        if self.active < GRAINS {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            let g = Grain {
+                s,
+                a: m.pos as f64,
+                hl,
+                hr,
+                fr,
+                gain: gain as f32,
+                attack: if m.voiced { self.attack } else { 1.0 },
+                k,
+                right_known,
+                stream: Stream::Main,
+            };
+            self.grains[self.active] = g;
+            self.active += 1;
+        }
+        self.next_s = s + right / ratio;
+        self.last_grain = Some((k, ratio));
+        self.step = right / ratio;
         true
+    }
+
+    /// Synthesis centre of the next grain: one period of the previous
+    /// grain on, measured now that its next mark may be known (it was
+    /// only expected when that grain started).
+    fn next_centre(&self) -> f64 {
+        match self.last_grain {
+            Some((k, ratio)) if k + MARKS > self.count => self.last_s + self.right(k) / ratio,
+            _ => self.next_s,
+        }
     }
 
     /// Formant ratio once it follows the pitch ratio (chipmunk going up,
@@ -724,7 +856,8 @@ impl Psola {
     /// down, every fourth two octaves down, twice as many an octave up),
     /// with the same analysis grain: their pulses line up with the main
     /// voice's, so where their harmonics meet they add up instead of
-    /// cancelling, and they follow its pitch and correction.
+    /// cancelling, and they follow its pitch and correction. Same rise as
+    /// the main grain (it starts now), own reading speed.
     #[allow(
         clippy::too_many_arguments,
         clippy::cast_possible_truncation,
@@ -734,22 +867,21 @@ impl Psola {
         &mut self,
         s: f64,
         a: f64,
-        left: f64,
+        k: usize,
+        hl: f64,
         right: f64,
         formant_ratio: f64,
         ratio: f64,
-        spacing: f64,
-        voicing: f64,
+        right_known: bool,
     ) {
         let n = self.grain_n;
         self.grain_n = self.grain_n.wrapping_add(1);
-        if !self.layers.iter().any(|l| l.active) || voicing <= 0.0 {
+        if self.voicing <= 0.0 {
             return;
         }
         let max = f64::from(MAX_PITCH_RATIO);
-        let mut layers = std::mem::take(&mut self.layers);
-        for (l, &mult) in layers.iter_mut().zip(&LAYER_RATIOS) {
-            if !l.active {
+        for (j, &mult) in LAYER_RATIOS.iter().enumerate() {
+            if self.layer_level[j] <= 0.0 {
                 continue;
             }
             let every = (1.0 / mult).round().max(1.0) as u64;
@@ -758,63 +890,51 @@ impl Psola {
             }
             let lr = (ratio * mult).clamp(1.0 / max, max);
             let fr = self.followed(formant_ratio, lr);
-            let gain = (fr / lr).sqrt() * voicing;
-            let (hl, hr) = (left / fr, right / fr);
-            self.add_grain(&mut l.acc, s, hl, hr, a, fr, gain);
+            #[allow(clippy::cast_possible_truncation)]
+            let g = Grain {
+                s,
+                a,
+                hl,
+                hr: right / fr,
+                fr,
+                gain: ((fr / lr).sqrt() * self.voicing) as f32,
+                attack: self.attack,
+                k,
+                right_known,
+                stream: Stream::Layer(j as u8),
+            };
+            self.push_grain(g);
             if mult > 1.0 {
-                self.add_grain(&mut l.acc, s + 0.5 * spacing, hl, hr, a, fr, gain);
+                // Octave up: a second grain halfway to the next main one.
+                self.push_grain(Grain {
+                    s: s + 0.5 * right / ratio,
+                    ..g
+                });
             }
         }
-        self.layers = layers;
     }
 
-    /// Overlap-add one grain of the input around analysis position `a`
-    /// at output position `s` (asymmetric Hann, read `fr` times faster).
-    #[allow(
-        clippy::too_many_arguments,
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss
-    )]
-    fn add_grain(
-        &self,
-        acc: &mut [Vec<f32>; CHANNELS],
-        s: f64,
-        hl: f64,
-        hr: f64,
-        a: f64,
-        fr: f64,
-        gain: f64,
-    ) {
-        let start = (s - hl).ceil() as i64;
-        let end = (s + hr).floor() as i64;
-        for j in start..=end {
-            let d = j as f64 - s;
-            let w = if d < 0.0 {
-                0.5 + 0.5 * (PI * d / hl).cos()
-            } else {
-                0.5 + 0.5 * (PI * d / hr).cos()
-            };
-            let src = a + d * fr;
-            let o = self.out_index(j);
-            let w = (w * gain) as f32;
-            acc[0][o] += w * self.read(0, src);
-            acc[1][o] += w * self.read(1, src);
+    fn push_grain(&mut self, g: Grain) {
+        if self.active < GRAINS {
+            self.grains[self.active] = g;
+            self.active += 1;
         }
     }
 
-    /// Take the newest voiced grain still in the input as the frozen
-    /// one. `false` while there is none (unvoiced, silence).
+    /// Take the newest voiced grain recorded in full as the frozen one.
+    /// `false` while there is none (unvoiced, silence).
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn capture(&mut self) -> bool {
         let oldest = self.count.saturating_sub(FREEZE_LOOKBACK);
-        let Some(k) = (oldest..self.count)
-            .rev()
-            .find(|&k| self.mark(k).voiced && self.complete(k))
-        else {
+        let Some(k) = (oldest..self.count.saturating_sub(1)).rev().find(|&k| {
+            let m = self.mark(k);
+            m.voiced && (m.pos as f64 + self.right(k) + 3.0) < self.n as f64
+        }) else {
             return false;
         };
         let p = self.right(k).min((self.frozen.buf[0].len() / 2 - 4) as f64);
-        let start = self.mark(k).pos - p.ceil() as i64 - 2;
+        let pos = self.mark(k).pos;
+        let start = pos - p.ceil() as i64 - 2;
         if start < self.n - self.in_mask as i64 {
             return false;
         }
@@ -823,7 +943,6 @@ impl Psola {
                 *x = self.input[ch][(j as usize) & self.in_mask];
             }
         }
-        let pos = self.mark(k).pos;
         let f = &mut self.frozen;
         f.centre = (pos - start) as f64;
         f.period = p;
@@ -833,7 +952,6 @@ impl Psola {
     }
 
     /// The frozen voice: crossfade and grains.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn run_freeze(&mut self, c: f64, formant_ratio: f64) {
         match self.frozen.state {
             FreezeState::Off => return,
@@ -842,57 +960,89 @@ impl Psola {
                     return;
                 }
                 self.frozen.state = FreezeState::On;
-                let v = &mut self.frozen.voice;
-                if !v.active {
-                    for b in &mut v.acc {
-                        b.fill(0.0);
-                    }
-                    v.next_s = c;
-                    v.lead = 0.0;
-                    v.active = true;
+                if self.frozen.fade <= 0.0 {
+                    self.frozen.next_s = c + 1.0;
                 }
             }
             FreezeState::On => {}
         }
-        let f = &mut self.frozen;
         if self.frozen_on {
-            f.fade = (f.fade + self.freeze_step).min(1.0);
+            self.frozen.fade = (self.frozen.fade + self.freeze_step).min(1.0);
         } else {
-            f.fade = (f.fade - self.freeze_step).max(0.0);
-            if f.fade <= 0.0 {
-                f.state = FreezeState::Off;
-                f.voice.active = false;
+            self.frozen.fade = (self.frozen.fade - self.freeze_step).max(0.0);
+            if self.frozen.fade <= 0.0 {
+                self.frozen.state = FreezeState::Off;
                 return;
             }
         }
         let max = f64::from(MAX_PITCH_RATIO);
-        while f.voice.next_s <= c + f.voice.lead {
-            let p = f.period;
+        let p = self.frozen.period;
+        // Each grain is placed when its rise starts.
+        loop {
             let ratio = match self.freeze_hz {
                 Some(hz) => f64::from(hz) * p / self.sample_rate,
-                None => f.ratio * ((self.freeze_transpose - f.transpose) / 12.0).exp2(),
-            }
-            .clamp(1.0 / max, max);
-            let fr = (formant_ratio * ratio.powf(self.follow)).clamp(
-                1.0 / f64::from(MAX_FORMANT_RATIO),
-                f64::from(MAX_FORMANT_RATIO),
-            );
-            let h = p / fr;
-            let s = f.voice.next_s.max(c - 1.0 + h);
-            let gain = ((fr / ratio).sqrt()) as f32;
-            let start = (s - h).ceil() as i64;
-            let end = (s + h).floor() as i64;
-            for j in start..=end {
-                let d = j as f64 - s;
-                let w = (0.5 + 0.5 * (PI * d / h).cos()) as f32 * gain;
-                let src = f.centre + d * fr;
-                let o = (j as usize) & self.out_mask;
-                for ch in 0..CHANNELS {
-                    f.voice.acc[ch][o] += w * read_buf(&f.buf[ch], src);
+                None => {
+                    self.frozen.ratio
+                        * ((self.freeze_transpose - self.frozen.transpose) / 12.0).exp2()
                 }
             }
-            f.voice.next_s = s + p / ratio;
-            f.voice.lead = h;
+            .clamp(1.0 / max, max);
+            let fr = self.followed(formant_ratio, ratio);
+            let h = p / fr;
+            let s = self.frozen.next_s.max(c - 1.0 + h);
+            if s - h > c + 1.0 {
+                break;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            self.push_grain(Grain {
+                s,
+                a: self.frozen.centre,
+                hl: h,
+                hr: h,
+                fr,
+                gain: (fr / ratio).sqrt() as f32,
+                attack: 1.0,
+                k: 0,
+                right_known: true,
+                stream: Stream::Frozen,
+            });
+            self.frozen.next_s = s + p / ratio;
+        }
+    }
+
+    /// Whether the next grain starts at output sample `c` (or should
+    /// have): the grain it would play, its rise reaches `c`.
+    fn due(&self, c: f64, formant_ratio: f64) -> bool {
+        let s = self.next_centre();
+        #[allow(clippy::cast_precision_loss)]
+        let rise = match self.nearest_mark(s - self.offset) {
+            Some(k) => self.rise(k, formant_ratio),
+            None => self.unvoiced as f64,
+        };
+        s - rise <= c + 1.0
+    }
+
+    /// Left half of mark `k`'s grain: back to the previous mark.
+    fn left(&self, k: usize) -> f64 {
+        if k + MARKS > self.count && k > 0 {
+            self.interval(k)
+        } else {
+            self.right(k)
+        }
+    }
+
+    /// How long mark `k`'s grain rises before its centre, in output
+    /// samples.
+    fn rise(&self, k: usize, formant_ratio: f64) -> f64 {
+        let left = self.left(k);
+        if self.mark(k).voiced {
+            self.attack * left
+                / formant_ratio.clamp(
+                    1.0 / f64::from(MAX_FORMANT_RATIO),
+                    f64::from(MAX_FORMANT_RATIO),
+                )
+        } else {
+            left
         }
     }
 
@@ -913,22 +1063,12 @@ impl Psola {
         }
     }
 
-    /// Whether mark `k`'s whole grain (plus the interpolator's reach) is
-    /// already in the input.
+    /// Placed mark nearest to `s`.
     #[allow(clippy::cast_precision_loss)]
-    fn complete(&self, k: usize) -> bool {
-        k + 1 < self.count && (self.mark(k).pos as f64 + self.right(k) + 2.0) < self.n as f64
-    }
-
-    /// Complete mark nearest to `s`.
-    #[allow(clippy::cast_precision_loss)]
-    fn nearest_complete(&self, s: f64) -> Option<usize> {
+    fn nearest_mark(&self, s: f64) -> Option<usize> {
         let oldest = self.count.saturating_sub(MARKS - 1);
         let mut best: Option<(usize, f64)> = None;
         for k in (oldest..self.count).rev() {
-            if !self.complete(k) {
-                continue;
-            }
             let d = (self.mark(k).pos as f64 - s).abs();
             match best {
                 Some((_, bd)) if d >= bd => break,
@@ -1242,6 +1382,45 @@ mod tests {
             .fold(f32::MAX, f32::min);
         // What is left is a one-sample wobble of the grain placement.
         assert!(err < 5e-3, "vowel, error {err:.2e}");
+    }
+
+    #[test]
+    fn voice_is_delayed_by_its_latency_only() {
+        // A grain plays as soon as its mark is known: about 1.6 periods,
+        // where pre-rendered grains needed 3.3. Exact at unity, with
+        // the default grains and with a short attack.
+        for (hz, attack) in [(110.0, 1.0), (196.0, 1.0), (110.0, 0.5)] {
+            let lat = Psola::latency_for(SR, hz, attack);
+            assert!(lat as f64 <= (1.0 + MARK_DELAY) * SR / hz + 4.0);
+            let x = vowel(hz, 0.5);
+            let mut det = Yin::new(SR);
+            let mut ps = Psola::new(SR, lat);
+            ps.set_attack(attack);
+            let mut extra = 0.0f64;
+            let y: Vec<f32> = x
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    det.push_sample(v);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let period = det.estimate().map(|e| (SR / f64::from(e.hz)) as f32);
+                    let out = ps.tick(v, v, period, 1.0, 1.0).0;
+                    if i > 12_000 {
+                        extra = extra.max(ps.grain_delay());
+                    }
+                    out
+                })
+                .collect();
+            assert!(extra < 1.0, "{hz} Hz: {extra} samples more");
+            let tail = 12_000..x.len();
+            let e: f32 = tail.clone().map(|i| (y[i] - x[i - lat]).powi(2)).sum();
+            let s: f32 = tail.map(|i| x[i - lat].powi(2)).sum();
+            assert!(
+                e / s < 1e-4,
+                "{hz} Hz, attack {attack}: error {:.2e}",
+                e / s
+            );
+        }
     }
 
     #[test]

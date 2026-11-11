@@ -60,7 +60,7 @@ fn editor_captures() {
         let params = Values(RefCell::new(v));
         let view = View {
             held_notes: (1 << 57) | (1 << 64),
-            latency_samples: 480,
+            latency_samples: 591,
             sample_rate: 48_000.0,
             pitch_hz: if mode == 2.0 { 0.0 } else { 223.1 },
             pitch_confidence: 0.92,
