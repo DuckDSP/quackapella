@@ -134,9 +134,14 @@ impl PluginLogic for Quackapella {
         context: &mut ProcessContext,
     ) -> ProcessStatus {
         let t = context.transport;
+        let bar = if t.time_sig_num > 0 && t.time_sig_den > 0 {
+            f64::from(t.time_sig_num) * 4.0 / f64::from(t.time_sig_den)
+        } else {
+            4.0
+        };
         state
             .engine
-            .set_transport(t.tempo, t.playing.then_some(t.position_beats));
+            .set_transport(t.tempo, bar, t.playing.then_some(t.position_beats));
         // Host values once per (sub-)block: truce splits blocks at
         // sample-accurate parameter events, the engine ramps from here.
         let target = params.to_values();

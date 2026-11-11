@@ -138,9 +138,11 @@ pub enum ParamId {
     Robot,
     Glitch,
     GlitchRate,
+    GlitchMode,
+    GlitchHold,
 }
 
-pub const PARAM_COUNT: usize = 37;
+pub const PARAM_COUNT: usize = 39;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -501,6 +503,23 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 2,
         },
     },
+    ParamSpec {
+        key: "glitch_mode",
+        host_id: 608,
+        name: "Glitch Mode",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::creative::GlitchMode::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "glitch_hold",
+        host_id: 609,
+        name: "Glitch Hold",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 impl ParamId {
@@ -542,6 +561,8 @@ impl ParamId {
         Self::Robot,
         Self::Glitch,
         Self::GlitchRate,
+        Self::GlitchMode,
+        Self::GlitchHold,
     ];
 
     #[must_use]

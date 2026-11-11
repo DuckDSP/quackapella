@@ -43,7 +43,8 @@ fn editor_captures() {
             v.set(ParamId::Sub, 45.0);
             v.set(ParamId::OctaveDown, 70.0);
             v.set(ParamId::Robot, 0.0);
-            v.set(ParamId::Glitch, 35.0);
+            v.set(ParamId::Glitch, 25.0);
+            v.set(ParamId::GlitchMode, 1.0);
             v.set(ParamId::Freeze, 1.0);
         }
         if mode == 1.0 {

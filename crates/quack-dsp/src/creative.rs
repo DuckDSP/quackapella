@@ -7,10 +7,15 @@
 //! - [`Robot`]: a monotone voice. Each phrase is held on one note (the
 //!   first one sung, after correction), or on the held MIDI note, so
 //!   speech and melody come out flat, buzzy, on a single pitch.
-//! - [`Glitch`]: tempo-synced slice effects on the processed voice. At
-//!   each slice (1/4 to 1/32 note) a dice roll weighted by the amount
-//!   picks pass, repeat, roll (stutter), reverse or half speed (tape
-//!   drop). Slices are read from the voice just played, with short
+//! - [`Glitch`]: tempo-synced slice effects on the processed voice,
+//!   with nothing left to chance. The effect is chosen (repeat, stutter,
+//!   reverse, tape drop) and the amount is a density: it glitches that
+//!   share of the steps of each bar, always the same ones (the last step
+//!   first, like a fill, then spread over the bar), so a bar sounds the
+//!   same every time and turning the knob up only adds steps. *Hold*
+//!   glitches every step while it is on (a live button). Consecutive
+//!   glitched steps keep the slice they caught (a beat repeat, not a
+//!   delay). Slices are read from the voice just played, with short
 //!   crossfades, so nothing clicks and the latency is unchanged.
 //!
 //! Real-time: buffers are allocated in `prepare`; `tick` does no
@@ -67,6 +72,84 @@ impl GlitchRate {
     }
 }
 
+/// The effect of the glitched steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlitchMode {
+    #[default]
+    Repeat,
+    Stutter,
+    Reverse,
+    Tape,
+}
+
+impl GlitchMode {
+    pub const COUNT: u32 = 4;
+    pub const ALL: [Self; 4] = [Self::Repeat, Self::Stutter, Self::Reverse, Self::Tape];
+
+    #[must_use]
+    pub fn from_index(i: f64) -> Self {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let i = (i.max(0.0).round() as usize).min(Self::ALL.len() - 1);
+        Self::ALL[i]
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Repeat => "Repeat",
+            Self::Stutter => "Stutter",
+            Self::Reverse => "Reverse",
+            Self::Tape => "Tape",
+        }
+    }
+
+    const fn slice(self) -> Slice {
+        match self {
+            Self::Repeat => Slice::Repeat,
+            Self::Stutter => Slice::Roll,
+            Self::Reverse => Slice::Reverse,
+            Self::Tape => Slice::Half,
+        }
+    }
+}
+
+/// Whether step `step` of `steps` is glitched at `amount` (0 to 1).
+/// Steps are ranked once: the last of the bar first, then the others
+/// spread over the bar (bit-reversed order from the end). The first
+/// `amount × steps` of that ranking are glitched, so a higher amount only
+/// adds steps.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+pub fn glitch_step(step: u32, steps: u32, amount: f64) -> bool {
+    let steps = steps.max(1);
+    let hits = (amount.clamp(0.0, 1.0) * f64::from(steps)).round() as u32;
+    if hits == 0 {
+        return false;
+    }
+    // Rank of the step: position, counted from the end of the bar, in
+    // bit-reversed order over the next power of two (skipping the
+    // positions past the bar).
+    let from_end = steps - 1 - step.min(steps - 1);
+    let bits = steps.next_power_of_two().trailing_zeros();
+    let rev = |x: u32| {
+        if bits == 0 {
+            0
+        } else {
+            x.reverse_bits() >> (32 - bits)
+        }
+    };
+    let rank = (0..steps.next_power_of_two())
+        .map(rev)
+        .filter(|&p| p < steps)
+        .position(|p| p == from_end)
+        .unwrap_or(0) as u32;
+    rank < hits
+}
+
 /// What a glitch slice plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Slice {
@@ -109,17 +192,21 @@ pub struct Glitch {
     mask: usize,
     /// Next input index.
     n: i64,
-    /// Chance that a slice is glitched, 0 to 1 (0 = off).
+    /// Share of the steps of a bar that are glitched, 0 to 1 (0 = off).
     pub amount: f64,
     pub rate: GlitchRate,
+    pub mode: GlitchMode,
+    /// Glitch every step while on.
+    pub hold: bool,
     tempo: f64,
+    /// Bar length in beats (quarter notes).
+    bar_beats: f64,
     /// Position in beats.
     beat: f64,
     slice: i64,
     cur: Reader,
     prev: Reader,
     fade: f64,
-    rng: u32,
 }
 
 impl Default for Glitch {
@@ -131,13 +218,15 @@ impl Default for Glitch {
             n: 0,
             amount: 0.0,
             rate: GlitchRate::default(),
+            mode: GlitchMode::default(),
+            hold: false,
             tempo: 120.0,
+            bar_beats: 4.0,
             beat: 0.0,
             slice: 0,
             cur: Reader::default(),
             prev: Reader::default(),
             fade: 0.0,
-            rng: 0x9E37_79B9,
         };
         g.prepare(48_000.0);
         g
@@ -166,14 +255,17 @@ impl Glitch {
         self.slice = 0;
         self.cur = Reader::default();
         self.prev = Reader::default();
-        self.rng = 0x9E37_79B9;
     }
 
-    /// Host tempo, and the beat position at the start of the block when
-    /// the transport plays (slices then fall on the host's grid).
-    pub fn set_transport(&mut self, tempo: f64, beat: Option<f64>) {
+    /// Host tempo, bar length in beats, and the beat position at the
+    /// start of the block when the transport plays (slices then fall on
+    /// the host's grid and bars).
+    pub fn set_transport(&mut self, tempo: f64, bar_beats: f64, beat: Option<f64>) {
         if tempo.is_finite() && tempo > 0.0 {
             self.tempo = tempo.clamp(TEMPO_MIN, TEMPO_MAX);
+        }
+        if bar_beats.is_finite() && bar_beats > 0.0 {
+            self.bar_beats = bar_beats.clamp(0.5, 32.0);
         }
         if let Some(b) = beat.filter(|b| b.is_finite())
             && (b - self.beat).abs() > 0.01
@@ -188,23 +280,16 @@ impl Glitch {
         self.cur.kind
     }
 
-    fn random(&mut self) -> f64 {
-        // xorshift32: deterministic, cheap, good enough for dice.
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.rng = x;
-        f64::from(x) / f64::from(u32::MAX)
-    }
-
     fn start(&mut self, kind: Slice, len: f64) {
         #[allow(clippy::cast_possible_truncation)]
         let l = len.round() as i64;
-        let src = if kind == Slice::Pass {
-            self.n
+        let (src, len) = if kind == Slice::Pass {
+            (self.n, len)
+        } else if self.cur.kind != Slice::Pass {
+            // Glitched steps in a row keep the slice they caught.
+            (self.cur.src, self.cur.len)
         } else {
-            self.n - l
+            (self.n - l, len)
         };
         self.prev = self.cur;
         self.cur = Reader {
@@ -265,18 +350,12 @@ impl Glitch {
         let len = slice_beats * per_beat;
         if idx != self.slice {
             self.slice = idx;
-            let kind = if self.amount > 0.0 && self.random() < self.amount {
-                match self.random() {
-                    x if x < 0.3 => Slice::Repeat,
-                    x if x < 0.6 => Slice::Roll,
-                    x if x < 0.8 => Slice::Reverse,
-                    _ => Slice::Half,
-                }
-            } else {
-                Slice::Pass
-            };
+            let steps = ((self.bar_beats / slice_beats).round() as i64).max(1);
+            let step = idx.rem_euclid(steps) as u32;
+            let hit = self.hold || glitch_step(step, steps as u32, self.amount);
+            let kind = if hit { self.mode.slice() } else { Slice::Pass };
             self.start(kind, len);
-        } else if self.amount <= 0.0 && self.cur.kind != Slice::Pass {
+        } else if !self.hold && self.amount <= 0.0 && self.cur.kind != Slice::Pass {
             // Turned off mid-slice: back to the live voice now.
             self.start(Slice::Pass, len);
         }
@@ -375,39 +454,76 @@ mod tests {
 
     #[test]
     fn glitch_slices_follow_the_tempo_and_never_click() {
-        let mut g = Glitch {
-            amount: 1.0,
-            rate: GlitchRate::Sixteenth,
-            ..Glitch::default()
-        };
-        g.set_transport(120.0, Some(0.0));
         // 1/16 at 120 bpm = 125 ms = 6000 samples at 48 kHz.
-        let mut kinds = std::collections::HashSet::new();
-        let mut changes = 0;
-        let mut last = g.slice();
-        let mut prev = 0.0f32;
-        let mut max_step = 0.0f32;
-        for k in 0..96_000 {
-            #[allow(clippy::cast_precision_loss)]
-            let x = 0.5 * (k as f32 * std::f32::consts::TAU * 220.0 / 48_000.0).sin();
-            let (y, _) = g.tick(x, x);
-            if k > 6_000 {
-                max_step = max_step.max((y - prev).abs());
+        for mode in GlitchMode::ALL {
+            let mut g = Glitch {
+                amount: 0.25,
+                rate: GlitchRate::Sixteenth,
+                mode,
+                ..Glitch::default()
+            };
+            g.set_transport(120.0, 4.0, Some(0.0));
+            let mut prev = 0.0f32;
+            let mut max_step = 0.0f32;
+            let mut bars = [[false; 16]; 3];
+            for k in 0..288_000 {
+                #[allow(clippy::cast_precision_loss)]
+                let x = 0.5 * (k as f32 * std::f32::consts::TAU * 220.0 / 48_000.0).sin();
+                let (y, _) = g.tick(x, x);
+                if k > 6_000 {
+                    max_step = max_step.max((y - prev).abs());
+                }
+                prev = y;
+                if k % 6_000 == 3_000 {
+                    assert!(matches!(g.slice(), Slice::Pass) || g.slice() == mode.slice());
+                    bars[k / 96_000][(k % 96_000) / 6_000] = g.slice() != Slice::Pass;
+                }
             }
-            prev = y;
-            if g.slice() != last || k % 6_000 == 0 {
-                kinds.insert(g.slice());
-            }
-            if g.slice() != last {
-                changes += 1;
-                last = g.slice();
+            // The same four steps of every bar, the last one included.
+            assert_eq!(bars[0], bars[1]);
+            assert_eq!(bars[1], bars[2]);
+            assert_eq!(bars[0].iter().filter(|&&b| b).count(), 4);
+            assert!(bars[0][15]);
+            // A 220 Hz sine at 0.5 steps by at most ~0.015 per sample; the
+            // crossfades keep every splice well below a click.
+            assert!(max_step < 0.06, "{mode:?}: step {max_step}");
+        }
+    }
+
+    #[test]
+    fn glitch_density_only_adds_steps() {
+        for steps in [4, 8, 16, 32, 12] {
+            let mut was = vec![false; steps as usize];
+            for k in 0..=steps {
+                let amount = f64::from(k) / f64::from(steps);
+                let now: Vec<bool> = (0..steps).map(|s| glitch_step(s, steps, amount)).collect();
+                assert_eq!(now.iter().filter(|&&b| b).count() as u32, k);
+                assert!(was.iter().zip(&now).all(|(a, b)| !a || *b));
+                was = now;
             }
         }
-        assert!(kinds.len() >= 3, "{kinds:?}");
-        assert!(changes <= 16, "{changes}");
-        // A 220 Hz sine at 0.5 steps by at most ~0.015 per sample; the
-        // crossfades keep every splice well below a click.
-        assert!(max_step < 0.06, "step {max_step}");
+    }
+
+    #[test]
+    fn glitch_hold_catches_one_slice() {
+        let mut g = Glitch {
+            hold: true,
+            mode: GlitchMode::Repeat,
+            ..Glitch::default()
+        };
+        g.set_transport(120.0, 4.0, Some(0.0));
+        // A ramp: while held, the output keeps replaying the same slice.
+        let out: Vec<f32> = (0..60_000)
+            .map(|k| {
+                #[allow(clippy::cast_precision_loss)]
+                let x = k as f32 / 60_000.0;
+                g.tick(x, x).0
+            })
+            .collect();
+        let a = out[20_000];
+        let b = out[20_000 + 6_000];
+        let c = out[20_000 + 18_000];
+        assert!((a - b).abs() < 1e-4 && (a - c).abs() < 1e-4, "{a} {b} {c}");
     }
 
     #[test]

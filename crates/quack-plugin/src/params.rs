@@ -101,6 +101,18 @@ pub enum GlitchRateParam {
     ThirtySecond,
 }
 
+#[derive(ParamEnum)]
+pub enum GlitchModeParam {
+    #[name = "Repeat"]
+    Repeat,
+    #[name = "Stutter"]
+    Stutter,
+    #[name = "Reverse"]
+    Reverse,
+    #[name = "Tape"]
+    Tape,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -333,6 +345,12 @@ pub struct QuackParams {
     #[param(id = 607, name = "Glitch Rate", default = 2)]
     pub glitch_rate: EnumParam<GlitchRateParam>,
 
+    #[param(id = 608, name = "Glitch Mode", default = 0)]
+    pub glitch_mode: EnumParam<GlitchModeParam>,
+
+    #[param(id = 609, name = "Glitch Hold")]
+    pub glitch_hold: BoolParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -407,6 +425,15 @@ impl QuackParams {
             v.set(id, FloatParamReadF64::value(p));
         }
         v.set(ParamId::Freeze, f64::from(u8::from(self.freeze.value())));
+        v.set(
+            ParamId::GlitchHold,
+            f64::from(u8::from(self.glitch_hold.value())),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::GlitchMode,
+            self.glitch_mode.value().to_index() as f64,
+        );
         #[allow(clippy::cast_precision_loss)]
         v.set(
             ParamId::GlitchRate,

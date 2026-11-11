@@ -20,7 +20,7 @@
 //! voices on the same marks.
 
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
-use crate::creative::{Glitch, GlitchRate, Robot, Steer};
+use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
 use crate::latency::{DelayLine, latency_samples};
 use crate::midi::NoteStack;
@@ -248,7 +248,9 @@ impl Engine {
             | ParamId::Freeze
             | ParamId::Robot
             | ParamId::Glitch
-            | ParamId::GlitchRate => {
+            | ParamId::GlitchRate
+            | ParamId::GlitchMode
+            | ParamId::GlitchHold => {
                 self.update_creative(snap);
                 return;
             }
@@ -285,6 +287,8 @@ impl Engine {
         self.robot.amount = f64::from(pct(ParamId::Robot));
         self.glitch.amount = f64::from(pct(ParamId::Glitch));
         self.glitch.rate = GlitchRate::from_index(v.get(ParamId::GlitchRate));
+        self.glitch.mode = GlitchMode::from_index(v.get(ParamId::GlitchMode));
+        self.glitch.hold = on && v.get(ParamId::GlitchHold) >= 0.5;
         for (r, t) in self.layers.iter_mut().zip(targets) {
             if snap {
                 r.snap(t);
@@ -299,10 +303,11 @@ impl Engine {
         }
     }
 
-    /// Host tempo and, while playing, the beat position at the start of
-    /// the next block (the glitch slices follow them).
-    pub fn set_transport(&mut self, tempo: f64, beat: Option<f64>) {
-        self.glitch.set_transport(tempo, beat);
+    /// Host tempo, bar length in beats and, while playing, the beat
+    /// position at the start of the next block (the glitch steps follow
+    /// them).
+    pub fn set_transport(&mut self, tempo: f64, bar_beats: f64, beat: Option<f64>) {
+        self.glitch.set_transport(tempo, bar_beats, beat);
     }
 
     /// Whether a frozen grain is sounding (Creative mode).

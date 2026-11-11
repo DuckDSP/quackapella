@@ -173,7 +173,7 @@ chanteur de synthèse ; `--track IN.wav` affiche la hauteur toutes les
 ## Modes façon Manipulator (étape 5)
 
 Tout est actif **seulement en mode Creative** : en Natural et en Tune les
-réglages 600 à 607 sont ignorés (un test le vérifie à l'échantillon
+réglages 600 à 609 sont ignorés (un test le vérifie à l'échantillon
 près), le mode Natural reste naturel. **Aucun effet n'ajoute de
 latence** : tout travaille dans le budget de 10 ms déjà gelé.
 
@@ -197,11 +197,16 @@ latence** : tout travaille dans le budget de 10 ms déjà gelé.
 - **Robot** (0-100 %) : voix monocorde. Chaque phrase (après 60 ms sans
   voisement) est tenue sur sa première note corrigée, ou sur la note MIDI
   tenue. Entre 0 et 100 %, mélange géométrique avec la correction.
-- **Glitch** (0-100 %) et **Glitch Rate** (1/4 à 1/32) : tranches calées
-  sur le tempo de l'hôte (et sur sa position quand le transport tourne).
-  À chaque tranche, un tirage pondéré par Glitch choisit : passer, répéter
-  la tranche précédente, la bégayer (son début en boucle ×4), la jouer à
-  l'envers ou à demi-vitesse (chute de bande). Lecture dans le passé,
+- **Glitch** : rien n'est laissé au hasard. *Glitch Mode* choisit
+  l'effet (Repeat, Stutter, Reverse, Tape = demi-vitesse), *Glitch Rate*
+  la longueur d'un pas (1/4 à 1/32, sur le tempo et les mesures de
+  l'hôte), *Glitch* la densité : la part des pas de chaque mesure qui
+  sont glitchés, toujours les mêmes (le dernier pas d'abord, comme un
+  fill, puis répartis sur la mesure), donc une mesure sonne pareil à
+  chaque fois et monter le bouton ne fait qu'ajouter des pas. L'éditeur
+  montre les pas allumés. *Glitch Hold* glitche tous les pas tant qu'il
+  est enfoncé (bouton de jeu live, automatisable). Des pas glitchés à la
+  suite gardent la tranche attrapée (beat repeat). Lecture dans le passé,
   fondus de 3 ms : aucune latence, pas de clic.
 
 Le panneau **Manipulate** remplace le graphe de hauteur en mode Creative.

@@ -24,6 +24,7 @@ pub mod theme;
 
 use egui::{Align2, Color32, Rect, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
+use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
 use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::{ParamId, VoiceMode};
 
@@ -540,8 +541,8 @@ fn creative_panel(
         color::TEXT_FAINT,
     );
 
-    // Glitch: amount and slice length.
-    let row2 = r.bottom() - 70.0;
+    // Glitch: density, effect, slice length, hold.
+    let row2 = r.bottom() - 66.0;
     let gx = r.left() + space::L + kw * 0.5;
     controls::knob_sized(
         ui,
@@ -553,29 +554,57 @@ fn creative_panel(
         accent,
         &off,
     );
-    let rates: Vec<&str> = quack_dsp::creative::GlitchRate::ALL
-        .iter()
-        .map(|g| g.name())
-        .collect();
-    let seg = Rect::from_min_size(
-        pos2(gx + kw * 0.5 + space::S, row2 - 36.0),
-        vec2(r.right() - space::L - (gx + kw * 0.5 + space::S), 28.0),
+    let left = gx + kw * 0.5 + space::S;
+    let width = r.right() - space::L - left;
+    let modes: Vec<&str> = GlitchMode::ALL.iter().map(|g| g.name()).collect();
+    let mode_r = Rect::from_min_size(pos2(left, row2 - 50.0), vec2(width, 28.0));
+    controls::segmented(ui, params, ParamId::GlitchMode, mode_r, &modes, &[accent]);
+    let rates: Vec<&str> = GlitchRate::ALL.iter().map(|g| g.name()).collect();
+    let hold_w = 84.0;
+    let rate_r = Rect::from_min_size(
+        pos2(left, mode_r.bottom() + space::S),
+        vec2(width - hold_w - space::S, 28.0),
     );
-    controls::segmented(ui, params, ParamId::GlitchRate, seg, &rates, &[accent]);
+    controls::segmented(ui, params, ParamId::GlitchRate, rate_r, &rates, &[accent]);
+    let hold_r = Rect::from_min_size(
+        pos2(rate_r.right() + space::S, rate_r.top()),
+        vec2(hold_w, 28.0),
+    );
+    controls::toggle(ui, params, ParamId::GlitchHold, hold_r, "Hold", accent);
+    // The bar's steps: the glitched ones lit, the same every bar.
+    let rate = GlitchRate::from_index(params.get_plain(ParamId::GlitchRate));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let steps = (4.0 / rate.beats()).round() as u32;
+    let amount = params.get_plain(ParamId::Glitch) / 100.0;
+    let hold = params.get_plain(ParamId::GlitchHold) >= 0.5;
+    let strip = Rect::from_min_size(
+        pos2(left, rate_r.bottom() + space::S + 2.0),
+        vec2(width, 8.0),
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let cell = strip.width() / steps as f32;
+    for i in 0..steps {
+        #[allow(clippy::cast_precision_loss)]
+        let c = Rect::from_min_size(
+            pos2(strip.left() + cell * i as f32 + 1.0, strip.top()),
+            vec2(cell - 2.0, strip.height()),
+        );
+        let on = hold || glitch_step(i, steps, amount);
+        let fill = if on {
+            accent
+        } else if i % (steps / 4).max(1) == 0 {
+            color::TEXT_FAINT.gamma_multiply(0.5)
+        } else {
+            color::TEXT_FAINT.gamma_multiply(0.25)
+        };
+        p.rect_filled(c, 2.0, fill);
+    }
     text(
         p,
-        pos2(seg.left() + 2.0, seg.bottom() + 18.0),
+        pos2(left + 2.0, strip.bottom() + 14.0),
         Align2::LEFT_CENTER,
-        "Slices on the host tempo: repeat, stutter, reverse, tape drop",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    text(
-        p,
-        pos2(seg.left() + 2.0, seg.bottom() + 38.0),
-        Align2::LEFT_CENTER,
-        "MIDI notes play the freeze and the robot",
-        size::CAPTION,
+        "Same steps every bar  ·  Hold: every step  ·  MIDI plays the freeze",
+        size::CAPTION - 1.0,
         color::TEXT_FAINT,
     );
 }
