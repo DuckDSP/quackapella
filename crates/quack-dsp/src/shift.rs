@@ -428,17 +428,21 @@ impl Psola {
         } else {
             (self.voicing - step).max(0.0)
         };
-        // Unvoiced grains are never shifted: noise put back at another
-        // spacing would buzz.
-        let (ratio, fr) = if m.voiced {
-            (
-                pitch_ratio.powf(self.voicing),
-                formant_ratio.powf(self.voicing),
-            )
+        // The formant applies from the first sample, voiced or not: the
+        // timbre does not switch when the detector makes up its mind.
+        // Only the pitch glides in, and unvoiced grains are never
+        // transposed (noise put back at another spacing would buzz).
+        let fr = formant_ratio;
+        let (ratio, hl, hr) = if m.voiced {
+            (pitch_ratio.powf(self.voicing), left / fr, right / fr)
         } else {
-            (1.0, 1.0)
+            // Kept at the analysis spacing, so the grains still sum to
+            // one; each is read faster or slower, which moves its
+            // envelope, without reading past the recorded input.
+            #[allow(clippy::cast_precision_loss)]
+            let room = ((self.n - 2 - m.pos) as f64 / fr).max(1.0);
+            (1.0, left, right.min(room))
         };
-        let (hl, hr) = (left / fr, right / fr);
         // A grain due late (after waiting, or wider than the previous one)
         // is moved, never cut on its rising edge; the delay follows so the
         // input plays on from where it was.
@@ -450,7 +454,7 @@ impl Psola {
         let a = m.pos as f64;
         // More grains per second going up, fewer going down: keep the
         // loudness where it was (same for narrower or wider grains).
-        let gain = (fr / ratio).sqrt();
+        let gain = if m.voiced { (fr / ratio).sqrt() } else { 1.0 };
         for j in start..=end {
             let d = j as f64 - s;
             let w = if d < 0.0 {
@@ -465,7 +469,7 @@ impl Psola {
             self.acc[1][o] += w * self.read(1, src);
         }
         self.next_s = s + right / ratio;
-        self.lead = left.max(right) / fr;
+        self.lead = hl.max(hr);
         true
     }
 
@@ -719,6 +723,36 @@ mod tests {
         // The formant shift leaves the pitch alone.
         let y = shift(&x, 0.0, 7.0);
         assert!(cents(median_pitch(&y[9_600..]), 196.0).abs() < 10.0);
+    }
+
+    #[test]
+    fn formant_moves_unvoiced_sounds_too() {
+        // A whisper (noise through one resonance): never voiced, so the
+        // formant must apply without waiting for the detector.
+        let (b0, a1, a2) = resonator(1200.0, 300.0);
+        let mut seed = 1u32;
+        let (mut y1, mut y2) = (0.0, 0.0);
+        let x: Vec<f32> = (0..24_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let v = f64::from(seed >> 8) / f64::from(1u32 << 24) - 0.5;
+                let y = b0 * v - a1 * y1 - a2 * y2;
+                (y2, y1) = (y1, y);
+                #[allow(clippy::cast_possible_truncation)]
+                let y = y as f32;
+                y
+            })
+            .collect();
+        let rms = |y: &[f32]| (y.iter().map(|v| v * v).sum::<f32>() / y.len() as f32).sqrt();
+        let base = shift(&x, 0.0, 0.0);
+        let up = shift(&x, 0.0, 7.0);
+        let (b, u) = (
+            centroid(&base[14_000..16_048]),
+            centroid(&up[14_000..16_048]),
+        );
+        assert!(u / b > 1.2, "whisper formant up: {u:.0} vs {b:.0} Hz");
+        let db = 20.0 * (rms(&up[4_000..]) / rms(&base[4_000..])).log10();
+        assert!(db.abs() < 3.0, "whisper level {db:+.1} dB");
     }
 
     #[test]

@@ -86,15 +86,18 @@ détecteur, à la place de la ligne de retard du chemin traité :
   le côté « phasy » d'un vocodeur de phase ;
 - **formant séparé** : lire le grain plus vite ou plus lentement déplace
   l'enveloppe sans toucher la hauteur (±12 demi-tons) ;
-- **non voisé** (s, f, ch, souffle) : toujours replacé tel quel, jamais
-  transposé (du bruit transposé bourdonne). Un détecteur de bruit (part
+- **non voisé** (s, f, ch, souffle) : jamais transposé (du bruit
+  transposé bourdonne), mais le Formant s'y applique : chaque grain est lu
+  plus vite ou plus lentement, à espacement inchangé. Le timbre est donc
+  décalé dès le premier échantillon d'une phrase, sans attendre que le
+  détecteur reconnaisse la note : seule la hauteur arrive ensuite. Un détecteur de bruit (part
   d'énergie dans les aigus, sur 2 ms) force le non voisé sur les
   consonnes et les éclats de plosive, même si le détecteur de pitch les
   croit voisés : sinon ces éclats, recouverts par des grains qui se
   chevauchent, sont doublés (surtout avec un Formant non nul) ;
 - niveau gardé à peu près constant (gain `√(formant / ratio)` par grain) ;
 - **attaques** : les premiers grains d'une note glissent en 12 ms de la
-  hauteur chantée vers la hauteur visée (un petit scoop, au lieu d'un saut
+  hauteur chantée vers la hauteur visée, le Formant ne glissant pas (un petit scoop, au lieu d'un saut
   qui claque), une coupure du détecteur de moins de 10 ms garde la
   dernière période (pas de va-et-vient entre grains transposés et non
   transposés), et un grain plus large que le précédent est décalé plutôt
