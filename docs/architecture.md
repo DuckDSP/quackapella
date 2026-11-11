@@ -97,8 +97,8 @@ détecteur, à la place de la ligne de retard du chemin traité :
   chevauchent, sont doublés (surtout avec un Formant non nul) ;
 - niveau gardé à peu près constant (gain `√(formant / ratio)` par grain) ;
 - **attaques** : les premiers grains d'une note glissent en 12 ms de la
-  hauteur chantée vers la hauteur visée, le Formant ne glissant pas (un petit scoop, au lieu d'un saut
-  qui claque), une coupure du détecteur de moins de 10 ms garde la
+  hauteur chantée vers la hauteur visée (un petit scoop, au lieu d'un saut
+  qui claque ; le Formant, lui, ne glisse pas), une coupure du détecteur de moins de 10 ms garde la
   dernière période (pas de va-et-vient entre grains transposés et non
   transposés), et un grain plus large que le précédent est décalé plutôt
   que coupé ;
