@@ -420,6 +420,72 @@ mod tests {
         assert!((got - want).abs() < 0.1, "{got} vs {want}");
     }
 
+    /// A sine around A3 sung `cents` off through the engine;
+    /// median output note.
+    fn tuned_note(v: &ParamValues, cents: f64, midi: Option<u8>) -> f32 {
+        let mut e = Engine::new();
+        e.set_all(v, true);
+        if let Some(n) = midi {
+            e.note_on(0, n, 100);
+        }
+        let hz = 440.0 * ((57.0 + cents / 100.0 - 69.0) / 12.0f64).exp2();
+        let mut phase = 0.0;
+        #[allow(clippy::cast_possible_truncation)]
+        let x: Vec<f32> = (0..48_000)
+            .map(|_| {
+                phase += hz / 48_000.0;
+                phase -= phase.floor();
+                (0.3 * (std::f64::consts::TAU * phase).sin()) as f32
+            })
+            .collect();
+        let (mut l, mut r) = (x.clone(), x);
+        e.process(&mut l, &mut r);
+        let mut det = Yin::new(48_000.0);
+        let mut notes = Vec::new();
+        for c in l[12_000..].chunks(240) {
+            det.push(c);
+            if let Some(p) = det.estimate() {
+                notes.push(p.note());
+            }
+        }
+        assert!(notes.len() > 100);
+        notes.sort_by(f32::total_cmp);
+        notes[notes.len() / 2]
+    }
+
+    #[test]
+    fn hard_tune_lands_on_the_allowed_notes() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 1.0);
+        v.set(ParamId::Retune, 0.0);
+        v.set(ParamId::Vibrato, 0.0);
+        v.set(ParamId::Humanize, 0.0);
+        let got = tuned_note(&v, 38.0, None);
+        assert!((got - 57.0).abs() < 0.03, "{got}");
+        // A switched off: the voice goes to A# (nearer than G#).
+        v.set(ParamId::NoteA, 0.0);
+        let got = tuned_note(&v, 38.0, None);
+        assert!((got - 58.0).abs() < 0.03, "{got}");
+    }
+
+    #[test]
+    fn midi_exact_sings_the_played_note() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 1.0);
+        v.set(ParamId::Source, 2.0);
+        v.set(ParamId::Retune, 10.0);
+        let got = tuned_note(&v, -20.0, Some(64));
+        assert!((got - 64.0).abs() < 0.05, "{got}");
+    }
+
+    #[test]
+    fn correction_off_leaves_the_pitch_alone() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Correction, 0.0);
+        let got = tuned_note(&v, 38.0, None);
+        assert!((got - 57.38).abs() < 0.05, "{got}");
+    }
+
     #[test]
     fn notes_follow_midi() {
         let mut e = Engine::new();

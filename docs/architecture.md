@@ -128,6 +128,39 @@ Tests : transposition de -12 à +12 demi-tons à moins de 10 cents
 sans transposition (bruit à l'échantillon près, voyelle à -23 dB
 d'erreur), voix grave à 70 Hz, pas d'allocation dans `process`.
 
+## Autotune (étape 4)
+
+`autotune::Retuner` corrige **grain par grain, sur la période propre du
+grain** (distance entre deux impulsions de la forme d'onde), pas sur la
+lecture du détecteur qui a ~25 ms de retard : la correction est en phase
+avec la voix, le vibrato n'est jamais remis à contretemps. Le shifter
+l'appelle via le trait `shift::PitchControl` (un `f32` reste un rapport
+fixe).
+
+- Notes permises : gamme (10 gammes) dans sa tonalité, moins les notes
+  désactivées (12 interrupteurs) ; ou notes MIDI tenues (classes de
+  hauteur, toute octave) ; ou **MIDI Exact** (la note jouée, quelle que
+  soit la note chantée). Sans note tenue, la gamme reprend la main.
+- Correction : `sortie = chanté − Correction × passe-bas(écart − Vibrato ×
+  vibrato)`, constante de temps = Retune (+ Humanize sur les notes
+  tenues). À 0 ms les grains sont posés à exactement une période cible :
+  hard-tune net, justesse au cent près, sauts de note propres.
+- Vibrato : un détecteur d'oscillation (alternances à 2,5-10 Hz) ouvre
+  une porte ; un scoop ou une dérive ne sont pas pris pour du vibrato et
+  sont corrigés.
+- Choix de note avec hystérésis (0,2 demi-ton au-delà du milieu) et phase
+  d'attaque de 20 ms où la note est rechoisie librement ; un saut de plus
+  de 3 demi-tons ou un silence de 60 ms recommence une note.
+- Mode Natural : Retune plancher de 30 ms.
+- Corrigé au passage dans le shifter : chaque grain était retardé d'un
+  demi-échantillon en moyenne (sortie basse de 4 à 12 cents).
+
+Rendu hors ligne : `cargo run --release -p quack-dsp --example render --
+IN.wav OUT.wav mode=1 retune=0 key=9 scale=2` (clés des paramètres,
+`midi=60,64@1.5` pour tenir des notes) ; `--demo OUT.wav` écrit un
+chanteur de synthèse ; `--track IN.wav` affiche la hauteur toutes les
+10 ms.
+
 ## Modes
 
 | Mode | Intention | Formants |

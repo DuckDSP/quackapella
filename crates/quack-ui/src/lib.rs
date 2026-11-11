@@ -11,9 +11,11 @@
 //! Step 1 shows the mode, the level controls, bypass, the MIDI notes
 //! received and the latency; step 2 adds the detected pitch (note,
 //! cents, Hz, confidence) as a tuner strip; step 3 the Voice panel
-//! (transposition, fine tune, formant shift). Panels for autotune,
-//! harmonies and vocoder come with their DSP steps (roadmap step 8 for
-//! presets, macros and MIDI learn).
+//! (transposition, fine tune, formant shift); step 4 the Tune panel
+//! (key, scale, note switches, MIDI targets, retune, humanize, vibrato)
+//! and the pitch graph, which scrolls the sung pitch, the target notes
+//! and the corrected pitch. Panels for harmonies and vocoder come with
+//! their DSP steps (roadmap step 8 for presets, macros and MIDI learn).
 
 mod brand;
 mod controls;
@@ -21,6 +23,8 @@ mod paint;
 pub mod theme;
 
 use egui::{Align2, Color32, Rect, pos2, vec2};
+use quack_dsp::autotune::{Scale, Source, scale_mask};
+use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::{ParamId, VoiceMode};
 
 use paint::{panel, spaced, text, value, well};
@@ -28,8 +32,8 @@ use theme::{color, size, space};
 
 /// Editor size in points (fixed for now; zoom comes with step 8, with
 /// the AUv2 resize patch already in `vendor/`).
-pub const BASE_W: u32 = 760;
-pub const BASE_H: u32 = 680;
+pub const BASE_W: u32 = 1040;
+pub const BASE_H: u32 = 720;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -58,13 +62,49 @@ pub struct View {
     /// Detected pitch in Hz, 0 while unvoiced, and its confidence (0-1).
     pub pitch_hz: f32,
     pub pitch_confidence: f32,
+    /// Autotune, as fractional MIDI notes (0 while off or unvoiced): the
+    /// note sung, the target and the corrected note (before
+    /// transposition); and the pitch classes in use (bit 0 = C).
+    pub tune_sung: f32,
+    pub tune_target: f32,
+    pub tune_out: f32,
+    pub tune_mask: u16,
+}
+
+/// Seconds of pitch history in the graph.
+pub const HISTORY_S: f64 = 4.0;
+const HISTORY_LEN: usize = 1024;
+
+/// One frame of the pitch graph: time, then notes (0 = none).
+#[derive(Debug, Clone, Copy, Default)]
+struct Sample {
+    t: f64,
+    sung: f32,
+    target: f32,
+    out: f32,
 }
 
 /// Editor state kept between frames.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct UiState {
     /// Knob being dragged and its normalized value at press.
     drag: Option<(ParamId, f64)>,
+    /// Pitch graph: ring of samples, next write, and the note the view
+    /// is centred on.
+    history: Vec<Sample>,
+    head: usize,
+    centre: f32,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            drag: None,
+            history: vec![Sample::default(); HISTORY_LEN],
+            head: 0,
+            centre: 60.0,
+        }
+    }
 }
 
 impl UiState {
@@ -168,28 +208,28 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
 
     // Mode panel.
     let mode_r = Rect::from_min_size(
-        pos2(inner.left(), inner.top() + 52.0),
-        vec2(inner.width(), 96.0),
+        pos2(inner.left(), inner.top() + 48.0),
+        vec2(inner.width(), 82.0),
     );
     panel(&p, mode_r);
     text(
         &p,
-        mode_r.left_top() + vec2(space::L, 20.0),
+        mode_r.left_top() + vec2(space::L, 22.0),
         Align2::LEFT_CENTER,
         "Mode",
         size::LABEL,
         color::TEXT_DIM,
     );
     let seg = Rect::from_min_size(
-        mode_r.left_top() + vec2(space::L + 64.0, 6.0),
-        vec2(mode_r.width() - 2.0 * space::L - 64.0, 30.0),
+        mode_r.left_top() + vec2(space::L + 64.0, 7.0),
+        vec2(mode_r.width() * 0.55, 30.0),
     );
     let names: Vec<&str> = VoiceMode::ALL.iter().map(|m| m.name()).collect();
     let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
     controls::segmented(ui, params, ParamId::Mode, seg, &names, &accents);
     text(
         &p,
-        pos2(seg.left(), mode_r.bottom() - 30.0),
+        pos2(seg.left(), mode_r.bottom() - 22.0),
         Align2::LEFT_CENTER,
         mode_blurb(mode),
         size::BODY,
@@ -202,34 +242,37 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     };
     text(
         &p,
-        pos2(seg.left(), mode_r.bottom() - 12.0),
-        Align2::LEFT_CENTER,
+        pos2(mode_r.right() - space::L, mode_r.top() + 22.0),
+        Align2::RIGHT_CENTER,
         formants,
         size::CAPTION,
         accent,
     );
 
-    // Pitch strip.
-    let pitch_r = Rect::from_min_size(
-        pos2(inner.left(), mode_r.bottom() + space::L),
-        vec2(inner.width(), 64.0),
+    // Tune panel and pitch graph.
+    let mid_top = mode_r.bottom() + space::M;
+    let mid_h = 318.0;
+    let tune_r = Rect::from_min_size(pos2(inner.left(), mid_top), vec2(452.0, mid_h));
+    tune_panel(ui, params, st, view, tune_r, accent, mode);
+    let graph_r = Rect::from_min_max(
+        pos2(tune_r.right() + space::M, mid_top),
+        pos2(inner.right(), mid_top + mid_h),
     );
-    pitch_strip(&p, pitch_r, view, accent);
+    let now = ui.input(|i| i.time);
+    if now > 0.0 {
+        st.record(view, now);
+    }
+    pitch_graph(&p, graph_r, view, st, accent);
 
-    // Voice panel: transposition and formants.
-    let voice_r = Rect::from_min_size(
-        pos2(inner.left(), pitch_r.bottom() + space::L),
-        vec2(inner.width(), 148.0),
-    );
-    voice_panel(ui, params, st, voice_r, accent);
-
-    // Level panel.
-    let row_top = voice_r.bottom() + space::L;
-    let foot_h = 28.0;
+    // Bottom row: voice, level, MIDI.
+    let row_top = tune_r.bottom() + space::M;
+    let foot_h = 26.0;
     let row_h = inner.bottom() - foot_h - row_top;
+    let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(452.0, row_h));
+    voice_panel(ui, params, st, voice_r, accent);
     let level_r = Rect::from_min_size(
-        pos2(inner.left(), row_top),
-        vec2(inner.width() * 0.52, row_h),
+        pos2(voice_r.right() + space::M, row_top),
+        vec2(250.0, row_h),
     );
     panel(&p, level_r);
     text(
@@ -242,7 +285,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     );
     let db = |v: f64| format!("{v:+.1}");
     let pct = |v: f64| format!("{v:.0}");
-    let ky = level_r.center().y + 2.0;
+    let ky = level_r.center().y + 6.0;
     let kw = level_r.width() / 3.0;
     let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
         (ParamId::InputGain, &db),
@@ -252,12 +295,12 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     for (i, (id, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let cx = level_r.left() + kw * (i as f32 + 0.5);
-        controls::knob(ui, params, st, id, pos2(cx, ky), accent, fmt);
+        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
     }
 
     // MIDI panel.
     let midi_r = Rect::from_min_max(
-        pos2(level_r.right() + space::L, row_top),
+        pos2(level_r.right() + space::M, row_top),
         pos2(inner.right(), level_r.bottom()),
     );
     panel(&p, midi_r);
@@ -274,7 +317,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         .find(|n| view.held_notes & (1u128 << n) != 0);
     let count = view.held_notes.count_ones();
     let status = match latest {
-        None => "No note held".to_owned(),
+        None => "No note".to_owned(),
         Some(n) if count == 1 => note_name(n),
         Some(n) => format!("{} (+{})", note_name(n), count - 1),
     };
@@ -291,7 +334,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         },
     );
     let kb = Rect::from_min_max(
-        pos2(midi_r.left() + space::L, midi_r.top() + 44.0),
+        pos2(midi_r.left() + space::L, midi_r.top() + 40.0),
         pos2(midi_r.right() - space::L, midi_r.bottom() - space::L),
     );
     keyboard(&p, kb, view.held_notes, accent);
@@ -336,31 +379,13 @@ fn voice_panel(
         size::LABEL,
         color::TEXT_DIM,
     );
-    let st_fmt = |v: f64| format!("{v:+.1}");
-    let ct_fmt = |v: f64| format!("{v:+.0}");
-    // Same columns as the Level knobs below.
-    let kw = r.width() * 0.52 / 3.0;
-    let ky = r.center().y + 4.0;
-    let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
-        (ParamId::Pitch, &st_fmt),
-        (ParamId::Fine, &ct_fmt),
-        (ParamId::Formant, &st_fmt),
-    ];
-    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let cx = r.left() + kw * (i as f32 + 0.5);
-        controls::knob(ui, params, st, id, pos2(cx, ky), accent, fmt);
-    }
-
     let shift = params.get_plain(ParamId::Pitch) + params.get_plain(ParamId::Fine) / 100.0;
     let formant = params.get_plain(ParamId::Formant);
-    let x = r.left() + r.width() * 0.52 + space::L;
     let (line1, line2) = voice_summary(shift, formant);
-    let p = ui.painter();
     value(
         p,
-        pos2(x, ky - 12.0),
-        Align2::LEFT_CENTER,
+        r.right_top() + vec2(-space::L, 20.0),
+        Align2::RIGHT_CENTER,
         &line1,
         size::VALUE,
         if shift.abs() < 0.005 {
@@ -371,12 +396,363 @@ fn voice_panel(
     );
     text(
         p,
-        pos2(x, ky + 12.0),
-        Align2::LEFT_CENTER,
+        pos2(r.center().x, r.bottom() - 13.0),
+        Align2::CENTER_CENTER,
         &line2,
         size::CAPTION,
         color::TEXT_FAINT,
     );
+    let st_fmt = |v: f64| format!("{v:+.1}");
+    let ct_fmt = |v: f64| format!("{v:+.0}");
+    let kw = r.width() / 3.0;
+    let ky = r.center().y - 4.0;
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
+        (ParamId::Pitch, &st_fmt),
+        (ParamId::Fine, &ct_fmt),
+        (ParamId::Formant, &st_fmt),
+    ];
+    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + kw * (i as f32 + 0.5);
+        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
+    }
+}
+
+/// Key, scale, target source, note switches and the retune knobs.
+fn tune_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+    mode: VoiceMode,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 22.0),
+        Align2::LEFT_CENTER,
+        "Tune",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let sources: Vec<&str> = Source::ALL.iter().map(|s| s.name()).collect();
+    let src_r = Rect::from_min_size(
+        pos2(r.right() - space::L - 270.0, r.top() + 8.0),
+        vec2(270.0, 28.0),
+    );
+    controls::segmented(ui, params, ParamId::Source, src_r, &sources, &[accent]);
+
+    // Key and scale.
+    let row = r.top() + 48.0;
+    let key_r = Rect::from_min_size(
+        pos2(r.left() + space::L, row),
+        vec2(r.width() - 2.0 * space::L, 26.0),
+    );
+    controls::segmented(ui, params, ParamId::Key, key_r, &NOTE_NAMES, &[accent]);
+    let scale = Scale::from_index(params.get_plain(ParamId::Scale));
+    let scale_r = Rect::from_min_size(
+        pos2(key_r.left(), key_r.bottom() + space::S),
+        vec2(190.0, 30.0),
+    );
+    controls::stepper(ui, params, ParamId::Scale, scale_r, scale.name(), accent);
+
+    // Note switches: the scale in its key, a click takes a note out.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let key = params.get_plain(ParamId::Key).round().clamp(0.0, 11.0) as u8;
+    let notes_r = Rect::from_min_max(
+        pos2(scale_r.right() + space::M, scale_r.top()),
+        pos2(key_r.right(), scale_r.top() + 92.0),
+    );
+    controls::note_switches(
+        ui,
+        params,
+        &NOTE_PARAMS,
+        notes_r,
+        scale_mask(key, scale),
+        view.tune_mask,
+        accent,
+    );
+    let source = Source::from_index(params.get_plain(ParamId::Source));
+    let hint = match source {
+        Source::Scale => "Notes from the scale",
+        Source::Midi => "Held notes, any octave",
+        Source::MidiExact => "Sings the held note",
+    };
+    text(
+        p,
+        pos2(scale_r.left() + 2.0, scale_r.bottom() + 17.0),
+        Align2::LEFT_CENTER,
+        hint,
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+
+    // Knobs.
+    let pct = |v: f64| format!("{v:.0}");
+    let ms = |v: f64| {
+        if v < 0.5 {
+            "Hard".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let ky = r.bottom() - 78.0;
+    let kw = r.width() / 4.0;
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 4] = [
+        (ParamId::Correction, &pct),
+        (ParamId::Retune, &ms),
+        (ParamId::Humanize, &pct),
+        (ParamId::Vibrato, &pct),
+    ];
+    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + kw * (i as f32 + 0.5);
+        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 74.0, accent, fmt);
+    }
+    if mode == VoiceMode::Natural
+        && params.get_plain(ParamId::Retune) < quack_dsp::engine::NATURAL_MIN_RETUNE_S * 1000.0
+    {
+        text(
+            ui.painter(),
+            pos2(r.left() + kw * 1.5, r.bottom() - 10.0),
+            Align2::CENTER_CENTER,
+            "30 ms min. in Natural",
+            size::CAPTION - 1.5,
+            color::TEXT_FAINT,
+        );
+    }
+}
+
+impl UiState {
+    /// Add a frame to the pitch graph (`draw` does it with the UI's
+    /// clock; public for captures).
+    pub fn record(&mut self, view: &View, t: f64) {
+        let sung = if view.tune_sung > 0.0 {
+            view.tune_sung
+        } else if view.pitch_hz > 0.0 {
+            quack_dsp::pitch::hz_to_midi(view.pitch_hz)
+        } else {
+            0.0
+        };
+        let prev = self.history[(self.head + HISTORY_LEN - 1) % HISTORY_LEN];
+        // One sample per frame; frames faster than 4 ms are skipped.
+        if t > 0.0 && t - prev.t < 0.004 {
+            return;
+        }
+        self.history[self.head] = Sample {
+            t,
+            sung,
+            target: view.tune_target,
+            out: view.tune_out,
+        };
+        self.head = (self.head + 1) % HISTORY_LEN;
+        let focus = if view.tune_target > 0.0 {
+            view.tune_target
+        } else {
+            sung
+        };
+        if focus > 0.0 {
+            self.centre += 0.08 * (focus - self.centre);
+        }
+    }
+
+    fn samples(&self) -> impl Iterator<Item = Sample> + '_ {
+        (0..HISTORY_LEN).map(move |i| self.history[(self.head + i) % HISTORY_LEN])
+    }
+}
+
+/// Scrolling pitch: lanes for the notes in use, the sung pitch (thin),
+/// the target notes (bars) and the corrected pitch (accent), with the
+/// current reading on top.
+fn pitch_graph(p: &egui::Painter, r: Rect, view: &View, st: &UiState, accent: Color32) {
+    const SPAN: f32 = 15.0;
+    panel(p, r);
+    // Reading.
+    let ty = r.top() + 22.0;
+    text(
+        p,
+        pos2(r.left() + space::L, ty),
+        Align2::LEFT_CENTER,
+        "Pitch",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let reading = nearest_note(view.pitch_hz);
+    let x0 = r.left() + space::L + 52.0;
+    match reading {
+        Some((n, c)) => {
+            value(
+                p,
+                pos2(x0, ty),
+                Align2::LEFT_CENTER,
+                &note_name(n),
+                size::TITLE,
+                color::TEXT,
+            );
+            value(
+                p,
+                pos2(x0 + 48.0, ty),
+                Align2::LEFT_CENTER,
+                &format!("{c:+3.0} ct  {:.1} Hz", view.pitch_hz),
+                size::VALUE,
+                color::TEXT_DIM,
+            );
+        }
+        None => {
+            text(
+                p,
+                pos2(x0, ty),
+                Align2::LEFT_CENTER,
+                "Unvoiced",
+                size::CAPTION,
+                color::TEXT_FAINT,
+            );
+        }
+    }
+    if view.tune_target > 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let t = view.tune_target.round().clamp(0.0, 127.0) as u8;
+        let corr = (view.tune_out - view.tune_sung) * 100.0;
+        value(
+            p,
+            pos2(r.right() - space::L, ty),
+            Align2::RIGHT_CENTER,
+            &format!("{}  {corr:+.0} ct", note_name(t)),
+            size::VALUE,
+            accent,
+        );
+        text(
+            p,
+            pos2(r.right() - space::L - 112.0, ty),
+            Align2::RIGHT_CENTER,
+            "Target",
+            size::CAPTION,
+            color::TEXT_FAINT,
+        );
+    }
+
+    let g = Rect::from_min_max(
+        pos2(r.left() + space::L, r.top() + 44.0),
+        pos2(r.right() - space::L, r.bottom() - space::L),
+    );
+    well(p, g);
+    let g = g.shrink(2.0);
+    let lo = st.centre - SPAN * 0.5;
+    let y_of = |note: f32| g.bottom() - (note - lo) / SPAN * g.height();
+    let lane_h = g.height() / SPAN;
+    let clip = p.with_clip_rect(g);
+    // Lanes.
+    #[allow(clippy::cast_possible_truncation)]
+    let first = lo.floor() as i32;
+    for n in first..=first + SPAN as i32 + 1 {
+        #[allow(clippy::cast_precision_loss)]
+        let y = y_of(n as f32);
+        let pc = n.rem_euclid(12);
+        let used = view.tune_mask & (1 << pc) != 0;
+        if used {
+            clip.rect_filled(
+                Rect::from_center_size(pos2(g.center().x, y), vec2(g.width(), lane_h - 1.0)),
+                0.0,
+                color::GRID,
+            );
+        }
+        if pc == 0 {
+            clip.line_segment(
+                [
+                    pos2(g.left(), y + lane_h * 0.5),
+                    pos2(g.right(), y + lane_h * 0.5),
+                ],
+                egui::Stroke::new(1.0_f32, color::GRID_STRONG),
+            );
+        }
+        if used || pc == 0 {
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let name = note_name(n.clamp(0, 127) as u8);
+            clip.text(
+                pos2(g.left() + 5.0, y),
+                Align2::LEFT_CENTER,
+                name,
+                theme::value_font(size::CAPTION - 3.0),
+                if used {
+                    color::TEXT_FAINT
+                } else {
+                    color::GRID_STRONG
+                },
+            );
+        }
+    }
+    // Time axis: newest at the right edge.
+    let now = st.samples().map(|s| s.t).fold(0.0f64, f64::max);
+    #[allow(clippy::cast_possible_truncation)]
+    let x_of = |t: f64| g.right() - ((now - t) / HISTORY_S) as f32 * g.width();
+    let pts: Vec<Sample> = st
+        .samples()
+        .filter(|s| s.t > 0.0 && now - s.t <= HISTORY_S)
+        .collect();
+    // Target bars, one per held target.
+    let mut i = 0;
+    while i < pts.len() {
+        let n = pts[i].target;
+        let mut j = i;
+        while j + 1 < pts.len() && (pts[j + 1].target - n).abs() < 0.01 {
+            j += 1;
+        }
+        if n > 0.0 && j > i {
+            let bar = Rect::from_min_max(
+                pos2(x_of(pts[i].t), y_of(n) - lane_h * 0.32),
+                pos2(x_of(pts[j].t), y_of(n) + lane_h * 0.32),
+            );
+            clip.rect_filled(bar, 3.0, accent.gamma_multiply(0.22));
+        }
+        i = j + 1;
+    }
+    let line = |sel: fn(&Sample) -> f32, width: f32, c: Color32| {
+        let mut run: Vec<egui::Pos2> = Vec::new();
+        let flush = |run: &mut Vec<egui::Pos2>| {
+            if run.len() > 1 {
+                clip.add(egui::Shape::line(
+                    std::mem::take(run),
+                    egui::Stroke::new(width, c),
+                ));
+            }
+            run.clear();
+        };
+        let mut last: Option<f32> = None;
+        for s in &pts {
+            let v = sel(s);
+            if v <= 0.0 || last.is_some_and(|l| (l - v).abs() > 3.0) {
+                flush(&mut run);
+            }
+            if v > 0.0 {
+                run.push(pos2(x_of(s.t), y_of(v)));
+            }
+            last = (v > 0.0).then_some(v);
+        }
+        flush(&mut run);
+    };
+    line(|s| s.sung, 1.5, color::TEXT_FAINT);
+    line(|s| s.out, 2.0, accent);
+    // Legend.
+    let ly = g.bottom() - 10.0;
+    let mut x = g.right() - 8.0;
+    for (label, c) in [("Corrected", accent), ("Sung", color::TEXT_FAINT)] {
+        let w = text(
+            p,
+            pos2(x, ly),
+            Align2::RIGHT_CENTER,
+            label,
+            size::CAPTION - 2.0,
+            color::TEXT_DIM,
+        );
+        p.line_segment(
+            [pos2(w.left() - 18.0, ly), pos2(w.left() - 5.0, ly)],
+            egui::Stroke::new(2.0_f32, c),
+        );
+        x = w.left() - 28.0;
+    }
 }
 
 /// The Voice panel's two lines: the interval, then where the formants
@@ -415,119 +791,6 @@ pub fn nearest_note(hz: f32) -> Option<(u8, f32)> {
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Some((n as u8, (m - n) * 100.0))
-}
-
-/// Detected note, cents, Hz and confidence, with a ±50 cent meter.
-fn pitch_strip(p: &egui::Painter, r: Rect, view: &View, accent: Color32) {
-    panel(p, r);
-    let cy = r.center().y;
-    text(
-        p,
-        pos2(r.left() + space::L, cy),
-        Align2::LEFT_CENTER,
-        "Pitch",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    let reading = nearest_note(view.pitch_hz);
-    let note_x = r.left() + 84.0;
-    match reading {
-        Some((n, c)) => {
-            value(
-                p,
-                pos2(note_x, cy),
-                Align2::LEFT_CENTER,
-                &note_name(n),
-                size::READOUT,
-                accent,
-            );
-            value(
-                p,
-                pos2(note_x + 76.0, cy - 9.0),
-                Align2::LEFT_CENTER,
-                &format!("{c:+.0} ct"),
-                size::VALUE,
-                color::TEXT,
-            );
-            value(
-                p,
-                pos2(note_x + 76.0, cy + 10.0),
-                Align2::LEFT_CENTER,
-                &format!("{:.1} Hz", view.pitch_hz),
-                size::VALUE,
-                color::TEXT_DIM,
-            );
-        }
-        None => {
-            value(
-                p,
-                pos2(note_x, cy),
-                Align2::LEFT_CENTER,
-                "-",
-                size::READOUT,
-                color::TEXT_FAINT,
-            );
-            text(
-                p,
-                pos2(note_x + 76.0, cy),
-                Align2::LEFT_CENTER,
-                "Unvoiced",
-                size::CAPTION,
-                color::TEXT_FAINT,
-            );
-        }
-    }
-
-    // Meter.
-    let m = Rect::from_min_max(
-        pos2(r.left() + 280.0, cy - 10.0),
-        pos2(r.right() - 150.0, cy + 10.0),
-    );
-    well(p, m);
-    for k in -2..=2_i8 {
-        let x = m.center().x + f32::from(k) * m.width() / 4.0;
-        let h = if k == 0 { 7.0 } else { 4.0 };
-        p.line_segment(
-            [pos2(x, m.top() + 2.0), pos2(x, m.top() + 2.0 + h)],
-            egui::Stroke::new(1.0_f32, color::GRID_STRONG),
-        );
-        p.line_segment(
-            [pos2(x, m.bottom() - 2.0 - h), pos2(x, m.bottom() - 2.0)],
-            egui::Stroke::new(1.0_f32, color::GRID_STRONG),
-        );
-    }
-    if let Some((_, c)) = reading {
-        let x = m.center().x + c.clamp(-50.0, 50.0) / 100.0 * (m.width() - 8.0);
-        let alpha = 0.35 + 0.65 * view.pitch_confidence.clamp(0.0, 1.0);
-        p.rect_filled(
-            Rect::from_center_size(pos2(x, cy), vec2(4.0, m.height() - 4.0)),
-            2.0,
-            accent.gamma_multiply(alpha),
-        );
-    }
-
-    // Confidence.
-    text(
-        p,
-        pos2(r.right() - space::L - 44.0, cy),
-        Align2::RIGHT_CENTER,
-        "Confidence",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    let conf = if reading.is_some() {
-        format!("{:.0}%", view.pitch_confidence * 100.0)
-    } else {
-        "-".to_owned()
-    };
-    value(
-        p,
-        pos2(r.right() - space::L, cy),
-        Align2::RIGHT_CENTER,
-        &conf,
-        size::VALUE,
-        color::TEXT_DIM,
-    );
 }
 
 /// Three octaves from C3, held notes lit (any octave folds in).
@@ -633,6 +896,10 @@ mod tests {
                 sample_rate: 48_000.0,
                 pitch_hz: if mode % 2 == 0 { 0.0 } else { 223.1 },
                 pitch_confidence: 0.92,
+                tune_sung: 57.2,
+                tune_target: 57.0,
+                tune_out: 57.02,
+                tune_mask: 0b1010_1011_0101,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));
