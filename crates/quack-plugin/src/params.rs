@@ -24,6 +24,71 @@ pub enum ModeParam {
     Synth,
 }
 
+/// Keys, C first.
+#[derive(ParamEnum)]
+pub enum KeyParam {
+    #[name = "C"]
+    C,
+    #[name = "C#"]
+    Cs,
+    #[name = "D"]
+    D,
+    #[name = "D#"]
+    Ds,
+    #[name = "E"]
+    E,
+    #[name = "F"]
+    F,
+    #[name = "F#"]
+    Fs,
+    #[name = "G"]
+    G,
+    #[name = "G#"]
+    Gs,
+    #[name = "A"]
+    A,
+    #[name = "A#"]
+    As,
+    #[name = "B"]
+    B,
+}
+
+/// Scales, in `quack_dsp::autotune::Scale` order.
+#[derive(ParamEnum)]
+pub enum ScaleParam {
+    #[name = "Chromatic"]
+    Chromatic,
+    #[name = "Major"]
+    Major,
+    #[name = "Minor"]
+    NaturalMinor,
+    #[name = "Harmonic minor"]
+    HarmonicMinor,
+    #[name = "Melodic minor"]
+    MelodicMinor,
+    #[name = "Dorian"]
+    Dorian,
+    #[name = "Mixolydian"]
+    Mixolydian,
+    #[name = "Major pentatonic"]
+    MajorPentatonic,
+    #[name = "Minor pentatonic"]
+    MinorPentatonic,
+    #[name = "Blues"]
+    Blues,
+}
+
+/// Target sources, in `quack_dsp::autotune::Source` order.
+#[derive(ParamEnum)]
+pub enum SourceParam {
+    #[name = "Scale"]
+    Scale,
+    #[name = "MIDI"]
+    Midi,
+    #[name = "MIDI Exact"]
+    MidiExact,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -92,6 +157,104 @@ pub struct QuackParams {
     )]
     pub formant: FloatParam,
 
+    #[param(
+        id = 300,
+        name = "Correction",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub correction: FloatParam,
+
+    #[param(
+        id = 301,
+        name = "Retune",
+        range = "linear(0, 400)",
+        default = 50.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub retune: FloatParam,
+
+    #[param(
+        id = 302,
+        name = "Humanize",
+        range = "linear(0, 100)",
+        default = 20.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub humanize: FloatParam,
+
+    #[param(
+        id = 303,
+        name = "Vibrato",
+        range = "linear(0, 100)",
+        default = 80.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vibrato: FloatParam,
+
+    #[param(id = 304, name = "Key", default = 0)]
+    pub key: EnumParam<KeyParam>,
+
+    #[param(id = 305, name = "Scale", default = 0)]
+    pub scale: EnumParam<ScaleParam>,
+
+    #[param(id = 306, name = "Source", default = 0)]
+    pub source: EnumParam<SourceParam>,
+
+    #[param(id = 307, name = "Note C", default = true)]
+    pub note_c: BoolParam,
+
+    #[param(id = 308, name = "Note C#", default = true)]
+    pub note_cs: BoolParam,
+
+    #[param(id = 309, name = "Note D", default = true)]
+    pub note_d: BoolParam,
+
+    #[param(id = 310, name = "Note D#", default = true)]
+    pub note_ds: BoolParam,
+
+    #[param(id = 311, name = "Note E", default = true)]
+    pub note_e: BoolParam,
+
+    #[param(id = 312, name = "Note F", default = true)]
+    pub note_f: BoolParam,
+
+    #[param(id = 313, name = "Note F#", default = true)]
+    pub note_fs: BoolParam,
+
+    #[param(id = 314, name = "Note G", default = true)]
+    pub note_g: BoolParam,
+
+    #[param(id = 315, name = "Note G#", default = true)]
+    pub note_gs: BoolParam,
+
+    #[param(id = 316, name = "Note A", default = true)]
+    pub note_a: BoolParam,
+
+    #[param(id = 317, name = "Note A#", default = true)]
+    pub note_as: BoolParam,
+
+    #[param(id = 318, name = "Note B", default = true)]
+    pub note_b: BoolParam,
+
+    #[param(id = 319, name = "MIDI Gate")]
+    pub midi_gate: BoolParam,
+
+    #[param(
+        id = 320,
+        name = "Transition",
+        range = "linear(0, 300)",
+        default = 0.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub transition: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -117,6 +280,44 @@ impl QuackParams {
         v.set(ParamId::Pitch, FloatParamReadF64::value(&self.pitch));
         v.set(ParamId::Fine, FloatParamReadF64::value(&self.fine));
         v.set(ParamId::Formant, FloatParamReadF64::value(&self.formant));
+        v.set(
+            ParamId::Correction,
+            FloatParamReadF64::value(&self.correction),
+        );
+        v.set(ParamId::Retune, FloatParamReadF64::value(&self.retune));
+        v.set(ParamId::Humanize, FloatParamReadF64::value(&self.humanize));
+        v.set(ParamId::Vibrato, FloatParamReadF64::value(&self.vibrato));
+        #[allow(clippy::cast_precision_loss)]
+        {
+            v.set(ParamId::Key, self.key.value().to_index() as f64);
+            v.set(ParamId::Scale, self.scale.value().to_index() as f64);
+            v.set(ParamId::Source, self.source.value().to_index() as f64);
+        }
+        let notes = [
+            &self.note_c,
+            &self.note_cs,
+            &self.note_d,
+            &self.note_ds,
+            &self.note_e,
+            &self.note_f,
+            &self.note_fs,
+            &self.note_g,
+            &self.note_gs,
+            &self.note_a,
+            &self.note_as,
+            &self.note_b,
+        ];
+        for (id, p) in quack_dsp::params::NOTE_PARAMS.into_iter().zip(notes) {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
+        v.set(
+            ParamId::Transition,
+            FloatParamReadF64::value(&self.transition),
+        );
+        v.set(
+            ParamId::MidiGate,
+            f64::from(u8::from(self.midi_gate.value())),
+        );
         v
     }
 }

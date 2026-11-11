@@ -12,21 +12,33 @@
 //! The shifter delays the voice by exactly the fixed latency
 //! ([`crate::latency::LATENCY_MS`]), like the dry delay lines, so
 //! dry/wet and bypass never comb and the host's compensation is always
-//! right. Autotune and harmonies (next steps) will steer the shifter.
+//! right.
+//!
+//! The autotune ([`Retuner`]) steers the shifter grain by grain: it
+//! gets each grain's own period and returns the grain's pitch ratio
+//! (correction plus transposition). Harmonies (next steps) will add
+//! voices on the same marks.
 
+use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
 use crate::db_to_gain;
 use crate::latency::{DelayLine, latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
-use crate::params::{ParamId, ParamValues};
+use crate::params::{NOTE_PARAMS, ParamId, ParamValues};
 use crate::pitch::{PitchDetector, PitchEstimate, Yin};
 use crate::shift::{Psola, semitones_to_ratio};
+
+/// Fastest retune in the Natural mode: below it the correction is
+/// heard as an effect, which is the Tune mode's job.
+pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
 
 /// Smoothing time for gains and mix.
 const SMOOTH_MS: f64 = 20.0;
 /// Bypass crossfade.
 const BYPASS_MS: f64 = 10.0;
+/// MIDI Gate fade in and out.
+const GATE_MS: f64 = 8.0;
 
 pub const CHANNELS: usize = 2;
 
@@ -48,6 +60,11 @@ pub struct Engine {
     notes: NoteStack,
     detector: Yin,
     shifter: Psola,
+    retuner: Retuner,
+    /// MIDI Gate: 1 = open. Delayed by the latency, so it opens and
+    /// closes with the audio the notes were played against.
+    gate: Ramp,
+    gate_delay: DelayLine,
 }
 
 impl Default for Engine {
@@ -74,6 +91,9 @@ impl Engine {
             notes: NoteStack::default(),
             detector: Yin::default(),
             shifter: Psola::default(),
+            retuner: Retuner::default(),
+            gate: Ramp::new(1.0),
+            gate_delay: DelayLine::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -96,10 +116,14 @@ impl Engine {
             r.prepare(sample_rate, SMOOTH_MS);
         }
         self.bypass.prepare(sample_rate, BYPASS_MS);
+        self.gate.prepare(sample_rate, GATE_MS);
+        self.gate_delay.prepare(self.latency);
+        self.prime_gate();
         self.detector.prepare(sample_rate, max_block);
         self.shifter.prepare(sample_rate, self.latency);
-        self.apply_all(true);
+        self.retuner.prepare(sample_rate);
         self.notes.clear();
+        self.apply_all(true);
     }
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
@@ -109,8 +133,10 @@ impl Engine {
         }
         self.detector.reset();
         self.shifter.reset();
-        self.apply_all(true);
+        self.retuner.reset();
         self.notes.clear();
+        self.apply_all(true);
+        self.prime_gate();
     }
 
     /// The latency the host must compensate, in samples. Constant for a
@@ -128,6 +154,20 @@ impl Engine {
     #[must_use]
     pub fn notes(&self) -> &NoteStack {
         &self.notes
+    }
+
+    /// What the autotune is doing (sung, target and output notes),
+    /// `None` while unvoiced or with the correction off.
+    #[must_use]
+    pub fn tune(&self) -> Option<TuneReading> {
+        self.retuner.reading()
+    }
+
+    /// Allowed pitch classes of the autotune right now (bit 0 = C),
+    /// MIDI notes included.
+    #[must_use]
+    pub fn tune_mask(&self) -> u16 {
+        self.retuner.settings.mask
     }
 
     /// Latest pitch reading of the input, `None` while unvoiced.
@@ -176,6 +216,11 @@ impl Engine {
             ParamId::Formant => (&mut self.formant, v),
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
+                self.update_tune();
+                return;
+            }
+            _ => {
+                self.update_tune();
                 return;
             }
         };
@@ -186,16 +231,69 @@ impl Engine {
         }
     }
 
+    /// Fill the gate's delay with its current state (after a reset, the
+    /// gate does not fade in from closed).
+    fn prime_gate(&mut self) {
+        let g = self.gate.target();
+        self.gate.snap(g);
+        for _ in 0..self.gate_delay.delay() {
+            self.gate_delay.tick(g);
+        }
+    }
+
+    /// Autotune settings from the parameters, the mode and the held
+    /// notes.
+    fn update_tune(&mut self) {
+        let v = &self.values;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let key = v.get(ParamId::Key).round().clamp(0.0, 11.0) as u8;
+        let scale = Scale::from_index(v.get(ParamId::Scale));
+        let source = Source::from_index(v.get(ParamId::Source));
+        let enabled = NOTE_PARAMS.iter().enumerate().fold(0u16, |m, (i, p)| {
+            if v.get(*p) >= 0.5 { m | (1 << i) } else { m }
+        });
+        let scale_notes = scale_mask(key, scale) & enabled;
+        let held = crate::autotune::held_mask(&self.notes);
+        let (mask, exact) = match source {
+            Source::Scale => (scale_notes, None),
+            _ if held == 0 => (scale_notes, None),
+            Source::Midi => (held, None),
+            Source::MidiExact => (held, self.notes.latest().map(|n| f64::from(n.note))),
+        };
+        let gated = v.get(ParamId::MidiGate) >= 0.5 && source != Source::Scale && held == 0;
+        self.gate.set(if gated { 0.0 } else { 1.0 });
+        let natural = self.mode == VoiceMode::Natural;
+        let mut retune_s = v.get(ParamId::Retune) / 1000.0;
+        let mut vibrato = v.get(ParamId::Vibrato) / 100.0;
+        if natural {
+            retune_s = retune_s.max(NATURAL_MIN_RETUNE_S);
+            vibrato = vibrato.max(crate::autotune::NATURAL_MIN_VIBRATO);
+        }
+        self.retuner.settings = TuneSettings {
+            amount: v.get(ParamId::Correction) / 100.0,
+            retune_s,
+            humanize: v.get(ParamId::Humanize) / 100.0,
+            vibrato,
+            mask,
+            exact,
+            natural,
+            transition_s: v.get(ParamId::Transition) / 1000.0,
+        };
+    }
+
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
         self.notes.note_on(channel, note, velocity);
+        self.update_tune();
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
         self.notes.note_off(channel, note);
+        self.update_tune();
     }
 
     pub fn all_notes_off(&mut self) {
         self.notes.clear();
+        self.update_tune();
     }
 
     /// Process a stereo block in place. A mono host passes the same
@@ -210,13 +308,16 @@ impl Engine {
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
-            let pitch = semitones_to_ratio(self.pitch.tick());
+            self.retuner.transpose = f64::from(self.pitch.tick());
             let formant = semitones_to_ratio(self.formant.tick());
             let (in_l, in_r) = (*l * g_in, *r * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
-            let (wet_l, wet_r) = self.shifter.tick(in_l, in_r, period, pitch, formant);
+            let g_out = g_out * self.gate_delay.tick(self.gate.tick());
+            let (wet_l, wet_r) =
+                self.shifter
+                    .tick_with(in_l, in_r, period, &mut self.retuner, formant);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
@@ -347,6 +448,97 @@ mod tests {
         let got = det.estimate().expect("voiced").note();
         let want = crate::pitch::hz_to_midi(196.0) + 6.8;
         assert!((got - want).abs() < 0.1, "{got} vs {want}");
+    }
+
+    /// A sine around A3 sung `cents` off through the engine;
+    /// median output note.
+    fn tuned_note(v: &ParamValues, cents: f64, midi: Option<u8>) -> f32 {
+        let mut e = Engine::new();
+        e.set_all(v, true);
+        if let Some(n) = midi {
+            e.note_on(0, n, 100);
+        }
+        let hz = 440.0 * ((57.0 + cents / 100.0 - 69.0) / 12.0f64).exp2();
+        let mut phase = 0.0;
+        #[allow(clippy::cast_possible_truncation)]
+        let x: Vec<f32> = (0..48_000)
+            .map(|_| {
+                phase += hz / 48_000.0;
+                phase -= phase.floor();
+                (0.3 * (std::f64::consts::TAU * phase).sin()) as f32
+            })
+            .collect();
+        let (mut l, mut r) = (x.clone(), x);
+        e.process(&mut l, &mut r);
+        let mut det = Yin::new(48_000.0);
+        let mut notes = Vec::new();
+        for c in l[12_000..].chunks(240) {
+            det.push(c);
+            if let Some(p) = det.estimate() {
+                notes.push(p.note());
+            }
+        }
+        assert!(notes.len() > 100);
+        notes.sort_by(f32::total_cmp);
+        notes[notes.len() / 2]
+    }
+
+    #[test]
+    fn hard_tune_lands_on_the_allowed_notes() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 1.0);
+        v.set(ParamId::Retune, 0.0);
+        v.set(ParamId::Vibrato, 0.0);
+        v.set(ParamId::Humanize, 0.0);
+        let got = tuned_note(&v, 38.0, None);
+        assert!((got - 57.0).abs() < 0.03, "{got}");
+        // A switched off: the voice goes to A# (nearer than G#).
+        v.set(ParamId::NoteA, 0.0);
+        let got = tuned_note(&v, 38.0, None);
+        assert!((got - 58.0).abs() < 0.03, "{got}");
+    }
+
+    #[test]
+    fn midi_exact_sings_the_played_note() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 1.0);
+        v.set(ParamId::Source, 2.0);
+        v.set(ParamId::Retune, 10.0);
+        let got = tuned_note(&v, -20.0, Some(64));
+        assert!((got - 64.0).abs() < 0.05, "{got}");
+    }
+
+    #[test]
+    fn correction_off_leaves_the_pitch_alone() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Correction, 0.0);
+        let got = tuned_note(&v, 38.0, None);
+        assert!((got - 57.38).abs() < 0.05, "{got}");
+    }
+
+    #[test]
+    fn midi_gate_mutes_without_a_note() {
+        let mut e = Engine::new();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Source, 1.0);
+        v.set(ParamId::MidiGate, 1.0);
+        e.set_all(&v, true);
+        e.reset();
+        let n = 4_800;
+        let run = |e: &mut Engine| {
+            let mut l = vec![0.5; n];
+            let mut r = vec![0.5; n];
+            e.process(&mut l, &mut r);
+            l[n - 1]
+        };
+        assert!(run(&mut e).abs() < 1e-6);
+        e.note_on(0, 60, 100);
+        assert!((run(&mut e) - 0.5).abs() < 1e-3);
+        e.note_off(0, 60);
+        assert!(run(&mut e).abs() < 1e-6);
+        // Scale source: the gate does not apply.
+        e.set_param(ParamId::Source, 0.0);
+        assert!((run(&mut e) - 0.5).abs() < 1e-3);
     }
 
     #[test]

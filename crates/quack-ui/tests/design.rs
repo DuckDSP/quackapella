@@ -29,25 +29,82 @@ impl ParamAccess for Values {
 fn editor_captures() {
     let write = std::env::var_os("QUACK_WRITE_CAPTURES").is_some();
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design");
-    for (mode, name) in [(0.0, "natural"), (2.0, "creative")] {
+    for (mode, name) in [(0.0, "natural"), (1.0, "tune"), (2.0, "creative")] {
         let mut v = ParamValues::default();
         v.set(ParamId::Mode, mode);
         v.set(ParamId::InputGain, 3.0);
         v.set(ParamId::Mix, 80.0);
         v.set(ParamId::Pitch, if mode == 0.0 { -5.0 } else { 12.0 });
         v.set(ParamId::Fine, if mode == 0.0 { 12.0 } else { 0.0 });
-        v.set(ParamId::Formant, if mode == 0.0 { 0.0 } else { 4.5 });
+        v.set(ParamId::Formant, if mode == 2.0 { 4.5 } else { 0.0 });
+        if mode == 1.0 {
+            v.set(ParamId::Pitch, 0.0);
+            v.set(ParamId::Fine, 0.0);
+            v.set(ParamId::Retune, 0.0);
+            v.set(ParamId::Vibrato, 0.0);
+            v.set(ParamId::Key, 9.0);
+            v.set(ParamId::Scale, 2.0);
+            v.set(ParamId::NoteF, 0.0);
+            v.set(ParamId::Source, 1.0);
+        }
         let params = Values(RefCell::new(v));
         let view = View {
             held_notes: (1 << 57) | (1 << 64),
             latency_samples: 480,
             sample_rate: 48_000.0,
-            pitch_hz: if mode == 0.0 { 223.1 } else { 0.0 },
+            pitch_hz: if mode == 2.0 { 0.0 } else { 223.1 },
             pitch_confidence: 0.92,
+            tune_sung: 57.24,
+            tune_target: 57.0,
+            tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
+            tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);
         let mut st = UiState::default();
+        // Four seconds of a phrase in the graph.
+        for i in 0..240 {
+            let t = f64::from(i) / 60.0;
+            let mut v = view;
+            let (note, len) = [
+                (57.0, 0.9),
+                (60.0, 0.6),
+                (64.0, 1.2),
+                (62.0, 0.6),
+                (60.0, 0.7),
+            ]
+            .iter()
+            .scan(0.0, |acc, &(n, l)| {
+                *acc += l;
+                Some((n, *acc))
+            })
+            .find(|&(_, end)| t < end)
+            .unwrap_or((57.0, 9.0));
+            let gap = (len - t) < 0.08;
+            #[allow(clippy::cast_possible_truncation)]
+            let wob = (0.25 * (t * 33.0).sin() + 0.2 * ((t * 7.0).sin())) as f32;
+            #[allow(clippy::cast_possible_truncation)]
+            let note = note as f32;
+            if mode != 2.0 && !gap {
+                v.tune_sung = note + 0.3 + wob;
+                v.tune_target = note;
+                v.tune_out = if mode == 1.0 {
+                    note
+                } else {
+                    note + 0.6 * wob * 0.5
+                };
+                v.pitch_hz = quack_dsp::pitch::midi_to_hz(v.tune_sung);
+            } else {
+                v.tune_sung = 0.0;
+                v.tune_target = 0.0;
+                v.tune_out = 0.0;
+                v.pitch_hz = 0.0;
+            }
+            if i == 239 {
+                v = view;
+            }
+            st.record(&v, t + 1.0);
+        }
         #[allow(clippy::cast_precision_loss)]
         let canvas = support::raster::render(
             &ctx,

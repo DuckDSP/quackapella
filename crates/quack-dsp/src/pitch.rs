@@ -93,6 +93,12 @@ pub fn hz_to_midi(hz: f32) -> f32 {
     69.0 + 12.0 * (hz / 440.0).log2()
 }
 
+/// [`hz_to_midi`] in double precision.
+#[must_use]
+pub fn hz_to_midi_f64(hz: f64) -> f64 {
+    69.0 + 12.0 * (hz / 440.0).log2()
+}
+
 /// MIDI note number (fractional) to frequency.
 #[must_use]
 pub fn midi_to_hz(note: f32) -> f32 {
