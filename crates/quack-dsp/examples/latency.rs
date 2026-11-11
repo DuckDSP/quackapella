@@ -63,34 +63,37 @@ fn vowel_with(hz: f64, secs: f64, depth: f64) -> Vec<f32> {
 }
 
 /// Mean and worst voice delay (ms) of `x` through an engine.
-fn measure(x: &[f32], values: &ParamValues, block: usize) -> (f64, f64) {
+fn measure(x: &[f32], sr: f64, values: &ParamValues, block: usize) -> (f64, f64) {
     let mut e = Engine::new();
-    e.prepare(SR, block);
+    e.prepare(sr, block);
     e.set_all(values, true);
     let (mut l, mut r) = (x.to_vec(), x.to_vec());
     let (mut sum, mut max, mut n) = (0.0, 0.0f64, 0.0);
     for (i, (cl, cr)) in l.chunks_mut(block).zip(r.chunks_mut(block)).enumerate() {
         e.process(cl, cr);
         // Skip the first half second (the first note sets the delay).
-        if i * block > 24_000 {
+        #[allow(clippy::cast_precision_loss)]
+        if (i * block) as f64 > 0.5 * sr {
             let d = e.voice_latency();
             sum += d;
             max = max.max(d);
             n += 1.0;
         }
     }
-    (sum / n / SR * 1000.0, max / SR * 1000.0)
+    (sum / n / sr * 1000.0, max / sr * 1000.0)
 }
 
-fn read_wav(path: &str) -> Vec<f32> {
+/// Sample rate and first channel of a WAV file.
+fn read_wav(path: &str) -> (f64, Vec<f32>) {
     let b = std::fs::read(path).expect("read");
     let find = |id: &[u8]| b.windows(4).position(|w| w == id).expect("chunk");
     let fmt = find(b"fmt ") + 8;
     let ch = usize::from(u16::from_le_bytes([b[fmt + 2], b[fmt + 3]]));
     let bits = u16::from_le_bytes([b[fmt + 14], b[fmt + 15]]);
+    let sr = u32::from_le_bytes([b[fmt + 4], b[fmt + 5], b[fmt + 6], b[fmt + 7]]);
     let data = find(b"data") + 8;
     let frame = ch * usize::from(bits / 8);
-    b[data..]
+    let x = b[data..]
         .chunks_exact(frame)
         .map(|c| match bits {
             16 => f32::from(i16::from_le_bytes([c[0], c[1]])) / 32_768.0,
@@ -99,7 +102,8 @@ fn read_wav(path: &str) -> Vec<f32> {
             32 => f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
             _ => panic!("unsupported WAV"),
         })
-        .collect()
+        .collect();
+    (f64::from(sr), x)
 }
 
 fn main() {
@@ -111,12 +115,12 @@ fn main() {
         return;
     }
     if let Some(path) = arg {
-        let x = read_wav(&path);
+        let (sr, x) = read_wav(&path);
         for range in VoiceRange::ALL {
             v.set(ParamId::Voice, f64::from(range as u8));
             for st in [0.0, 5.0, -7.0] {
                 v.set(ParamId::Pitch, st);
-                let (mean, max) = measure(&x, &v, 32);
+                let (mean, max) = measure(&x, sr, &v, 32);
                 println!(
                     "{:<15} {st:+} st: voice delay {mean:5.2} ms mean, {max:5.2} ms worst",
                     range.name()
@@ -139,7 +143,7 @@ fn main() {
             let reported = latency_samples(SR, range) as f64 / SR * 1000.0;
             let mut row = format!("{:<15} {reported:>9.2}", range.name());
             for hz in notes {
-                let (mean, _) = measure(&vowel(hz, 1.0), &v, block);
+                let (mean, _) = measure(&vowel(hz, 1.0), SR, &v, block);
                 row += &format!(" {mean:>8.2}");
             }
             println!("{row}");
