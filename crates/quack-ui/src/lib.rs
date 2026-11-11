@@ -15,11 +15,14 @@
 //! (key, scale, note switches, MIDI targets, retune, humanize, vibrato)
 //! and the pitch graph, which scrolls the sung pitch, the target notes
 //! and the corrected pitch. Panels for harmonies and vocoder come with
-//! their DSP steps (roadmap step 8 for presets, macros and MIDI learn).
+//! their DSP steps; step 8 adds the preset bar, the macro strip, the
+//! right-click menu (MIDI learn, macro depths) and zoom ([`perform`]).
 
 mod brand;
 mod controls;
+pub mod library;
 mod paint;
+pub mod perform;
 pub mod theme;
 
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
@@ -34,10 +37,10 @@ use quack_dsp::{ParamId, VoiceMode};
 use paint::{panel, spaced, text, value, well};
 use theme::{color, radius, size, space};
 
-/// Editor size in points (fixed for now; zoom comes with step 8, with
-/// the AUv2 resize patch already in `vendor/`).
+/// Editor size in points at 100 % zoom (the zoom scales it, with the
+/// AUv2 resize patch in `vendor/`).
 pub const BASE_W: u32 = 1040;
-pub const BASE_H: u32 = 720;
+pub const BASE_H: u32 = 820;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -46,6 +49,11 @@ pub trait ParamAccess {
     fn begin_edit(&self, id: ParamId);
     fn set_plain(&self, id: ParamId, plain: f64);
     fn end_edit(&self, id: ParamId);
+    /// Macros, MIDI learn and the loaded preset (step 8). `None`: the
+    /// editor shows no macro assignments or learn menus.
+    fn control(&self) -> Option<&quack_dsp::control::ControlState> {
+        None
+    }
 }
 
 /// One edit on its own (click, double-click, wheel step).
@@ -108,6 +116,8 @@ pub struct UiState {
     scale_menu: bool,
     /// Synth mode page: the vocoder instead of the harmonies.
     vocoder_page: bool,
+    /// Preset browser, values of this frame.
+    presets: perform::PresetUi,
 }
 
 impl Default for UiState {
@@ -119,6 +129,7 @@ impl Default for UiState {
             centre: 60.0,
             scale_menu: false,
             vocoder_page: false,
+            presets: perform::PresetUi::default(),
         }
     }
 }
@@ -180,7 +191,9 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     let pad = space::XL;
     let inner = full.shrink(pad);
 
-    // Header: wordmark, bypass, latency.
+    perform::refresh(params, st);
+
+    // Header: wordmark, presets, latency, bypass.
     let head_y = inner.top() + 18.0;
     spaced(
         &p,
@@ -221,43 +234,8 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         size::CAPTION,
         color::TEXT_FAINT,
     );
-    // Voice range: the lowest note sets the latency.
-    let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
-    let voice_r = Rect::from_min_size(
-        pos2(lat_caption.left() - space::XL - 150.0, head_y - 15.0),
-        vec2(150.0, 30.0),
-    );
-    controls::stepper(
-        ui,
-        params,
-        ParamId::Voice,
-        voice_r,
-        range.name(),
-        color::QUACK,
-    );
-    let voice_caption = text(
-        &p,
-        pos2(voice_r.left() - space::S, head_y),
-        Align2::RIGHT_CENTER,
-        "Voice",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    // Shorter grain attacks for low voices: less latency.
-    let low_r = Rect::from_min_size(
-        pos2(voice_caption.left() - space::XL - 120.0, head_y - 15.0),
-        vec2(120.0, 30.0),
-    );
-    controls::toggle(
-        ui,
-        params,
-        ParamId::LowLatency,
-        low_r,
-        "Low Latency",
-        color::QUACK,
-    );
 
-    // Mode panel.
+    // Mode panel: modes, then the voice range and latency switch.
     let mode_r = Rect::from_min_size(
         pos2(inner.left(), inner.top() + 48.0),
         vec2(inner.width(), 82.0),
@@ -273,7 +251,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     );
     let seg = Rect::from_min_size(
         mode_r.left_top() + vec2(space::L + 64.0, 7.0),
-        vec2(mode_r.width() * 0.55, 30.0),
+        vec2(mode_r.width() * 0.5, 30.0),
     );
     let names: Vec<&str> = VoiceMode::ALL.iter().map(|m| m.name()).collect();
     let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
@@ -286,19 +264,68 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         size::BODY,
         color::TEXT,
     );
+    // Voice range: the lowest note sets the latency.
+    let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
+    let voice_r = Rect::from_min_size(
+        pos2(mode_r.right() - space::L - 150.0, seg.top()),
+        vec2(150.0, 30.0),
+    );
+    controls::stepper(
+        ui,
+        params,
+        ParamId::Voice,
+        voice_r,
+        range.name(),
+        color::QUACK,
+    );
+    let voice_caption = text(
+        &p,
+        pos2(voice_r.left() - space::S, voice_r.center().y),
+        Align2::RIGHT_CENTER,
+        "Voice",
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+    // Shorter grain attacks for low voices: less latency.
+    let low_r = Rect::from_min_size(
+        pos2(voice_caption.left() - space::M - 116.0, seg.top()),
+        vec2(116.0, 30.0),
+    );
+    controls::toggle(
+        ui,
+        params,
+        ParamId::LowLatency,
+        low_r,
+        "Low Latency",
+        color::QUACK,
+    );
     let formants = if mode.preserves_formants() {
         "Formants preserved"
     } else {
         "Formants free"
     };
+    let formants_x = if mode == VoiceMode::Synth {
+        mode_r.right() - space::L - 220.0 - space::M
+    } else {
+        mode_r.right() - space::L
+    };
     text(
         &p,
-        pos2(mode_r.right() - space::L, mode_r.top() + 22.0),
+        pos2(formants_x, mode_r.bottom() - 22.0),
         Align2::RIGHT_CENTER,
         formants,
         size::CAPTION,
         accent,
     );
+
+    // Presets between the wordmark and the latency (drawn after the
+    // mode panel so the browser opens over it).
+    let bar_left = inner.left() + 230.0;
+    let bar_r = Rect::from_min_max(
+        pos2(bar_left, head_y - 15.0),
+        pos2(lat_caption.left() - space::XL, head_y + 15.0),
+    );
+    let bar_r = Rect::from_min_size(bar_r.min, vec2(bar_r.width().min(440.0), 30.0));
 
     // Tune panel and pitch graph.
     let mid_top = mode_r.bottom() + space::M;
@@ -334,7 +361,8 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     // Bottom row: voice, level, MIDI.
     let row_top = tune_r.bottom() + space::M;
     let foot_h = 26.0;
-    let row_h = inner.bottom() - foot_h - row_top;
+    let macro_h = 92.0;
+    let row_h = inner.bottom() - foot_h - macro_h - space::M - row_top;
     let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(452.0, row_h));
     voice_panel(ui, params, st, voice_r, accent);
     let level_r = Rect::from_min_size(
@@ -406,6 +434,13 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     );
     keyboard(&p, kb, view.held_notes, accent);
 
+    // Macros, program change, zoom.
+    let macro_r = Rect::from_min_size(
+        pos2(inner.left(), midi_r.bottom() + space::M),
+        vec2(inner.width(), macro_h),
+    );
+    perform::macro_panel(ui, params, st, macro_r, accent);
+
     // Footer: the DuckDSP mark.
     let mark_h = 14.0;
     let mark = Rect::from_min_size(
@@ -421,6 +456,9 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         size::CAPTION,
         color::TEXT_FAINT,
     );
+    perform::learn_status(ui, params, pos2(inner.center().x, mark.center().y));
+
+    perform::preset_bar(ui, params, st, bar_r);
 
     // Safety net: a drag cut short (window lost focus) ends its edit.
     if st.drag.is_some() && !ui.input(|i| i.pointer.any_down()) {

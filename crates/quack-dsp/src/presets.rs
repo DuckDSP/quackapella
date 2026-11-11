@@ -100,13 +100,16 @@ pub fn merge(current: &ParamValues, preset: &ParamValues) -> ParamValues {
 /// ignored), for the "modified" mark.
 #[must_use]
 pub fn matches(current: &ParamValues, preset: &ParamValues) -> bool {
-    ParamId::ALL.into_iter().filter(|id| in_preset(*id)).all(|id| {
-        let tol = match id.spec().kind {
-            ParamKind::Float { min, max, .. } => (max - min) * 1e-4,
-            _ => 0.0,
-        };
-        (current.get(id) - preset.get(id)).abs() <= tol
-    })
+    ParamId::ALL
+        .into_iter()
+        .filter(|id| in_preset(*id))
+        .all(|id| {
+            let tol = match id.spec().kind {
+                ParamKind::Float { min, max, .. } => (max - min) * 1e-4,
+                _ => 0.0,
+            };
+            (current.get(id) - preset.get(id)).abs() <= tol
+        })
 }
 
 /// A preset in memory (user file or factory copy).
@@ -122,7 +125,12 @@ pub struct Preset {
 impl Preset {
     /// The current sound as a preset.
     #[must_use]
-    pub fn capture(name: &str, category: &str, values: &ParamValues, control: &ControlState) -> Self {
+    pub fn capture(
+        name: &str,
+        category: &str,
+        values: &ParamValues,
+        control: &ControlState,
+    ) -> Self {
         Self {
             name: name.trim().to_owned(),
             category: category.trim().to_owned(),
@@ -325,12 +333,16 @@ const HARMONY_MACROS: [MacroDef; MACRO_COUNT] = [
 const VOCODER_MACROS: [MacroDef; MACRO_COUNT] = [
     mac("Bright", &[(P::BandShift, 0.25), (P::Sibilance, 0.5)]),
     mac("Detune", &[(P::Detune, 0.6), (P::CarrierNoise, 0.2)]),
-    mac("Release", &[(P::CarrierRelease, 0.4), (P::CarrierGlide, 0.3)]),
+    mac(
+        "Release",
+        &[(P::CarrierRelease, 0.4), (P::CarrierGlide, 0.3)],
+    ),
     mac("Voice Blend", &[(P::Lead, 0.6)]),
 ];
 
 /// Harmonies and vocoder off: the Synth presets turn on what they use.
-const SYNTH_CLEAN: [(ParamId, f64); 3] = [(P::Mode, SYNTH), (P::Harmony, H_OFF), (P::Correction, 60.0)];
+const SYNTH_CLEAN: [(ParamId, f64); 3] =
+    [(P::Mode, SYNTH), (P::Harmony, H_OFF), (P::Correction, 60.0)];
 
 macro_rules! vals {
     ($($id:ident = $v:expr),* $(,)?) => { &[$((P::$id, $v)),*] };
@@ -348,7 +360,13 @@ pub const FACTORY: &[Factory] = &[
     Factory {
         name: "Transparent Fix",
         category: "Natural",
-        values: vals!(Mode = NATURAL, Correction = 70.0, Retune = 120.0, Humanize = 40.0, Vibrato = 100.0),
+        values: vals!(
+            Mode = NATURAL,
+            Correction = 70.0,
+            Retune = 120.0,
+            Humanize = 40.0,
+            Vibrato = 100.0
+        ),
         macros: NATURAL_MACROS,
     },
     Factory {
@@ -373,166 +391,359 @@ pub const FACTORY: &[Factory] = &[
     Factory {
         name: "Gentle Tune",
         category: "Tune",
-        values: vals!(Mode = TUNE, Correction = 80.0, Retune = 80.0, Humanize = 35.0, Vibrato = 90.0),
+        values: vals!(
+            Mode = TUNE,
+            Correction = 80.0,
+            Retune = 80.0,
+            Humanize = 35.0,
+            Vibrato = 90.0
+        ),
         macros: TUNE_MACROS,
     },
     Factory {
         name: "Pop Tune",
         category: "Tune",
-        values: vals!(Mode = TUNE, Scale = MAJOR, Retune = 25.0, Humanize = 15.0, Vibrato = 70.0),
+        values: vals!(
+            Mode = TUNE,
+            Scale = MAJOR,
+            Retune = 25.0,
+            Humanize = 15.0,
+            Vibrato = 70.0
+        ),
         macros: TUNE_MACROS,
     },
     Factory {
         name: "Hard Tune",
         category: "Tune",
-        values: vals!(Mode = TUNE, Scale = MAJOR, Retune = 0.0, Humanize = 0.0, Vibrato = 0.0),
+        values: vals!(
+            Mode = TUNE,
+            Scale = MAJOR,
+            Retune = 0.0,
+            Humanize = 0.0,
+            Vibrato = 0.0
+        ),
         macros: TUNE_MACROS,
     },
     Factory {
         name: "Hard Tune Glide",
         category: "Tune",
-        values: vals!(Mode = TUNE, Scale = MAJOR, Retune = 0.0, Humanize = 0.0, Vibrato = 0.0, Transition = 60.0),
+        values: vals!(
+            Mode = TUNE,
+            Scale = MAJOR,
+            Retune = 0.0,
+            Humanize = 0.0,
+            Vibrato = 0.0,
+            Transition = 60.0
+        ),
         macros: TUNE_MACROS,
     },
     Factory {
         name: "MIDI Tune",
         category: "Tune",
-        values: vals!(Mode = TUNE, Source = SRC_MIDI, Retune = 10.0, Humanize = 10.0, Vibrato = 50.0),
+        values: vals!(
+            Mode = TUNE,
+            Source = SRC_MIDI,
+            Retune = 10.0,
+            Humanize = 10.0,
+            Vibrato = 50.0
+        ),
         macros: TUNE_MACROS,
     },
     Factory {
         name: "MIDI Exact Gate",
         category: "Tune",
-        values: vals!(Mode = TUNE, Source = SRC_MIDI_EXACT, MidiGate = 1.0, Retune = 0.0, Humanize = 0.0, Vibrato = 0.0),
+        values: vals!(
+            Mode = TUNE,
+            Source = SRC_MIDI_EXACT,
+            MidiGate = 1.0,
+            Retune = 0.0,
+            Humanize = 0.0,
+            Vibrato = 0.0
+        ),
         macros: TUNE_MACROS,
     },
     // Creative: pitch and formants apart, octaves, robot, glitch.
     Factory {
         name: "Monster",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Correction = 0.0, Pitch = -7.0, Formant = -6.0, OctaveDown = 25.0),
+        values: vals!(
+            Mode = CREATIVE,
+            Correction = 0.0,
+            Pitch = -7.0,
+            Formant = -6.0,
+            OctaveDown = 25.0
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Chipmunk",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Correction = 0.0, Pitch = 7.0, Formant = 6.0),
+        values: vals!(
+            Mode = CREATIVE,
+            Correction = 0.0,
+            Pitch = 7.0,
+            Formant = 6.0
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Octave Stack",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Retune = 20.0, OctaveDown = 60.0, Sub = 30.0, OctaveUp = 30.0),
+        values: vals!(
+            Mode = CREATIVE,
+            Retune = 20.0,
+            OctaveDown = 60.0,
+            Sub = 30.0,
+            OctaveUp = 30.0
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Robot",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Retune = 0.0, Humanize = 0.0, Vibrato = 0.0, Robot = 85.0),
+        values: vals!(
+            Mode = CREATIVE,
+            Retune = 0.0,
+            Humanize = 0.0,
+            Vibrato = 0.0,
+            Robot = 85.0
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Stutter 1/16",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Correction = 0.0, Glitch = 30.0, GlitchMode = GLITCH_STUTTER, GlitchRate = RATE_16TH),
+        values: vals!(
+            Mode = CREATIVE,
+            Correction = 0.0,
+            Glitch = 30.0,
+            GlitchMode = GLITCH_STUTTER,
+            GlitchRate = RATE_16TH
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Tape Stops",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Correction = 0.0, Glitch = 25.0, GlitchMode = GLITCH_TAPE, GlitchRate = RATE_8TH),
+        values: vals!(
+            Mode = CREATIVE,
+            Correction = 0.0,
+            Glitch = 25.0,
+            GlitchMode = GLITCH_TAPE,
+            GlitchRate = RATE_8TH
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Reverse Bits",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Correction = 0.0, Glitch = 25.0, GlitchMode = GLITCH_REVERSE, GlitchRate = RATE_8TH),
+        values: vals!(
+            Mode = CREATIVE,
+            Correction = 0.0,
+            Glitch = 25.0,
+            GlitchMode = GLITCH_REVERSE,
+            GlitchRate = RATE_8TH
+        ),
         macros: CREATIVE_MACROS,
     },
     Factory {
         name: "Freeze Over MIDI",
         category: "Creative",
-        values: vals!(Mode = CREATIVE, Source = SRC_MIDI, Retune = 0.0, FormantFollow = 50.0),
+        values: vals!(
+            Mode = CREATIVE,
+            Source = SRC_MIDI,
+            Retune = 0.0,
+            FormantFollow = 50.0
+        ),
         macros: CREATIVE_MACROS,
     },
     // Harmonizer (Synth mode).
     Factory {
         name: "Third Above",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Scale = MAJOR, Harmony = H_SCALE, Harmony1 = IV_3RD_UP, Harmony2 = IV_OFF, Harmony3 = IV_OFF, Harmony4 = IV_OFF, HarmonyLevel = 75.0),
+        values: vals!(
+            Mode = SYNTH,
+            Scale = MAJOR,
+            Harmony = H_SCALE,
+            Harmony1 = IV_3RD_UP,
+            Harmony2 = IV_OFF,
+            Harmony3 = IV_OFF,
+            Harmony4 = IV_OFF,
+            HarmonyLevel = 75.0
+        ),
         macros: HARMONY_MACROS,
     },
     Factory {
         name: "Thirds and Sixths",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Scale = MAJOR, Harmony = H_SCALE, Harmony1 = IV_3RD_UP, Harmony2 = IV_6TH_DOWN, Harmony3 = IV_OFF, Harmony4 = IV_OFF),
+        values: vals!(
+            Mode = SYNTH,
+            Scale = MAJOR,
+            Harmony = H_SCALE,
+            Harmony1 = IV_3RD_UP,
+            Harmony2 = IV_6TH_DOWN,
+            Harmony3 = IV_OFF,
+            Harmony4 = IV_OFF
+        ),
         macros: HARMONY_MACROS,
     },
     Factory {
         name: "Four-Part Choir",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Scale = MAJOR, Harmony = H_SCALE, Harmony1 = IV_3RD_UP, Harmony2 = IV_5TH_UP, Harmony3 = IV_OCT_DOWN, Harmony4 = IV_3RD_DOWN, Spread = 85.0, HarmonyHumanize = 50.0),
+        values: vals!(
+            Mode = SYNTH,
+            Scale = MAJOR,
+            Harmony = H_SCALE,
+            Harmony1 = IV_3RD_UP,
+            Harmony2 = IV_5TH_UP,
+            Harmony3 = IV_OCT_DOWN,
+            Harmony4 = IV_3RD_DOWN,
+            Spread = 85.0,
+            HarmonyHumanize = 50.0
+        ),
         macros: HARMONY_MACROS,
     },
     Factory {
         name: "Power Fifths",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Scale = MAJOR, Harmony = H_SCALE, Harmony1 = IV_5TH_UP, Harmony2 = IV_OCT_UP, Harmony3 = IV_4TH_DOWN, Harmony4 = IV_OFF, Character = 40.0),
+        values: vals!(
+            Mode = SYNTH,
+            Scale = MAJOR,
+            Harmony = H_SCALE,
+            Harmony1 = IV_5TH_UP,
+            Harmony2 = IV_OCT_UP,
+            Harmony3 = IV_4TH_DOWN,
+            Harmony4 = IV_OFF,
+            Character = 40.0
+        ),
         macros: HARMONY_MACROS,
     },
     Factory {
         name: "MIDI Chords",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Harmony = H_MIDI, HarmonyLevel = 80.0, Glide = 40.0),
+        values: vals!(
+            Mode = SYNTH,
+            Harmony = H_MIDI,
+            HarmonyLevel = 80.0,
+            Glide = 40.0
+        ),
         macros: HARMONY_MACROS,
     },
     Factory {
         name: "Chord Follower",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Harmony = H_CHORD, Harmony1 = IV_3RD_UP, Harmony2 = IV_6TH_UP, Harmony3 = IV_OFF, Harmony4 = IV_OFF, CloseVoicing = 1.0, Latch = 1.0),
+        values: vals!(
+            Mode = SYNTH,
+            Harmony = H_CHORD,
+            Harmony1 = IV_3RD_UP,
+            Harmony2 = IV_6TH_UP,
+            Harmony3 = IV_OFF,
+            Harmony4 = IV_OFF,
+            CloseVoicing = 1.0,
+            Latch = 1.0
+        ),
         macros: HARMONY_MACROS,
     },
     Factory {
         name: "Doubler",
         category: "Harmony",
-        values: vals!(Mode = SYNTH, Harmony = H_OFF, Double = 70.0, Correction = 60.0),
+        values: vals!(
+            Mode = SYNTH,
+            Harmony = H_OFF,
+            Double = 70.0,
+            Correction = 60.0
+        ),
         macros: HARMONY_MACROS,
     },
     // Vocoder and talkbox (Synth mode).
     Factory {
         name: "Classic Vocoder",
         category: "Vocoder",
-        values: &[SYNTH_CLEAN[0], SYNTH_CLEAN[1], SYNTH_CLEAN[2], (P::Vocoder, VOCODER), (P::Carrier, SAW), (P::Lead, 0.0)],
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Vocoder, VOCODER),
+            (P::Carrier, SAW),
+            (P::Lead, 0.0),
+        ],
         macros: VOCODER_MACROS,
     },
     Factory {
         name: "Vocoder Chords",
         category: "Vocoder",
-        values: &[SYNTH_CLEAN[0], SYNTH_CLEAN[1], SYNTH_CLEAN[2], (P::Vocoder, VOCODER), (P::Carrier, SUPERSAW), (P::Bands, BANDS_32), (P::CarrierFollow, 0.0), (P::CarrierRelease, 200.0), (P::Lead, 0.0)],
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Vocoder, VOCODER),
+            (P::Carrier, SUPERSAW),
+            (P::Bands, BANDS_32),
+            (P::CarrierFollow, 0.0),
+            (P::CarrierRelease, 200.0),
+            (P::Lead, 0.0),
+        ],
         macros: VOCODER_MACROS,
     },
     Factory {
         name: "Voice + Vocoder",
         category: "Vocoder",
-        values: &[SYNTH_CLEAN[0], SYNTH_CLEAN[1], SYNTH_CLEAN[2], (P::Vocoder, VOCODER), (P::Carrier, SQUARE), (P::CarrierOctave, OCT_DOWN_1), (P::Lead, 70.0), (P::VocoderLevel, 60.0)],
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Vocoder, VOCODER),
+            (P::Carrier, SQUARE),
+            (P::CarrierOctave, OCT_DOWN_1),
+            (P::Lead, 70.0),
+            (P::VocoderLevel, 60.0),
+        ],
         macros: VOCODER_MACROS,
     },
     Factory {
         name: "Whisper",
         category: "Vocoder",
-        values: &[SYNTH_CLEAN[0], SYNTH_CLEAN[1], SYNTH_CLEAN[2], (P::Vocoder, VOCODER), (P::Carrier, NOISE), (P::Bands, BANDS_32), (P::Lead, 0.0), (P::Sibilance, 70.0)],
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Vocoder, VOCODER),
+            (P::Carrier, NOISE),
+            (P::Bands, BANDS_32),
+            (P::Lead, 0.0),
+            (P::Sibilance, 70.0),
+        ],
         macros: VOCODER_MACROS,
     },
     Factory {
         name: "Talkbox Funk",
         category: "Vocoder",
-        values: &[SYNTH_CLEAN[0], SYNTH_CLEAN[1], SYNTH_CLEAN[2], (P::Vocoder, TALKBOX), (P::Carrier, SQUARE), (P::CarrierGlide, 40.0), (P::Lead, 0.0)],
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Vocoder, TALKBOX),
+            (P::Carrier, SQUARE),
+            (P::CarrierGlide, 40.0),
+            (P::Lead, 0.0),
+        ],
         macros: VOCODER_MACROS,
     },
     Factory {
         name: "Robot Choir",
         category: "Vocoder",
-        values: &[SYNTH_CLEAN[0], SYNTH_CLEAN[1], SYNTH_CLEAN[2], (P::Vocoder, VOCODER), (P::Carrier, SUPERSAW), (P::Bands, BANDS_16), (P::Detune, 30.0), (P::Lead, 0.0), (P::Harmony, H_MIDI), (P::HarmonyLevel, 40.0)],
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Vocoder, VOCODER),
+            (P::Carrier, SUPERSAW),
+            (P::Bands, BANDS_16),
+            (P::Detune, 30.0),
+            (P::Lead, 0.0),
+            (P::Harmony, H_MIDI),
+            (P::HarmonyLevel, 40.0),
+        ],
         macros: VOCODER_MACROS,
     },
 ];
@@ -547,14 +758,22 @@ mod tests {
     #[test]
     fn factory_presets_are_valid_and_cover_every_category() {
         for c in CATEGORIES {
-            assert!(FACTORY.iter().filter(|f| f.category == c).count() >= 3, "{c}");
+            assert!(
+                FACTORY.iter().filter(|f| f.category == c).count() >= 3,
+                "{c}"
+            );
         }
         for (i, f) in FACTORY.iter().enumerate() {
             assert!(CATEGORIES.contains(&f.category), "{}", f.name);
             assert!(!FACTORY[..i].iter().any(|g| g.name == f.name), "{}", f.name);
             for &(id, v) in f.values {
                 assert!(in_preset(id), "{}: {id:?}", f.name);
-                assert_eq!(id.spec().kind.sanitize(v), v, "{}: {id:?} out of range", f.name);
+                assert_eq!(
+                    id.spec().kind.sanitize(v),
+                    v,
+                    "{}: {id:?} out of range",
+                    f.name
+                );
             }
             for m in &f.macros {
                 assert!(m.targets.len() <= crate::control::MACRO_SLOTS);
@@ -565,7 +784,11 @@ mod tests {
         }
         // Synth presets say whether the harmonies sound.
         for f in FACTORY.iter().filter(|f| f.category == "Vocoder") {
-            assert!(f.values.iter().any(|(id, _)| *id == P::Harmony), "{}", f.name);
+            assert!(
+                f.values.iter().any(|(id, _)| *id == P::Harmony),
+                "{}",
+                f.name
+            );
         }
     }
 

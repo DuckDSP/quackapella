@@ -139,11 +139,18 @@ pub(crate) fn knob_named(
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
+    crate::perform::attach(ui, &resp, params, id);
 
     let p = ui.painter();
     #[allow(clippy::cast_possible_truncation)]
     let t = kind.normalize(params.get_plain(id).max(floor)) as f32;
     paint_knob(p, centre, size_pt, t, accent);
+    // Macro modulation: where the macros take the value.
+    if params.control().is_some_and(|c| c.modulated(id)) {
+        #[allow(clippy::cast_possible_truncation)]
+        let m = kind.normalize(st.presets.modded.get(id).max(floor)) as f32;
+        crate::paint::mod_arc(p, centre, size_pt, t, m, accent);
+    }
     knob_value(
         p,
         area,
@@ -189,6 +196,7 @@ pub(crate) fn segmented(
             #[allow(clippy::cast_precision_loss)]
             set_once(params, id, i as f64);
         }
+        crate::perform::attach(ui, &resp, params, id);
         let accent = accents[i % accents.len()];
         if i == lit {
             rounded(
@@ -231,6 +239,7 @@ pub(crate) fn toggle(
         set_once(params, id, if on { 0.0 } else { 1.0 });
     }
     pill(ui.painter(), r, label, on, resp.hovered(), accent);
+    crate::perform::attach(ui, &resp, params, id);
 }
 
 /// Previous / next choice of an enum parameter, its name in between.
@@ -295,6 +304,7 @@ pub(crate) fn stepper(
         Sense::click(),
     );
     let open = name_resp.clicked();
+    crate::perform::attach(ui, &name_resp, params, id);
     if name_resp.hovered() {
         rounded(
             p,

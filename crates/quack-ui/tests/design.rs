@@ -8,11 +8,13 @@ mod support;
 use std::cell::RefCell;
 
 use quack_dsp::ParamId;
+use quack_dsp::control::ControlState;
 use quack_dsp::params::ParamValues;
+use quack_dsp::presets::FACTORY;
 use quack_ui::theme::{self, color};
 use quack_ui::{BASE_H, BASE_W, ParamAccess, UiState, View, draw};
 
-struct Values(RefCell<ParamValues>);
+struct Values(RefCell<ParamValues>, ControlState);
 
 impl ParamAccess for Values {
     fn get_plain(&self, id: ParamId) -> f64 {
@@ -23,6 +25,9 @@ impl ParamAccess for Values {
         self.0.borrow_mut().set(id, plain);
     }
     fn end_edit(&self, _: ParamId) {}
+    fn control(&self) -> Option<&ControlState> {
+        Some(&self.1)
+    }
 }
 
 #[test]
@@ -71,7 +76,22 @@ fn editor_captures() {
             v.set(ParamId::NoteF, 0.0);
             v.set(ParamId::Source, 1.0);
         }
-        let params = Values(RefCell::new(v));
+        // A factory preset of the mode loaded, its macros half up, one
+        // parameter learned.
+        let ctl = ControlState::default();
+        let pick = ["Transparent Fix", "Hard Tune", "Monster", "Four-Part Choir"][mode as usize];
+        let fi = FACTORY
+            .iter()
+            .position(|f| f.name == pick)
+            .expect("factory preset");
+        ctl.recall_factory_macros(fi);
+        let fv = quack_dsp::presets::merge(&v, &FACTORY[fi].values());
+        let v = if mode == 3.0 { fv } else { v };
+        let mut v = v;
+        v.set(ParamId::Macro1, 40.0);
+        v.set(ParamId::Macro2, if mode == 2.0 { 30.0 } else { 0.0 });
+        ctl.bind(1, ParamId::Macro1);
+        let params = Values(RefCell::new(v), ctl);
         let view = View {
             held_notes: if mode == 3.0 {
                 (1 << 57) | (1 << 60) | (1 << 64)

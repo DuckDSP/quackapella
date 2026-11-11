@@ -61,7 +61,9 @@ pub struct Target {
 
 fn pack(t: Option<Target>) -> u16 {
     #[allow(clippy::cast_possible_truncation)]
-    t.map_or(0, |t| ((t.id.index() as u16 + 1) << 8) | u16::from(t.depth.cast_unsigned()))
+    t.map_or(0, |t| {
+        ((t.id.index() as u16 + 1) << 8) | u16::from(t.depth.cast_unsigned())
+    })
 }
 
 fn unpack(v: u16) -> Option<Target> {
@@ -313,7 +315,10 @@ impl ControlState {
                 if let Some(t) = unpack(s.load(Ordering::Relaxed)) {
                     let k = t.id.spec().kind;
                     let span = k.max() - k.min();
-                    v.set(t.id, v.get(t.id) + f64::from(t.depth) / 100.0 * amount * span);
+                    v.set(
+                        t.id,
+                        v.get(t.id) + f64::from(t.depth) / 100.0 * amount * span,
+                    );
                 }
             }
         }
@@ -334,7 +339,10 @@ impl ControlState {
 
     fn resolve_pending(&self, names: &mut [String; MACRO_COUNT]) {
         let p = self.pending_names.swap(0, Ordering::Relaxed);
-        if let Some(f) = p.checked_sub(1).and_then(|i| crate::presets::FACTORY.get(i as usize)) {
+        if let Some(f) = p
+            .checked_sub(1)
+            .and_then(|i| crate::presets::FACTORY.get(i as usize))
+        {
             for (n, m) in names.iter_mut().zip(&f.macros) {
                 m.name.clone_into(n);
             }
@@ -467,7 +475,8 @@ impl ControlState {
                 "learn" => {
                     for item in v.split(',') {
                         if let Some((cc, key)) = item.trim().split_once(':')
-                            && let (Ok(cc), Some(id)) = (cc.trim().parse::<u8>(), by_key(key.trim()))
+                            && let (Ok(cc), Some(id)) =
+                                (cc.trim().parse::<u8>(), by_key(key.trim()))
                         {
                             self.bind(cc, id);
                         }
