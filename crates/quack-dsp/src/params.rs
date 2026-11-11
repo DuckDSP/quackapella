@@ -169,9 +169,13 @@ pub enum ParamId {
     CarrierNoise,
     CarrierRelease,
     CarrierFollow,
+    CarrierGlide,
+    VocoderHold,
+    FollowChord,
+    BendRange,
 }
 
-pub const PARAM_COUNT: usize = 68;
+pub const PARAM_COUNT: usize = 72;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -842,6 +846,45 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Bool { default: true },
     },
+    ParamSpec {
+        key: "carrier_glide",
+        host_id: 512,
+        name: "Carrier Glide",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 500.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_hold",
+        host_id: 513,
+        name: "Vocoder Hold",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "follow_chord",
+        host_id: 514,
+        name: "Follow Chord",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::vocoder::FollowChord::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "bend_range",
+        host_id: 515,
+        name: "Bend Range",
+        unit: "st",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 12.0,
+            default: 2.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -914,6 +957,10 @@ impl ParamId {
         Self::CarrierNoise,
         Self::CarrierRelease,
         Self::CarrierFollow,
+        Self::CarrierGlide,
+        Self::VocoderHold,
+        Self::FollowChord,
+        Self::BendRange,
     ];
 
     #[must_use]

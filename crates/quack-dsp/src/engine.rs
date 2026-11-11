@@ -34,7 +34,7 @@ use crate::shift::{LAYERS, Psola, semitones_to_ratio};
 /// heard as an effect, which is the Tune mode's job.
 pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
-use crate::vocoder::{Carrier, Vocoder, VocoderMode, bands_from_index};
+use crate::vocoder::{Carrier, FollowChord, Vocoder, VocoderMode, bands_from_index};
 
 /// Smoothing time for gains and mix.
 const SMOOTH_MS: f64 = 20.0;
@@ -354,7 +354,11 @@ impl Engine {
             | ParamId::Detune
             | ParamId::CarrierNoise
             | ParamId::CarrierRelease
-            | ParamId::CarrierFollow => {
+            | ParamId::CarrierFollow
+            | ParamId::CarrierGlide
+            | ParamId::VocoderHold
+            | ParamId::FollowChord
+            | ParamId::BendRange => {
                 self.update_vocoder(snap);
                 return;
             }
@@ -378,6 +382,7 @@ impl Engine {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();
                 self.update_harmony(snap);
+                self.update_vocoder(snap);
                 return;
             }
         };
@@ -522,6 +527,20 @@ impl Engine {
         s.noise = pct(ParamId::CarrierNoise);
         s.release_s = v.get(ParamId::CarrierRelease) / 1000.0;
         s.follow = v.get(ParamId::CarrierFollow) >= 0.5;
+        s.chord = FollowChord::from_index(v.get(ParamId::FollowChord));
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let key = v.get(ParamId::Key).round().clamp(0.0, 11.0) as u8;
+        s.scale = scale_mask(
+            key,
+            match Scale::from_index(v.get(ParamId::Scale)) {
+                // Thirds must be thirds: chromatic counts in major.
+                Scale::Chromatic => Scale::Major,
+                sc => sc,
+            },
+        );
+        s.glide_s = v.get(ParamId::CarrierGlide) / 1000.0;
+        s.hold = v.get(ParamId::VocoderHold) >= 0.5;
+        s.bend_range = v.get(ParamId::BendRange);
         self.vocoder.apply_settings();
         self.vocoder.set_notes(&self.notes);
         #[allow(clippy::cast_possible_truncation)]
@@ -635,6 +654,11 @@ impl Engine {
         self.update_harmony(false);
         self.update_vocoder(false);
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
+    }
+
+    /// MIDI pitch bend, -1 to 1: bends the vocoder's carrier.
+    pub fn pitch_bend(&mut self, bend: f64) {
+        self.vocoder.set_bend(bend);
     }
 
     pub fn all_notes_off(&mut self) {

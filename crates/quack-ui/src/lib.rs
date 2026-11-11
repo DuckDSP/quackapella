@@ -971,20 +971,27 @@ fn vocoder_panel(
         .map(note_name)
         .collect();
     let follow = params.get_plain(ParamId::CarrierFollow) >= 0.5;
+    let shown = playing
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let more = if playing.len() > 3 { " …" } else { "" };
     let status = match (mode, carrier) {
-        (VocoderMode::Off, _) => "Off · the voice shapes a synth".to_owned(),
-        (_, Carrier::Sidechain) => "Carrier: the side-chain input".to_owned(),
+        (VocoderMode::Off, _) => "-".to_owned(),
+        (_, Carrier::Sidechain) => "Side-chain".to_owned(),
         _ if !playing.is_empty() && view.held_notes == 0 && follow => {
-            format!("Follows your tuned voice · {}", playing.join(" "))
+            format!("Follow · {shown}{more}")
         }
-        _ if !playing.is_empty() => format!("Carrier plays {}", playing.join(" ")),
-        _ if follow => "Sing, or hold notes on MIDI".to_owned(),
-        _ => "Hold notes on MIDI to play the carrier".to_owned(),
+        _ if !playing.is_empty() => format!("{shown}{more}"),
+        _ if follow => "Sing or play".to_owned(),
+        _ => "Play MIDI".to_owned(),
     };
     text(
         p,
-        pos2(r.center().x, car_r.bottom() + 20.0),
-        Align2::CENTER_CENTER,
+        pos2(r.left() + space::L + 80.0, r.top() + 22.0),
+        Align2::LEFT_CENTER,
         &status,
         size::CAPTION,
         if playing.is_empty() || mode == VocoderMode::Off {
@@ -1020,14 +1027,15 @@ fn vocoder_panel(
     ];
     let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
     let synth = carrier != Carrier::Sidechain;
-    let row2: [Knob; 4] = [
+    let row2: [Knob; 5] = [
         (ParamId::CarrierOctave, "Octave", &octave, pitched),
         (ParamId::Detune, "Detune", &off, pitched),
         (ParamId::CarrierNoise, "Noise", &off, pitched),
         (ParamId::CarrierRelease, "Release", &ms, synth),
+        (ParamId::CarrierGlide, "Glide", &off, pitched),
     ];
     let kw = (r.width() - 2.0 * space::L) / 5.0;
-    let y1 = r.top() + 136.0;
+    let y1 = r.top() + 156.0;
     let y2 = r.bottom() - 64.0;
     for (row, y) in [(&row1[..], y1), (&row2[..], y2)] {
         for (i, (id, label, fmt, live)) in row.iter().enumerate() {
@@ -1047,12 +1055,26 @@ fn vocoder_panel(
             );
         }
     }
-    // Follow: the carrier sings the tuned note without MIDI.
-    let fr = Rect::from_min_size(
-        pos2(r.left() + space::L + kw * 4.0 + 6.0, y2 - 15.0),
-        vec2(kw - 12.0, 30.0),
-    );
+    // Follow (the carrier sings the tuned note without MIDI) and its
+    // chord, Hold (the timbre frozen on the carrier).
+    let row = car_r.bottom() + space::S;
+    let fr = Rect::from_min_size(pos2(car_r.left(), row), vec2(80.0, 26.0));
     controls::toggle(ui, params, ParamId::CarrierFollow, fr, "Follow", accent);
+    let hr = Rect::from_min_size(pos2(car_r.right() - 70.0, row), vec2(70.0, 26.0));
+    controls::toggle(ui, params, ParamId::VocoderHold, hr, "Hold", accent);
+    let cr = Rect::from_min_max(
+        pos2(fr.right() + space::S, row),
+        pos2(hr.left() - space::S, row + 26.0),
+    );
+    let chords = ["One", "Oct", "5th", "Maj", "Min", "Scale"];
+    controls::segmented(
+        ui,
+        params,
+        ParamId::FollowChord,
+        cr,
+        &chords,
+        &[if follow && synth { accent } else { dim }],
+    );
 }
 
 fn held_class(held: u128, class: u8) -> bool {

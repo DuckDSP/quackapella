@@ -146,6 +146,88 @@ impl Carrier {
     }
 }
 
+/// Notes the Follow carrier sings around the tuned note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FollowChord {
+    #[default]
+    Single,
+    /// The note and the octave below.
+    Octave,
+    /// The note and the fifth above.
+    Fifth,
+    Major,
+    Minor,
+    /// Third and fifth taken in the autotune's scale.
+    Scale,
+}
+
+impl FollowChord {
+    pub const COUNT: u32 = 6;
+    pub const ALL: [Self; 6] = [
+        Self::Single,
+        Self::Octave,
+        Self::Fifth,
+        Self::Major,
+        Self::Minor,
+        Self::Scale,
+    ];
+
+    #[must_use]
+    pub fn from_index(i: f64) -> Self {
+        Self::ALL[index(i, Self::ALL.len())]
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Single => "Single",
+            Self::Octave => "Octave",
+            Self::Fifth => "Fifth",
+            Self::Major => "Major",
+            Self::Minor => "Minor",
+            Self::Scale => "Scale",
+        }
+    }
+
+    /// Offsets in semitones from `note`, and how many there are.
+    /// `scale`: allowed pitch classes (bit 0 = C), for [`Self::Scale`].
+    #[must_use]
+    pub fn offsets(self, note: f64, scale: u16) -> ([f64; FOLLOW_SLOTS], usize) {
+        match self {
+            Self::Single => ([0.0, 0.0, 0.0], 1),
+            Self::Octave => ([0.0, -12.0, 0.0], 2),
+            Self::Fifth => ([0.0, 7.0, 0.0], 2),
+            Self::Major => ([0.0, 4.0, 7.0], 3),
+            Self::Minor => ([0.0, 3.0, 7.0], 3),
+            Self::Scale => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let pc = (note.round().rem_euclid(12.0)) as u32;
+                let has = |st: u32| scale & (1 << ((pc + st) % 12)) != 0;
+                let third = if has(4) {
+                    4.0
+                } else if has(3) {
+                    3.0
+                } else {
+                    4.0
+                };
+                let fifth = if has(7) {
+                    7.0
+                } else if has(6) {
+                    6.0
+                } else if has(8) {
+                    8.0
+                } else {
+                    7.0
+                };
+                ([0.0, third, fifth], 3)
+            }
+        }
+    }
+}
+
+/// Most Follow voices (the chord's notes).
+pub const FOLLOW_SLOTS: usize = 3;
+
 fn index(i: f64, len: usize) -> usize {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let i = i.max(0.0).round() as usize;
@@ -177,6 +259,17 @@ pub struct VocoderSettings {
     pub release_s: f64,
     /// Without MIDI, the carrier sings the tuned note.
     pub follow: bool,
+    /// Notes the Follow carrier sings.
+    pub chord: FollowChord,
+    /// Scale of the [`FollowChord::Scale`] chord (bit 0 = C).
+    pub scale: u16,
+    /// Portamento of the MIDI carrier, seconds (0 = none).
+    pub glide_s: f64,
+    /// Freeze the timbre: the voice's last spectrum stays on the
+    /// carrier (played by MIDI) until released.
+    pub hold: bool,
+    /// Pitch bend range, semitones.
+    pub bend_range: f64,
 }
 
 impl Default for VocoderSettings {
@@ -193,6 +286,11 @@ impl Default for VocoderSettings {
             noise: 0.05,
             release_s: 0.08,
             follow: true,
+            chord: FollowChord::Single,
+            scale: 0xFFF,
+            glide_s: 0.0,
+            hold: false,
+            bend_range: 2.0,
         }
     }
 }
@@ -278,8 +376,9 @@ struct Voice {
     /// MIDI note (fractional for the Follow voice), `None` = free.
     note: Option<f64>,
     held: bool,
-    /// The Follow voice (not a MIDI note).
+    /// A Follow voice (not a MIDI note), and its place in the chord.
     follow: bool,
+    slot: usize,
     /// Current and target frequency, Hz.
     hz: f64,
     target_hz: f64,
@@ -349,6 +448,12 @@ pub struct Vocoder {
     release_coef: f64,
     glide_coef: f64,
     notes: NoteStack,
+    /// The tuned note the Follow voices are built on.
+    follow_note: Option<f64>,
+    /// Pitch bend, -1..1, and the MIDI portamento.
+    bend: f64,
+    midi_glide_coef: f64,
+    last_hz: f64,
     leap_count: usize,
     leap_hold: usize,
     // Output alignment.
@@ -396,6 +501,10 @@ impl Default for Vocoder {
             release_coef: 0.0,
             glide_coef: 0.0,
             notes: NoteStack::default(),
+            follow_note: None,
+            bend: 0.0,
+            midi_glide_coef: 1.0,
+            last_hz: 0.0,
             leap_count: 0,
             leap_hold: 0,
             out_delay: DelayLine::default(),
@@ -495,6 +604,8 @@ impl Vocoder {
         self.unvoiced = 0.0;
         self.voices = [Voice::default(); CARRIER_VOICES];
         self.notes.clear();
+        self.follow_note = None;
+        self.last_hz = 0.0;
         self.out_delay.reset();
         self.level = 0.0;
     }
@@ -539,6 +650,11 @@ impl Vocoder {
         self.band_rel = coef(sr, s.response_s);
         self.band_att = coef(sr, 0.25 * s.response_s);
         self.release_coef = coef(sr, s.release_s / 4.0);
+        self.midi_glide_coef = if s.glide_s > 1e-4 {
+            coef(sr, s.glide_s / 3.0)
+        } else {
+            1.0
+        };
         if old.is_none_or(|o| o.mode != s.mode || o.response_s != s.response_s) {
             self.set_latency(self.latency);
         }
@@ -572,13 +688,21 @@ impl Vocoder {
             self.clock += 1;
             let i = self.free_voice();
             let hz = note_hz(n + 12.0 * f64::from(self.settings.octave));
+            // Portamento: from the last note played.
+            let from = if self.settings.glide_s > 1e-4 && self.last_hz > 0.0 {
+                self.last_hz
+            } else {
+                hz
+            };
+            self.last_hz = hz;
             let v = &mut self.voices[i];
             let restart = v.note.is_none() || v.gain < 1e-3;
             *v = Voice {
                 note: Some(n),
                 held: true,
                 follow: false,
-                hz,
+                slot: 0,
+                hz: from,
                 target_hz: hz,
                 gain: if restart { 0.0 } else { v.gain },
                 peak: 0.55 + 0.45 * f64::from(h.velocity) / 127.0,
@@ -594,6 +718,11 @@ impl Vocoder {
                 }
             }
         }
+    }
+
+    /// MIDI pitch bend, -1 to 1 (bends the carrier by the bend range).
+    pub fn set_bend(&mut self, bend: f64) {
+        self.bend = bend.clamp(-1.0, 1.0);
     }
 
     fn free_voice(&self) -> usize {
@@ -635,47 +764,58 @@ impl Vocoder {
     /// envelopes, up to 1).
     fn synth(&mut self, follow: Option<f64>) -> (f64, f64) {
         let s = self.settings;
-        // The Follow voice: the tuned sung note, while nothing is held.
+        // The Follow voices: the tuned sung note (and its chord), while
+        // nothing is held.
         if s.follow && self.notes.held().is_empty() {
-            match (
-                follow,
-                self.voices
-                    .iter()
-                    .position(|v| v.follow && v.note.is_some()),
-            ) {
-                (Some(n), Some(i)) => {
-                    let v = &mut self.voices[i];
-                    v.held = true;
+            match follow {
+                Some(n) => {
                     // A leap (an octave error of the detector, most
                     // often) must last before the carrier follows it.
-                    let leap = v.note.is_some_and(|m| (n - m).abs() > LEAP_ST);
+                    let leap = self.follow_note.is_some_and(|m| (n - m).abs() > LEAP_ST);
                     self.leap_count = if leap { self.leap_count + 1 } else { 0 };
                     if !leap || self.leap_count > self.leap_hold {
                         self.leap_count = 0;
-                        v.note = Some(n);
-                        v.target_hz = note_hz(n + 12.0 * f64::from(s.octave));
+                        self.follow_note = Some(n);
                     }
                 }
-                (Some(n), None) => {
-                    self.clock += 1;
-                    let i = self.free_voice();
-                    let hz = note_hz(n + 12.0 * f64::from(s.octave));
-                    self.voices[i] = Voice {
-                        note: Some(n),
-                        held: true,
-                        follow: true,
-                        hz,
-                        target_hz: hz,
-                        gain: 0.0,
-                        peak: 0.8,
-                        phase: self.voices[i].phase,
-                        age: self.clock,
-                    };
+                None => self.follow_note = None,
+            }
+            let base = self.follow_note;
+            let (offsets, count) = s.chord.offsets(base.unwrap_or(60.0), s.scale);
+            for (slot, off) in offsets.iter().enumerate() {
+                let at = self
+                    .voices
+                    .iter()
+                    .position(|v| v.follow && v.held && v.slot == slot && v.note.is_some());
+                match (base, slot < count, at) {
+                    (Some(b), true, Some(i)) => {
+                        let v = &mut self.voices[i];
+                        v.note = Some(b + off);
+                        v.target_hz = note_hz(b + off + 12.0 * f64::from(s.octave));
+                    }
+                    (Some(b), true, None) => {
+                        self.clock += 1;
+                        let i = self.free_voice();
+                        let hz = note_hz(b + off + 12.0 * f64::from(s.octave));
+                        self.voices[i] = Voice {
+                            note: Some(b + off),
+                            held: true,
+                            follow: true,
+                            slot,
+                            hz,
+                            target_hz: hz,
+                            gain: 0.0,
+                            peak: if slot == 0 { 0.8 } else { 0.6 },
+                            phase: self.voices[i].phase,
+                            age: self.clock,
+                        };
+                    }
+                    (_, _, Some(i)) => self.voices[i].held = false,
+                    _ => {}
                 }
-                (None, Some(i)) => self.voices[i].held = false,
-                (None, None) => {}
             }
         } else {
+            self.follow_note = None;
             for v in &mut self.voices {
                 if v.follow {
                     v.held = false;
@@ -691,7 +831,8 @@ impl Vocoder {
         };
         #[allow(clippy::cast_precision_loss)]
         let norm = 1.0 / (oscs as f64).sqrt();
-        let (att, rel, glide) = (self.attack_coef, self.release_coef, self.glide_coef);
+        let (att, rel) = (self.attack_coef, self.release_coef);
+        let bend = (self.bend * s.bend_range / 12.0).exp2();
         let mut out = 0.0;
         let mut level = 0.0;
         for v in &mut self.voices {
@@ -705,6 +846,11 @@ impl Vocoder {
                 v.follow = false;
                 continue;
             }
+            let glide = if v.follow {
+                self.glide_coef
+            } else {
+                self.midi_glide_coef
+            };
             v.hz += (v.target_hz - v.hz) * glide;
             level += v.gain;
             if s.carrier == Carrier::Noise || s.carrier == Carrier::Sidechain {
@@ -712,7 +858,7 @@ impl Vocoder {
             }
             let mut x = 0.0;
             for (o, spread) in SPREAD.iter().enumerate().take(oscs) {
-                let hz = v.hz * (spread * detune).exp2();
+                let hz = v.hz * bend * (spread * detune).exp2();
                 let dt = (hz / sr).min(0.5);
                 let t = v.phase[o];
                 x += match s.carrier {
@@ -776,6 +922,7 @@ impl Vocoder {
     fn vocode(&mut self, x: f64, carrier: f64, amp: f64) -> f64 {
         let n = self.settings.bands.clamp(2, MAX_BANDS);
         let (att, rel) = (self.band_att, self.band_rel);
+        let hold = self.settings.hold;
         let (c_att, c_coef) = (self.carrier_att, self.carrier_rel);
         let mut y = 0.0;
         for (vb, cb) in self.voice_bands[..n]
@@ -783,7 +930,9 @@ impl Vocoder {
             .zip(self.carrier_bands[..n].iter_mut())
         {
             let m = vb.tick(x).abs();
-            vb.env += (m - vb.env) * if m > vb.env { att } else { rel };
+            if !hold {
+                vb.env += (m - vb.env) * if m > vb.env { att } else { rel };
+            }
             let c = cb.tick(carrier);
             // Fast attack: a carrier onset never outruns its envelope
             // (no burst through the division).
@@ -813,7 +962,13 @@ impl Vocoder {
         self.hop_count += 1;
         if self.hop_count >= self.hop {
             self.hop_count = 0;
-            self.analyse();
+            if self.settings.hold {
+                // Frozen: the last frame stays.
+                self.k_step = [0.0; MAX_ORDER + 1];
+                self.lpc_gain_step = 0.0;
+            } else {
+                self.analyse();
+            }
         }
         let p = self.order;
         for i in 1..=p {
@@ -1045,6 +1200,47 @@ mod tests {
         let x = vowel(48_000, 700.0, 1200.0);
         run(&mut v, &x, None);
         assert_eq!(v.sounding(), 0);
+    }
+
+    #[test]
+    fn follow_chords_and_bend() {
+        let mut v = played(VocoderMode::Vocoder);
+        v.set_notes(&NoteStack::default());
+        v.settings.chord = FollowChord::Major;
+        v.apply_settings();
+        let x = vowel(4800, 700.0, 1200.0);
+        run(&mut v, &x, Some(60.0));
+        assert_eq!(v.sounding(), (1 << 60) | (1 << 64) | (1 << 67));
+        // A minor scale: the third comes out minor.
+        v.settings.chord = FollowChord::Scale;
+        v.settings.scale = crate::autotune::scale_mask(9, crate::autotune::Scale::NaturalMinor);
+        v.apply_settings();
+        run(&mut v, &x, Some(57.0));
+        let held: Vec<f64> = v
+            .voices
+            .iter()
+            .filter(|v| v.held)
+            .filter_map(|v| v.note)
+            .collect();
+        assert!(held.contains(&60.0) && held.contains(&64.0), "{held:?}");
+        // Bend moves the oscillators, not the notes.
+        v.set_bend(1.0);
+        run(&mut v, &x, Some(57.0));
+        assert!(v.voices.iter().any(|v| v.held && v.note == Some(57.0)));
+    }
+
+    #[test]
+    fn hold_keeps_the_timbre() {
+        for mode in [VocoderMode::Vocoder, VocoderMode::Talkbox] {
+            let mut v = played(mode);
+            let x = vowel(24_000, 700.0, 1200.0);
+            run(&mut v, &x, Some(60.0));
+            v.settings.hold = true;
+            v.apply_settings();
+            // The singer stops: the held note still speaks the vowel.
+            let y = run(&mut v, &vec![0.0; 24_000], None);
+            assert!(rms(&y[12_000..]) > 1e-3, "{mode:?}");
+        }
     }
 
     #[test]

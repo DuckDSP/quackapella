@@ -156,6 +156,23 @@ pub enum OctaveParam {
     Up2,
 }
 
+/// Follow chords, in `quack_dsp::vocoder::FollowChord` order.
+#[derive(ParamEnum)]
+pub enum FollowChordParam {
+    #[name = "Single"]
+    Single,
+    #[name = "Octave"]
+    Octave,
+    #[name = "Fifth"]
+    Fifth,
+    #[name = "Major"]
+    Major,
+    #[name = "Minor"]
+    Minor,
+    #[name = "Scale"]
+    Scale,
+}
+
 /// Harmony sources, in `quack_dsp::harmony::HarmonyMode` order.
 #[derive(ParamEnum)]
 pub enum HarmonyParam {
@@ -672,6 +689,33 @@ pub struct QuackParams {
     #[param(id = 511, name = "Carrier Follow", default = true)]
     pub carrier_follow: BoolParam,
 
+    #[param(
+        id = 512,
+        name = "Carrier Glide",
+        range = "linear(0, 500)",
+        default = 0.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub carrier_glide: FloatParam,
+
+    /// Freezes the vocoder's timbre on the carrier.
+    #[param(id = 513, name = "Vocoder Hold")]
+    pub vocoder_hold: BoolParam,
+
+    #[param(id = 514, name = "Follow Chord")]
+    pub follow_chord: EnumParam<FollowChordParam>,
+
+    #[param(
+        id = 515,
+        name = "Bend Range",
+        range = "linear(0, 12)",
+        default = 2.0,
+        unit = "st",
+        smooth = "none"
+    )]
+    pub bend_range: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -819,6 +863,23 @@ impl QuackParams {
         v.set(
             ParamId::CarrierFollow,
             f64::from(u8::from(self.carrier_follow.value())),
+        );
+        v.set(
+            ParamId::VocoderHold,
+            f64::from(u8::from(self.vocoder_hold.value())),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::FollowChord,
+            self.follow_chord.value().to_index() as f64,
+        );
+        v.set(
+            ParamId::CarrierGlide,
+            FloatParamReadF64::value(&self.carrier_glide),
+        );
+        v.set(
+            ParamId::BendRange,
+            FloatParamReadF64::value(&self.bend_range),
         );
         v
     }

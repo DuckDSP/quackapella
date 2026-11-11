@@ -84,6 +84,9 @@ impl QuackDsp {
             {
                 self.engine.all_notes_off();
             }
+            EventBody::PitchBend { value, .. } => {
+                self.engine.pitch_bend((f64::from(value) - 8192.0) / 8192.0);
+            }
             EventBody::ControlChange { cc, value, .. } if cc == CC_SUSTAIN => {
                 self.engine.set_sustain(value >= 64);
             }
