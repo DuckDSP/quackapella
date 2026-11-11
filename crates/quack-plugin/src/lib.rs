@@ -70,7 +70,9 @@ impl QuackDsp {
         }
     }
 
-    fn handle(&mut self, body: &EventBody) {
+    /// Apply one MIDI event. Returns whether it moved parameters (a
+    /// learned CC or a program change): the caller re-reads them.
+    fn handle(&mut self, body: &EventBody, params: &QuackParams) -> bool {
         match *body {
             EventBody::NoteOn {
                 channel,
@@ -90,8 +92,20 @@ impl QuackDsp {
             EventBody::ControlChange { cc, value, .. } if cc == CC_SUSTAIN => {
                 self.engine.set_sustain(value >= 64);
             }
+            // MIDI learn: the CC moves the parameter itself, so the
+            // editor and the saved state follow.
+            EventBody::ControlChange { cc, value, .. } => {
+                if let Some((id, norm)) = params.control.on_cc(cc, value) {
+                    params.set_normalized(id.spec().host_id, norm);
+                    return true;
+                }
+            }
+            EventBody::ProgramChange { program, .. } if params.control.program_change() => {
+                return params.recall_factory(usize::from(program));
+            }
             _ => {}
         }
+        false
     }
 
     /// Run the engine on `frames` of the buffer from `offset`, through
@@ -182,7 +196,7 @@ impl PluginLogic for Quackapella {
             .set_transport(t.tempo, bar, t.playing.then_some(t.position_beats));
         // Host values once per (sub-)block: truce splits blocks at
         // sample-accurate parameter events, the engine ramps from here.
-        let target = params.to_values();
+        let target = params.engine_values();
         if state.needs_snap {
             state.engine.set_all(&target, true);
             state.pushed = target;
@@ -195,7 +209,9 @@ impl PluginLogic for Quackapella {
         let total = buffer.num_samples();
         if ins == 0 || outs == 0 {
             for e in events.iter() {
-                state.handle(&e.body);
+                if state.handle(&e.body, params) {
+                    state.push_changes(&params.engine_values());
+                }
             }
             return ProcessStatus::Normal;
         }
@@ -207,7 +223,9 @@ impl PluginLogic for Quackapella {
                 state.run(buffer, pos, at - pos);
                 pos = at;
             }
-            state.handle(&e.body);
+            if state.handle(&e.body, params) {
+                state.push_changes(&params.engine_values());
+            }
         }
         if pos < total {
             state.run(buffer, pos, total - pos);
