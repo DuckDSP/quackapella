@@ -18,7 +18,7 @@
 //! | [`latency`] | Fixed latency budget and delay lines [1] |
 //! | [`midi`] | Held notes from the MIDI input [1] |
 //! | [`mode`] | Voice modes, including the *Natural* mode [1] |
-//! | [`pitch`] | Pitch detection interface [2] |
+//! | [`pitch`] | Real-time pitch detection (YIN), voicing, confidence [2] |
 //! | [`shift`] | Pitch shifting with formant preservation [3] |
 //! | [`autotune`] | Scales and note targeting [4] |
 //! | [`harmony`] | MIDI-driven harmony voices [6] |

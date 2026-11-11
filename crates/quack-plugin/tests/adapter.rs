@@ -124,6 +124,23 @@ fn midi_notes_reach_the_engine() {
     assert_eq!(params.shared.view().held_notes, 0);
 }
 
+#[test]
+fn detected_pitch_reaches_the_editor() {
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
+    #[allow(clippy::cast_precision_loss)]
+    let x: Vec<f32> = (0..9_600)
+        .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / SR as f32).sin())
+        .collect();
+    run(&mut dsp, &params, &x, &EventList::default());
+    let v = params.shared.view();
+    assert!((v.pitch_hz - 220.0).abs() < 1.0, "{}", v.pitch_hz);
+    assert!(v.pitch_confidence > 0.9);
+    run(&mut dsp, &params, &[0.0; 9_600], &EventList::default());
+    assert_eq!(params.shared.view().pitch_hz, 0.0);
+}
+
 #[cfg(feature = "rt-paranoid")]
 #[test]
 fn process_does_not_allocate() {

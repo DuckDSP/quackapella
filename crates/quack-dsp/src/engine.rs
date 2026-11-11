@@ -1,6 +1,7 @@
 //! The signal chain.
 //!
-//! Step 1 chain, per channel:
+//! Step 1 chain, per channel (step 2 adds the pitch detector, fed with
+//! the gained input summed to mono, which only reads):
 //!
 //! ```text
 //! in ──┬──────────────── dry delay ─────────────┬─ mix ─ out gain ─┬─ bypass fade ─ out
@@ -19,6 +20,7 @@ use crate::latency::{DelayLine, latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
 use crate::params::{ParamId, ParamValues};
+use crate::pitch::{PitchDetector, PitchEstimate, Yin};
 use crate::smooth::Ramp;
 
 /// Smoothing time for gains and mix.
@@ -42,6 +44,7 @@ pub struct Engine {
     dry: [DelayLine; CHANNELS],
     wet: [DelayLine; CHANNELS],
     notes: NoteStack,
+    detector: Yin,
 }
 
 impl Default for Engine {
@@ -65,13 +68,14 @@ impl Engine {
             dry: Default::default(),
             wet: Default::default(),
             notes: NoteStack::default(),
+            detector: Yin::default(),
         };
         e.prepare(48_000.0, 512);
         e
     }
 
     /// Allocates delay lines and resets state. Not for the audio thread.
-    pub fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
+    pub fn prepare(&mut self, sample_rate: f64, max_block: usize) {
         self.sample_rate = sample_rate;
         self.latency = latency_samples(sample_rate);
         for d in self.dry.iter_mut().chain(self.wet.iter_mut()) {
@@ -81,6 +85,7 @@ impl Engine {
             r.prepare(sample_rate, SMOOTH_MS);
         }
         self.bypass.prepare(sample_rate, BYPASS_MS);
+        self.detector.prepare(sample_rate, max_block);
         self.apply_all(true);
         self.notes.clear();
     }
@@ -90,6 +95,7 @@ impl Engine {
         for d in self.dry.iter_mut().chain(self.wet.iter_mut()) {
             d.reset();
         }
+        self.detector.reset();
         self.apply_all(true);
         self.notes.clear();
     }
@@ -109,6 +115,12 @@ impl Engine {
     #[must_use]
     pub fn notes(&self) -> &NoteStack {
         &self.notes
+    }
+
+    /// Latest pitch reading of the input, `None` while unvoiced.
+    #[must_use]
+    pub fn pitch(&self) -> Option<PitchEstimate> {
+        self.detector.estimate()
     }
 
     #[must_use]
@@ -177,6 +189,7 @@ impl Engine {
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
+            self.detector.push_sample(0.5 * (*l + *r) * g_in);
             let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
             // Voice chain placeholder: delayed, gained input.
             let (wet_l, wet_r) = (wl.tick(*l * g_in), wr.tick(*r * g_in));
@@ -274,6 +287,21 @@ mod tests {
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0, f32::max);
         assert!(max_step < 1e-3, "step {max_step}");
+    }
+
+    #[test]
+    fn detects_the_input_pitch() {
+        let mut e = Engine::new();
+        #[allow(clippy::cast_precision_loss)]
+        let x: Vec<f32> = (0..9_600)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let (mut l, mut r) = (x.clone(), x);
+        e.process(&mut l, &mut r);
+        let p = e.pitch().expect("voiced");
+        assert!((p.note() - 57.0).abs() < 0.05, "{}", p.hz);
+        e.reset();
+        assert!(e.pitch().is_none());
     }
 
     #[test]

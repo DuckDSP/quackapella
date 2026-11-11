@@ -39,6 +39,8 @@ fn editor_captures() {
             held_notes: (1 << 57) | (1 << 64),
             latency_samples: 480,
             sample_rate: 48_000.0,
+            pitch_hz: if mode == 0.0 { 223.1 } else { 0.0 },
+            pitch_confidence: 0.92,
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);
