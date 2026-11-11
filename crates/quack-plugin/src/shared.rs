@@ -43,6 +43,11 @@ impl Shared {
         self.tune_mask.store(u32::from(mask), Ordering::Relaxed);
     }
 
+    /// The latency moves with the voice range.
+    pub fn publish_latency(&self, latency: u32) {
+        self.latency.store(latency, Ordering::Relaxed);
+    }
+
     pub fn publish_config(&self, latency: u32, sample_rate: f64) {
         self.latency.store(latency, Ordering::Relaxed);
         self.sample_rate_bits

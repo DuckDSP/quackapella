@@ -25,7 +25,8 @@ quack-plugin   adaptateur Truce : paramètres hôte, MIDI, buffers, latence
 
 Entrée → gain d'entrée → chaîne vocale (identité pour l'instant) → mix
 dry/wet → gain de sortie → fondu de bypass. Le chemin sec et le chemin
-traité sont retardés de la même latence fixe (10 ms), donc mix et bypass
+traité sont retardés de la même latence (fixée par le réglage *Voice*,
+voir « Latence » plus bas), donc mix et bypass
 ne créent jamais de filtrage en peigne, et la compensation de l'hôte est
 toujours juste. Les notes MIDI (note on/off, CC 120/123) sont appliquées à
 leur position dans le bloc et tenues dans une pile de 16 notes, lue par
@@ -113,14 +114,37 @@ détecteur, à la place de la ligne de retard du chemin traité :
 Réglages : *Pitch* (±24 demi-tons), *Fine* (±100 cents), *Formant*
 (±12 demi-tons), lissés sur 20 ms dans le moteur. Ids hôte 200 à 202.
 
-**Latence.** Le budget de 10 ms est gardé et gelé : la sortie est
-l'entrée retardée d'exactement 10 ms. Un grain a besoin de ses deux
-périodes complètes ; sous environ 120 Hz c'est plus que le budget, et le
-shifter prend alors le dernier grain complet, ce qui retarde le contenu
-des voix graves de quelques millisecondes de plus (sans clic, sans
-changer la latence déclarée). À la reprise d'une note, les ~10 ms que met
-le détecteur à se décider passent sans transposition, puis le glissé
-prend le relais.
+**Latence.** Un grain commence à sonner dès que sa marque est posée et
+lit sa moitié droite pendant qu'il joue (l'entrée arrive aussi vite
+qu'elle est jouée) : la voix n'a besoin que de sa moitié gauche (une
+période) plus le temps de pose d'une marque (la recherche de crête
+regarde 0,3 période après la crête prévue, qui peut arriver 0,3 période
+en avance), soit 1,6 période. Auparavant le grain entier était calculé
+d'avance (3,3 périodes : 30 ms à 110 Hz). La latence déclarée est celle
+de la note la plus grave du réglage *Voice* (id 100) :
+
+| Voice | Note la plus grave | Latence |
+| --- | --- | --- |
+| Soprano / Alto | F3 (175 Hz) | 9,2 ms |
+| Tenor (défaut) | C3 (131 Hz) | 12,3 ms |
+| Baritone | G2 (98 Hz) | 16,4 ms |
+| Bass | D2 (73 Hz) | 21,9 ms |
+
+Plus aiguë, la voix garde cette latence (sec et traité restent alignés) ;
+plus grave, elle est retardée un peu plus (1,6 période), sans clic.
+Changer de *Voice* change la latence déclarée (l'hôte est prévenu : AU v2,
+CLAP, VST3) et vide l'audio un instant : c'est un réglage de mise en
+place, pas de jeu. La taille du bloc hôte (32 ou 64 échantillons) n'y
+change rien : tout est calculé échantillon par échantillon.
+
+Mesure : `cargo run --release -p quack-dsp --example latency` (tableau
+par voix et par note, blocs de 32 et 64), `-- PRISE.wav` (retard moyen et
+pire sur une vraie prise), `-- --attack` (option non activée : grains à
+attaque courte, 8,5 ms au lieu de 12,3 en Tenor, au prix d'environ 1 dB
+d'écart de formants en moyenne et 7 dB au pire).
+
+À la reprise d'une note, les ~10 ms que met le détecteur à se décider
+passent sans transposition, puis le glissé prend le relais.
 
 Tests : transposition de -12 à +12 demi-tons à moins de 10 cents
 (voyelle synthétique de 130 à 330 Hz), formants en place à ±1 octave
@@ -198,7 +222,8 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
 2. **Détection de pitch** : YIN, décision voisé / non
    voisé, confiance, lissage, affichage dans l'éditeur.
 3. **Pitch shift naturel** (cette étape) avec préservation des formants
-   (cœur du mode Natural), formant séparé, budget de latence gelé à 10 ms.
+   (cœur du mode Natural), formant séparé ; latence ensuite ramenée à
+   1,6 période de la note la plus grave (réglage *Voice*).
 4. Autotune : gammes, notes MIDI, vitesse de retune, humanisation.
 5. Formants indépendants et modes façon Manipulator (freeze, glitch,
    octaves).

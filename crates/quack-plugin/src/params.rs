@@ -24,6 +24,19 @@ pub enum ModeParam {
     Synth,
 }
 
+/// Voice ranges, in `quack_dsp::latency::VoiceRange` order.
+#[derive(ParamEnum)]
+pub enum VoiceParam {
+    #[name = "Soprano / Alto"]
+    High,
+    #[name = "Tenor"]
+    Tenor,
+    #[name = "Baritone"]
+    Baritone,
+    #[name = "Bass"]
+    Bass,
+}
+
 /// Keys, C first.
 #[derive(ParamEnum)]
 pub enum KeyParam {
@@ -255,6 +268,10 @@ pub struct QuackParams {
     )]
     pub transition: FloatParam,
 
+    /// Lowest note of the voice: sets the latency.
+    #[param(id = 100, name = "Voice", default = 1)]
+    pub voice: EnumParam<VoiceParam>,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -318,6 +335,8 @@ impl QuackParams {
             ParamId::MidiGate,
             f64::from(u8::from(self.midi_gate.value())),
         );
+        #[allow(clippy::cast_precision_loss)]
+        v.set(ParamId::Voice, self.voice.value().to_index() as f64);
         v
     }
 }

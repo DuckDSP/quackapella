@@ -2,7 +2,7 @@
 
 **Quackapella** est un plugin de manipulation vocale en temps réel écrit
 en Rust, édité sous le nom **DuckDSP**. Il réunit, dans un seul plugin
-pensé pour le live (latence d'environ 10 ms), la correction de hauteur
+pensé pour le live (latence de 9 à 12 ms selon la tessiture), la correction de hauteur
 (autotune), la manipulation façon Manipulator (pitch et formants séparés,
 freeze, glitch) et la synthèse façon VocalSynth (harmonies jouées au MIDI,
 vocodeur, talkbox).
