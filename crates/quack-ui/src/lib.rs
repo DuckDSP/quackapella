@@ -25,6 +25,7 @@ pub mod theme;
 use egui::{Align2, Color32, Rect, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
 use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
+use quack_dsp::harmony::{HarmonyMode, interval_short, interval_steps};
 use quack_dsp::latency::VoiceRange;
 use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::{ParamId, VoiceMode};
@@ -73,6 +74,8 @@ pub struct View {
     pub tune_mask: u16,
     /// A frozen grain is sounding (Creative mode).
     pub frozen: bool,
+    /// Notes the harmony voices sing (Synth mode), bit n = note n.
+    pub harmony_notes: u128,
 }
 
 /// Seconds of pitch history in the graph.
@@ -306,6 +309,8 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     }
     if mode == VoiceMode::Creative {
         creative_panel(ui, params, st, view, graph_r, accent);
+    } else if mode == VoiceMode::Synth {
+        harmony_panel(ui, params, st, view, graph_r, accent);
     } else {
         pitch_graph(&p, graph_r, view, st, accent);
     }
@@ -643,6 +648,200 @@ fn creative_panel(
         size::CAPTION - 1.0,
         color::TEXT_FAINT,
     );
+}
+
+/// The Synth mode's harmony voices: source, intervals, levels and what
+/// makes them sound like several singers. Takes the pitch graph's place
+/// in that mode.
+fn harmony_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 22.0),
+        Align2::LEFT_CENTER,
+        "Harmony",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let mode = HarmonyMode::from_index(params.get_plain(ParamId::Harmony));
+    let seg = Rect::from_min_size(
+        pos2(r.right() - space::L - 280.0, r.top() + 8.0),
+        vec2(280.0, 28.0),
+    );
+    let names: Vec<&str> = HarmonyMode::ALL.iter().map(|m| m.name()).collect();
+    controls::segmented(ui, params, ParamId::Harmony, seg, &names, &[accent]);
+    // The notes the voices sing now.
+    let sounding: Vec<String> = (0..128u8)
+        .filter(|n| view.harmony_notes & (1u128 << n) != 0)
+        .map(note_name)
+        .collect();
+    let status = if sounding.is_empty() {
+        "-".to_owned()
+    } else {
+        sounding.join(" ")
+    };
+    value(
+        p,
+        pos2(r.left() + space::L + 74.0, r.top() + 22.0),
+        Align2::LEFT_CENTER,
+        &status,
+        size::VALUE,
+        if sounding.is_empty() {
+            color::TEXT_FAINT
+        } else {
+            accent
+        },
+    );
+
+    let knob_d = 58.0;
+    let kw = (r.width() - 2.0 * space::L) / 6.0;
+    let row1 = r.top() + 104.0;
+    let cap_y = row1 - knob_d * 0.5 - 16.0;
+    let intervals_on = matches!(mode, HarmonyMode::Scale | HarmonyMode::Chord);
+    let key = note_name(params.get_plain(ParamId::Key).round().clamp(0.0, 11.0) as u8 + 60);
+    let key = key.trim_end_matches(char::is_numeric).to_owned();
+    let scale = Scale::from_index(params.get_plain(ParamId::Scale));
+    let scale = if scale == Scale::Chromatic {
+        Scale::Major
+    } else {
+        scale
+    };
+    let chord: Vec<String> = (0..12u8)
+        .filter(|n| held_class(view.held_notes, *n))
+        .map(|n| {
+            note_name(n + 60)
+                .trim_end_matches(char::is_numeric)
+                .to_owned()
+        })
+        .collect();
+    let caption = match mode {
+        HarmonyMode::Off => "Harmonies off".to_owned(),
+        HarmonyMode::Midi => "Every held MIDI note is a voice".to_owned(),
+        HarmonyMode::Scale => format!("Steps of {key} {} from the lead", scale.name()),
+        HarmonyMode::Chord if chord.is_empty() => {
+            format!("Hold a chord · until then, {key} {}", scale.name())
+        }
+        HarmonyMode::Chord => format!("Nearest notes of {}", chord.join(" ")),
+    };
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 2.0, cap_y),
+        Align2::CENTER_CENTER,
+        &caption,
+        size::CAPTION - 1.0,
+        if mode == HarmonyMode::Off {
+            color::TEXT_FAINT
+        } else {
+            accent
+        },
+    );
+    let interval = |v: f64| interval_short(interval_steps(v));
+    let dim = accent.gamma_multiply(0.35);
+    for (i, id) in [
+        ParamId::Harmony1,
+        ParamId::Harmony2,
+        ParamId::Harmony3,
+        ParamId::Harmony4,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+        let label = format!("Voice {}", i + 1);
+        controls::knob_named(
+            ui,
+            params,
+            st,
+            id,
+            pos2(cx, row1),
+            knob_d,
+            id.spec().kind.min(),
+            if intervals_on { accent } else { dim },
+            &interval,
+            &label,
+        );
+    }
+    let pct = |v: f64| format!("{v:.0}");
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let levels: [(ParamId, &str); 2] = [(ParamId::Lead, "Lead"), (ParamId::HarmonyLevel, "Voices")];
+    for (i, (id, label)) in levels.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + space::L + kw * (i as f32 + 4.5);
+        controls::knob_named(
+            ui,
+            params,
+            st,
+            id,
+            pos2(cx, row1),
+            knob_d,
+            0.0,
+            accent,
+            &off,
+            label,
+        );
+    }
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 5.0, cap_y),
+        Align2::CENTER_CENTER,
+        "Levels",
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
+
+    // Second row: what makes several singers out of one.
+    let row2 = r.bottom() - 64.0;
+    let kw2 = (r.width() - 2.0 * space::L) / 5.0;
+    let ms = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String);
+    let knobs: [Knob; 5] = [
+        (ParamId::Spread, "Spread", &pct),
+        (ParamId::HarmonyHumanize, "Humanize", &off),
+        (ParamId::Character, "Character", &off),
+        (ParamId::Expression, "Expression", &pct),
+        (ParamId::Glide, "Glide", &ms),
+    ];
+    for (i, (id, label, fmt)) in knobs.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + space::L + kw2 * (i as f32 + 0.5);
+        controls::knob_named(
+            ui,
+            params,
+            st,
+            id,
+            pos2(cx, row2),
+            knob_d,
+            0.0,
+            accent,
+            fmt,
+            label,
+        );
+    }
+}
+
+fn held_class(held: u128, class: u8) -> bool {
+    (0..128u8).any(|n| n % 12 == class && held & (1u128 << n) != 0)
 }
 
 /// Key, scale, target source, note switches and the retune knobs.
@@ -1218,6 +1417,7 @@ mod tests {
                 tune_out: 57.02,
                 tune_mask: 0b1010_1011_0101,
                 frozen: mode == 2,
+                harmony_notes: if mode == 3 { 1 << 64 } else { 0 },
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

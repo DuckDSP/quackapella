@@ -184,6 +184,7 @@ impl PluginLogic for Quackapella {
             .shared
             .publish_tune(state.engine.tune(), state.engine.tune_mask());
         params.shared.publish_frozen(state.engine.frozen());
+        params.shared.publish_harmony(state.engine.harmony_notes());
         ProcessStatus::Normal
     }
 

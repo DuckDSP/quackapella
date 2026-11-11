@@ -142,9 +142,21 @@ pub enum ParamId {
     GlitchHold,
     Voice,
     LowLatency,
+    Harmony,
+    Harmony1,
+    Harmony2,
+    Harmony3,
+    Harmony4,
+    Lead,
+    HarmonyLevel,
+    Spread,
+    HarmonyHumanize,
+    Character,
+    Expression,
+    Glide,
 }
 
-pub const PARAM_COUNT: usize = 41;
+pub const PARAM_COUNT: usize = 53;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -539,6 +551,133 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Bool { default: false },
     },
+    ParamSpec {
+        key: "harmony",
+        host_id: 400,
+        name: "Harmony",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: 4,
+            default: 2,
+        },
+    },
+    ParamSpec {
+        key: "harmony_1",
+        host_id: 401,
+        name: "Harmony 1",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::harmony::INTERVAL_COUNT,
+            default: (2 + crate::harmony::MAX_STEPS) as u32,
+        },
+    },
+    ParamSpec {
+        key: "harmony_2",
+        host_id: 402,
+        name: "Harmony 2",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::harmony::INTERVAL_COUNT,
+            default: (-3 + crate::harmony::MAX_STEPS) as u32,
+        },
+    },
+    ParamSpec {
+        key: "harmony_3",
+        host_id: 403,
+        name: "Harmony 3",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::harmony::INTERVAL_COUNT,
+            default: crate::harmony::MAX_STEPS as u32,
+        },
+    },
+    ParamSpec {
+        key: "harmony_4",
+        host_id: 404,
+        name: "Harmony 4",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::harmony::INTERVAL_COUNT,
+            default: crate::harmony::MAX_STEPS as u32,
+        },
+    },
+    ParamSpec {
+        key: "lead",
+        host_id: 405,
+        name: "Lead",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_level",
+        host_id: 406,
+        name: "Harmony Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 80.0,
+        },
+    },
+    ParamSpec {
+        key: "spread",
+        host_id: 407,
+        name: "Spread",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 60.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_humanize",
+        host_id: 408,
+        name: "Harmony Humanize",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
+    ParamSpec {
+        key: "character",
+        host_id: 409,
+        name: "Character",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 25.0,
+        },
+    },
+    ParamSpec {
+        key: "expression",
+        host_id: 410,
+        name: "Expression",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "glide",
+        host_id: 411,
+        name: "Glide",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 500.0,
+            default: 30.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -584,6 +723,18 @@ impl ParamId {
         Self::GlitchHold,
         Self::Voice,
         Self::LowLatency,
+        Self::Harmony,
+        Self::Harmony1,
+        Self::Harmony2,
+        Self::Harmony3,
+        Self::Harmony4,
+        Self::Lead,
+        Self::HarmonyLevel,
+        Self::Spread,
+        Self::HarmonyHumanize,
+        Self::Character,
+        Self::Expression,
+        Self::Glide,
     ];
 
     #[must_use]

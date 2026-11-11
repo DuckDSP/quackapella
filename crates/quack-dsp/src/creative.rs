@@ -22,6 +22,7 @@
 //! allocation and bounded work.
 
 use crate::autotune::Retuner;
+use crate::harmony::Harmonizer;
 use crate::shift::PitchControl;
 
 /// Glitch slice length.
@@ -407,10 +408,12 @@ impl Robot {
 pub struct Steer<'a> {
     pub retuner: &'a mut Retuner,
     pub robot: &'a mut Robot,
+    /// Harmony voices, told the lead's note at each grain.
+    pub harmony: &'a mut Harmonizer,
 }
 
-impl PitchControl for Steer<'_> {
-    fn voiced(&mut self, period: f64, dt: f64) -> f64 {
+impl Steer<'_> {
+    fn lead_ratio(&mut self, period: f64, dt: f64) -> f64 {
         let ratio = self.retuner.voiced(period, dt);
         let transpose = self.retuner.transpose;
         let r = &mut *self.robot;
@@ -431,10 +434,26 @@ impl PitchControl for Steer<'_> {
         let robot = ((target - sung) / 12.0).exp2();
         ratio.powf(1.0 - r.amount) * robot.powf(r.amount)
     }
+}
+
+impl PitchControl for Steer<'_> {
+    fn voiced(&mut self, period: f64, dt: f64) -> f64 {
+        let ratio = self.lead_ratio(period, dt);
+        if self.harmony.enabled() && period > 0.0 {
+            let sung = crate::pitch::hz_to_midi_f64(self.robot.sample_rate / period);
+            self.harmony.lead(sung + 12.0 * ratio.log2(), dt);
+        }
+        ratio
+    }
 
     fn unvoiced(&mut self, dt: f64) {
         self.retuner.unvoiced(dt);
         self.robot.gap_s += dt.max(0.0);
+        self.harmony.unvoiced(dt);
+    }
+
+    fn voice(&mut self, v: usize, dt: f64) -> Option<f64> {
+        self.harmony.voice_note(v, dt)
     }
 }
 
@@ -535,9 +554,11 @@ mod tests {
             ..Robot::default()
         };
         r.prepare(48_000.0);
+        let mut h = Harmonizer::default();
         let mut s = Steer {
             retuner: &mut t,
             robot: &mut r,
+            harmony: &mut h,
         };
         // Glide from A3 (220 Hz) up to C4: the output stays on A3.
         for k in 0..200 {
