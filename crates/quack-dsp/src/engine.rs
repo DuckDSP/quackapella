@@ -20,13 +20,14 @@
 //! voices on the same marks.
 
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
+use crate::creative::{Glitch, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
 use crate::latency::{DelayLine, latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
 use crate::params::{NOTE_PARAMS, ParamId, ParamValues};
 use crate::pitch::{PitchDetector, PitchEstimate, Yin};
-use crate::shift::{Psola, semitones_to_ratio};
+use crate::shift::{LAYERS, Psola, semitones_to_ratio};
 
 /// Fastest retune in the Natural mode: below it the correction is
 /// heard as an effect, which is the Tune mode's job.
@@ -65,6 +66,13 @@ pub struct Engine {
     /// closes with the audio the notes were played against.
     gate: Ramp,
     gate_delay: DelayLine,
+    /// Creative mode: octave layers (down, sub, up), formant follow,
+    /// freeze, robot, glitch. All at rest in the other modes.
+    layers: [Ramp; LAYERS],
+    follow: Ramp,
+    freeze: bool,
+    robot: Robot,
+    glitch: Glitch,
 }
 
 impl Default for Engine {
@@ -94,6 +102,11 @@ impl Engine {
             retuner: Retuner::default(),
             gate: Ramp::new(1.0),
             gate_delay: DelayLine::default(),
+            layers: [Ramp::new(0.0), Ramp::new(0.0), Ramp::new(0.0)],
+            follow: Ramp::new(0.0),
+            freeze: false,
+            robot: Robot::default(),
+            glitch: Glitch::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -112,7 +125,11 @@ impl Engine {
             &mut self.mix,
             &mut self.pitch,
             &mut self.formant,
-        ] {
+            &mut self.follow,
+        ]
+        .into_iter()
+        .chain(self.layers.iter_mut())
+        {
             r.prepare(sample_rate, SMOOTH_MS);
         }
         self.bypass.prepare(sample_rate, BYPASS_MS);
@@ -122,6 +139,8 @@ impl Engine {
         self.detector.prepare(sample_rate, max_block);
         self.shifter.prepare(sample_rate, self.latency);
         self.retuner.prepare(sample_rate);
+        self.robot.prepare(sample_rate);
+        self.glitch.prepare(sample_rate);
         self.notes.clear();
         self.apply_all(true);
     }
@@ -134,6 +153,8 @@ impl Engine {
         self.detector.reset();
         self.shifter.reset();
         self.retuner.reset();
+        self.robot.reset();
+        self.glitch.reset();
         self.notes.clear();
         self.apply_all(true);
         self.prime_gate();
@@ -217,6 +238,18 @@ impl Engine {
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
                 self.update_tune();
+                self.update_creative(snap);
+                return;
+            }
+            ParamId::FormantFollow
+            | ParamId::OctaveDown
+            | ParamId::Sub
+            | ParamId::OctaveUp
+            | ParamId::Freeze
+            | ParamId::Robot
+            | ParamId::Glitch
+            | ParamId::GlitchRate => {
+                self.update_creative(snap);
                 return;
             }
             _ => {
@@ -229,6 +262,53 @@ impl Engine {
         } else {
             ramp.set(target);
         }
+    }
+
+    /// Whether the Creative effects are on: only in the Creative mode,
+    /// so Natural and Tune never hear them.
+    fn creative(&self) -> bool {
+        self.mode == VoiceMode::Creative
+    }
+
+    /// Creative effects from the parameters and the mode.
+    fn update_creative(&mut self, snap: bool) {
+        let on = self.creative();
+        let v = &self.values;
+        let pct = |id: ParamId| if on { (v.get(id) / 100.0) as f32 } else { 0.0 };
+        let targets = [
+            pct(ParamId::OctaveDown),
+            pct(ParamId::Sub),
+            pct(ParamId::OctaveUp),
+        ];
+        let follow = pct(ParamId::FormantFollow);
+        self.freeze = on && v.get(ParamId::Freeze) >= 0.5;
+        self.robot.amount = f64::from(pct(ParamId::Robot));
+        self.glitch.amount = f64::from(pct(ParamId::Glitch));
+        self.glitch.rate = GlitchRate::from_index(v.get(ParamId::GlitchRate));
+        for (r, t) in self.layers.iter_mut().zip(targets) {
+            if snap {
+                r.snap(t);
+            } else {
+                r.set(t);
+            }
+        }
+        if snap {
+            self.follow.snap(follow);
+        } else {
+            self.follow.set(follow);
+        }
+    }
+
+    /// Host tempo and, while playing, the beat position at the start of
+    /// the next block (the glitch slices follow them).
+    pub fn set_transport(&mut self, tempo: f64, beat: Option<f64>) {
+        self.glitch.set_transport(tempo, beat);
+    }
+
+    /// Whether a frozen grain is sounding (Creative mode).
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.shifter.is_frozen()
     }
 
     /// Fill the gate's delay with its current state (after a reset, the
@@ -284,16 +364,19 @@ impl Engine {
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
         self.notes.note_on(channel, note, velocity);
         self.update_tune();
+        self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
         self.notes.note_off(channel, note);
         self.update_tune();
+        self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
     pub fn all_notes_off(&mut self) {
         self.notes.clear();
         self.update_tune();
+        self.robot.note = None;
     }
 
     /// Process a stereo block in place. A mono host passes the same
@@ -308,16 +391,35 @@ impl Engine {
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
-            self.retuner.transpose = f64::from(self.pitch.tick());
+            let transpose = self.pitch.tick();
+            self.retuner.transpose = f64::from(transpose);
             let formant = semitones_to_ratio(self.formant.tick());
             let (in_l, in_r) = (*l * g_in, *r * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
             let g_out = g_out * self.gate_delay.tick(self.gate.tick());
-            let (wet_l, wet_r) =
-                self.shifter
-                    .tick_with(in_l, in_r, period, &mut self.retuner, formant);
+            self.shifter.set_layers([
+                self.layers[0].tick(),
+                self.layers[1].tick(),
+                self.layers[2].tick(),
+            ]);
+            self.shifter.set_formant_follow(self.follow.tick());
+            // A held MIDI note plays the frozen grain (Pitch on top).
+            #[allow(clippy::cast_possible_truncation)]
+            let freeze_hz = self
+                .robot
+                .note
+                .map(|n| (440.0 * ((n + f64::from(transpose) - 69.0) / 12.0).exp2()) as f32);
+            self.shifter.set_freeze(self.freeze, freeze_hz, transpose);
+            let mut steer = Steer {
+                retuner: &mut self.retuner,
+                robot: &mut self.robot,
+            };
+            let (wet_l, wet_r) = self
+                .shifter
+                .tick_with(in_l, in_r, period, &mut steer, formant);
+            let (wet_l, wet_r) = self.glitch.tick(wet_l, wet_r);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
@@ -539,6 +641,56 @@ mod tests {
         // Scale source: the gate does not apply.
         e.set_param(ParamId::Source, 0.0);
         assert!((run(&mut e) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn creative_effects_stay_out_of_natural_and_tune() {
+        let x: Vec<f32> = (0..24_000)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = i as f32 / 48_000.0;
+                0.3 * (std::f32::consts::TAU * 220.0 * t).sin()
+                    + 0.1 * (std::f32::consts::TAU * 440.0 * t).sin()
+            })
+            .collect();
+        let run = |mode: f64, creative: bool| {
+            let mut e = Engine::new();
+            let mut v = ParamValues::default();
+            v.set(ParamId::Mode, mode);
+            if creative {
+                for id in [
+                    ParamId::FormantFollow,
+                    ParamId::OctaveDown,
+                    ParamId::Sub,
+                    ParamId::OctaveUp,
+                    ParamId::Robot,
+                    ParamId::Glitch,
+                ] {
+                    v.set(id, 100.0);
+                }
+                v.set(ParamId::Freeze, 1.0);
+                v.set(ParamId::Pitch, 5.0);
+            }
+            e.set_all(&v, true);
+            let mut l = x.clone();
+            let mut r = x.clone();
+            e.process(&mut l, &mut r);
+            l
+        };
+        for mode in [0.0, 1.0] {
+            let plain = run(mode, false);
+            let mut e = Engine::new();
+            let mut v = ParamValues::default();
+            v.set(ParamId::Mode, mode);
+            v.set(ParamId::Pitch, 5.0);
+            e.set_all(&v, true);
+            let mut l = x.clone();
+            let mut r = x.clone();
+            e.process(&mut l, &mut r);
+            let with = run(mode, true);
+            assert_eq!(l, with, "mode {mode}");
+            assert_ne!(plain, with);
+        }
     }
 
     #[test]

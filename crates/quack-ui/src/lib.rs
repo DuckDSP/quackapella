@@ -69,6 +69,8 @@ pub struct View {
     pub tune_target: f32,
     pub tune_out: f32,
     pub tune_mask: u16,
+    /// A frozen grain is sounding (Creative mode).
+    pub frozen: bool,
 }
 
 /// Seconds of pitch history in the graph.
@@ -265,7 +267,11 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     if now > 0.0 {
         st.record(view, now);
     }
-    pitch_graph(&p, graph_r, view, st, accent);
+    if mode == VoiceMode::Creative {
+        creative_panel(ui, params, st, view, graph_r, accent);
+    } else {
+        pitch_graph(&p, graph_r, view, st, accent);
+    }
 
     // Bottom row: voice, level, MIDI.
     let row_top = tune_r.bottom() + space::M;
@@ -419,6 +425,159 @@ fn voice_panel(
         let cx = r.left() + kw * (i as f32 + 0.5);
         controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
     }
+}
+
+/// The Creative mode's effects: layers, formant follow, robot, freeze,
+/// glitch. Takes the pitch graph's place in that mode.
+fn creative_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 22.0),
+        Align2::LEFT_CENTER,
+        "Manipulate",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    // Freeze: the big switch, with its state.
+    let fz = Rect::from_min_size(
+        pos2(r.right() - space::L - 120.0, r.top() + 8.0),
+        vec2(120.0, 28.0),
+    );
+    controls::toggle(ui, params, ParamId::Freeze, fz, "Freeze", accent);
+    let asked = params.get_plain(ParamId::Freeze) >= 0.5;
+    let state = match (asked, view.frozen) {
+        (_, true) if view.held_notes != 0 => "Frozen · played by MIDI",
+        (_, true) => "Frozen",
+        (true, false) => "Waiting for a sung note",
+        (false, false) => "Holds the last sung grain",
+    };
+    text(
+        p,
+        pos2(fz.left() - space::M, fz.center().y),
+        Align2::RIGHT_CENTER,
+        state,
+        size::CAPTION,
+        if view.frozen {
+            accent
+        } else {
+            color::TEXT_FAINT
+        },
+    );
+
+    let pct = |v: f64| format!("{v:.0}");
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let knob_d = 64.0;
+    let row1 = r.top() + 100.0;
+    let kw = (r.width() - 2.0 * space::L) / 5.0;
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 5] = [
+        (ParamId::Sub, &off),
+        (ParamId::OctaveDown, &off),
+        (ParamId::OctaveUp, &off),
+        (ParamId::FormantFollow, &pct),
+        (ParamId::Robot, &off),
+    ];
+    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+        controls::knob_sized(ui, params, st, id, pos2(cx, row1), knob_d, accent, fmt);
+    }
+    // Group captions over the knobs.
+    let cap_y = row1 - knob_d * 0.5 - 14.0;
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 1.5, cap_y),
+        Align2::CENTER_CENTER,
+        "Layers",
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
+    let follow = params.get_plain(ParamId::FormantFollow);
+    let shift = params.get_plain(ParamId::Pitch);
+    let character = if follow < 1.0 || shift.abs() < 0.5 {
+        "Formants in place"
+    } else if shift > 0.0 {
+        "Chipmunk"
+    } else {
+        "Monster"
+    };
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 3.5, cap_y),
+        Align2::CENTER_CENTER,
+        character,
+        size::CAPTION - 1.0,
+        if character == "Formants in place" {
+            color::TEXT_FAINT
+        } else {
+            accent
+        },
+    );
+    text(
+        p,
+        pos2(r.left() + space::L + kw * 4.5, cap_y),
+        Align2::CENTER_CENTER,
+        if params.get_plain(ParamId::Robot) >= 0.5 {
+            "One note per phrase"
+        } else {
+            "Monotone"
+        },
+        size::CAPTION - 1.0,
+        color::TEXT_FAINT,
+    );
+
+    // Glitch: amount and slice length.
+    let row2 = r.bottom() - 70.0;
+    let gx = r.left() + space::L + kw * 0.5;
+    controls::knob_sized(
+        ui,
+        params,
+        st,
+        ParamId::Glitch,
+        pos2(gx, row2),
+        knob_d,
+        accent,
+        &off,
+    );
+    let rates: Vec<&str> = quack_dsp::creative::GlitchRate::ALL
+        .iter()
+        .map(|g| g.name())
+        .collect();
+    let seg = Rect::from_min_size(
+        pos2(gx + kw * 0.5 + space::S, row2 - 36.0),
+        vec2(r.right() - space::L - (gx + kw * 0.5 + space::S), 28.0),
+    );
+    controls::segmented(ui, params, ParamId::GlitchRate, seg, &rates, &[accent]);
+    text(
+        p,
+        pos2(seg.left() + 2.0, seg.bottom() + 18.0),
+        Align2::LEFT_CENTER,
+        "Slices on the host tempo: repeat, stutter, reverse, tape drop",
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+    text(
+        p,
+        pos2(seg.left() + 2.0, seg.bottom() + 38.0),
+        Align2::LEFT_CENTER,
+        "MIDI notes play the freeze and the robot",
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
 }
 
 /// Key, scale, target source, note switches and the retune knobs.
@@ -993,6 +1152,7 @@ mod tests {
                 tune_target: 57.0,
                 tune_out: 57.02,
                 tune_mask: 0b1010_1011_0101,
+                frozen: mode == 2,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

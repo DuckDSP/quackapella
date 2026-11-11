@@ -130,9 +130,17 @@ pub enum ParamId {
     NoteB,
     MidiGate,
     Transition,
+    FormantFollow,
+    OctaveDown,
+    Sub,
+    OctaveUp,
+    Freeze,
+    Robot,
+    Glitch,
+    GlitchRate,
 }
 
-pub const PARAM_COUNT: usize = 29;
+pub const PARAM_COUNT: usize = 37;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -410,6 +418,89 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "formant_follow",
+        host_id: 600,
+        name: "Formant Follow",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "octave_down",
+        host_id: 601,
+        name: "Octave Down",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "sub",
+        host_id: 602,
+        name: "Sub",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "octave_up",
+        host_id: 603,
+        name: "Octave Up",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "freeze",
+        host_id: 604,
+        name: "Freeze",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "robot",
+        host_id: 605,
+        name: "Robot",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "glitch",
+        host_id: 606,
+        name: "Glitch",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "glitch_rate",
+        host_id: 607,
+        name: "Glitch Rate",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::creative::GlitchRate::COUNT,
+            default: 2,
+        },
+    },
 ];
 
 impl ParamId {
@@ -443,6 +534,14 @@ impl ParamId {
         Self::NoteB,
         Self::MidiGate,
         Self::Transition,
+        Self::FormantFollow,
+        Self::OctaveDown,
+        Self::Sub,
+        Self::OctaveUp,
+        Self::Freeze,
+        Self::Robot,
+        Self::Glitch,
+        Self::GlitchRate,
     ];
 
     #[must_use]

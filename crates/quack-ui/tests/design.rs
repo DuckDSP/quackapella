@@ -37,6 +37,15 @@ fn editor_captures() {
         v.set(ParamId::Pitch, if mode == 0.0 { -5.0 } else { 12.0 });
         v.set(ParamId::Fine, if mode == 0.0 { 12.0 } else { 0.0 });
         v.set(ParamId::Formant, if mode == 2.0 { 4.5 } else { 0.0 });
+        if mode == 2.0 {
+            v.set(ParamId::Pitch, -7.0);
+            v.set(ParamId::FormantFollow, 80.0);
+            v.set(ParamId::Sub, 45.0);
+            v.set(ParamId::OctaveDown, 70.0);
+            v.set(ParamId::Robot, 0.0);
+            v.set(ParamId::Glitch, 35.0);
+            v.set(ParamId::Freeze, 1.0);
+        }
         if mode == 1.0 {
             v.set(ParamId::Pitch, 0.0);
             v.set(ParamId::Fine, 0.0);
@@ -58,6 +67,7 @@ fn editor_captures() {
             tune_target: 57.0,
             tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
             tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
+            frozen: mode == 2.0,
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);

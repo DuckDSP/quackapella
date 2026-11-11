@@ -21,10 +21,12 @@
 //! | [`pitch`] | Real-time pitch detection (YIN), voicing, confidence [2] |
 //! | [`shift`] | Pitch shifting with formant preservation [3] |
 //! | [`autotune`] | Scales and note targeting [4] |
+//! | [`creative`] | Robot and glitch of the Creative mode [5] |
 //! | [`harmony`] | MIDI-driven harmony voices [6] |
 //! | [`vocoder`] | Vocoder and talkbox [7] |
 
 pub mod autotune;
+pub mod creative;
 pub mod engine;
 pub mod harmony;
 pub mod latency;

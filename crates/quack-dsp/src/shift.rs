@@ -74,6 +74,18 @@ pub const MAX_PITCH_RATIO: f32 = 4.0;
 
 pub const CHANNELS: usize = 2;
 
+/// Extra voices built on the main voice's grains, at a fixed interval
+/// from it: octave down, two octaves down (sub), octave up. They follow
+/// the main voice's pitch (correction included), only sound on voiced
+/// grains, and fade in with the voicing.
+pub const LAYERS: usize = 3;
+/// Pitch ratio of each layer to the main voice.
+pub const LAYER_RATIOS: [f64; LAYERS] = [0.5, 0.25, 2.0];
+/// Freeze crossfade, in and out.
+const FREEZE_FADE_S: f64 = 0.025;
+/// How far back a freeze looks for a voiced grain to hold (marks).
+const FREEZE_LOOKBACK: usize = 48;
+
 /// Decides the pitch ratio of each grain. The autotune
 /// ([`crate::autotune::Retuner`]) works here, on the grain's own period,
 /// so its correction is in time with the waveform; a plain `f32` is a
@@ -117,12 +129,80 @@ struct Mark {
     voiced: bool,
 }
 
+/// One synthesis stream: grains overlap-added on its own marks.
+#[derive(Debug, Clone, Default)]
+struct Voice {
+    /// Output accumulators, indexed by output-timeline sample.
+    acc: [Vec<f32>; CHANNELS],
+    /// Next synthesis mark, on the input timeline.
+    next_s: f64,
+    /// Synthesis position of the previous grain (for `PitchControl`).
+    last_s: f64,
+    /// How far ahead of the output the next grain must be placed.
+    lead: f64,
+    /// 0 (unvoiced, unshifted) to 1 (voiced, fully shifted).
+    voicing: f64,
+    /// Delay of the grains behind the synthesis marks, in samples.
+    offset: f64,
+    /// Layers and freeze only run while they are heard.
+    active: bool,
+}
+
+impl Voice {
+    fn alloc(&mut self, len: usize) {
+        self.acc = [vec![0.0; len], vec![0.0; len]];
+    }
+
+    fn clear(&mut self, lead: f64) {
+        for b in &mut self.acc {
+            b.fill(0.0);
+        }
+        self.next_s = 0.0;
+        self.last_s = 0.0;
+        self.voicing = 0.0;
+        self.offset = 0.0;
+        self.lead = lead;
+    }
+
+    /// Read and clear output sample `o`.
+    #[inline]
+    fn take(&mut self, o: usize) -> (f32, f32) {
+        let out = (self.acc[0][o], self.acc[1][o]);
+        self.acc[0][o] = 0.0;
+        self.acc[1][o] = 0.0;
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FreezeState {
+    #[default]
+    Off,
+    /// Asked for, waiting for a voiced grain to hold.
+    Waiting,
+    On,
+}
+
+/// The held grain of a freeze and its own synthesis stream.
+#[derive(Debug, Clone, Default)]
+struct Frozen {
+    state: FreezeState,
+    /// The grain (two periods plus the interpolator's reach).
+    buf: [Vec<f32>; CHANNELS],
+    centre: f64,
+    period: f64,
+    /// Output ratio and transposition when it was taken.
+    ratio: f64,
+    transpose: f64,
+    /// Crossfade from the live voice (0) to the frozen one (1).
+    fade: f32,
+    voice: Voice,
+}
+
 /// Real-time pitch-synchronous shifter. See the module docs.
 #[derive(Debug, Clone, Default)]
 pub struct Psola {
     sample_rate: f64,
-    /// Synthesis position of the previous grain (for `PitchControl`).
-    last_s: f64,
     latency: i64,
     unvoiced: i64,
     min_period: f64,
@@ -137,22 +217,28 @@ pub struct Psola {
     marks: Vec<Mark>,
     /// Marks placed since reset; the newest is `marks[(count - 1) % MARKS]`.
     count: usize,
-    /// Output accumulators, indexed by output-timeline sample.
-    acc: [Vec<f32>; CHANNELS],
     out_mask: usize,
-    /// Next synthesis mark, on the input timeline.
-    next_s: f64,
-    /// How far ahead of the output the next grain must be placed.
-    lead: f64,
-    /// 0 (unvoiced, unshifted) to 1 (voiced, fully shifted).
-    voicing: f64,
+    main: Voice,
+    layers: [Voice; LAYERS],
+    layer_level: [f32; LAYERS],
+    /// Last pitch ratio of the main voice (the freeze starts from it).
+    main_ratio: f64,
+    /// Voiced main grains placed (the layers take every n-th).
+    grain_n: u64,
+    /// How much the formants follow the pitch (0 = kept in place, 1 =
+    /// like resampling: chipmunk up, monster down).
+    follow: f64,
+    frozen: Frozen,
+    freeze_step: f32,
+    /// Freeze pitch: a played note (Hz), or the transposition now.
+    freeze_hz: Option<f32>,
+    freeze_transpose: f64,
+    frozen_on: bool,
     glide: f64,
     /// Last detected period and how many samples it is still held for.
     held_period: f32,
     hold: usize,
     hold_len: usize,
-    /// Delay of the grains behind the synthesis marks, in samples.
-    offset: f64,
     /// Smoothed voiced period, kept through consonants and pauses.
     sung_period: f64,
     /// Noisiness measure: last two mono samples, band energies.
@@ -191,7 +277,14 @@ impl Psola {
         self.input = [vec![0.0; in_len], vec![0.0; in_len]];
         self.search = vec![0.0; in_len];
         self.in_mask = in_len - 1;
-        self.acc = [vec![0.0; out_len], vec![0.0; out_len]];
+        self.main.alloc(out_len);
+        for v in &mut self.layers {
+            v.alloc(out_len);
+        }
+        self.frozen.voice.alloc(out_len);
+        let grain = 2 * pmax + 8;
+        self.frozen.buf = [vec![0.0; grain], vec![0.0; grain]];
+        self.freeze_step = (1.0 / (sr * FREEZE_FADE_S)) as f32;
         self.marks = vec![Mark::default(); MARKS];
         self.out_mask = out_len - 1;
         self.lowpass = [Biquad::lowpass(sr, MARK_LOWPASS_HZ); 2];
@@ -204,7 +297,7 @@ impl Psola {
 
     /// Clears audio state. Real-time safe.
     pub fn reset(&mut self) {
-        for b in self.input.iter_mut().chain(self.acc.iter_mut()) {
+        for b in &mut self.input {
             b.fill(0.0);
         }
         self.search.fill(0.0);
@@ -213,18 +306,74 @@ impl Psola {
         }
         self.n = 0;
         self.count = 0;
-        self.next_s = 0.0;
-        self.last_s = 0.0;
-        self.voicing = 0.0;
         self.hold = 0;
-        self.offset = 0.0;
+        self.main_ratio = 1.0;
         self.sung_period = 0.0;
         self.prev = [0.0; 2];
         self.e_full = 0.0;
         self.e_high = 0.0;
         #[allow(clippy::cast_precision_loss)]
         let u = self.unvoiced as f64;
-        self.lead = u;
+        self.main.clear(u);
+        self.main.active = true;
+        for v in &mut self.layers {
+            v.clear(u);
+            v.active = false;
+        }
+        self.frozen.voice.clear(u);
+        self.frozen.voice.active = false;
+        self.frozen.state = FreezeState::Off;
+        self.frozen.fade = 0.0;
+    }
+
+    /// Levels of the layers (see [`LAYER_RATIOS`]), 0 to 1, already
+    /// smoothed by the caller. A layer starts on the main voice's marks
+    /// when its level leaves 0. Real-time safe.
+    pub fn set_layers(&mut self, levels: [f32; LAYERS]) {
+        for (i, &l) in levels.iter().enumerate() {
+            let l = l.clamp(0.0, 1.0);
+            let v = &mut self.layers[i];
+            if l > 0.0 && !v.active {
+                for b in &mut v.acc {
+                    b.fill(0.0);
+                }
+                v.active = true;
+            } else if l <= 0.0 {
+                v.active = false;
+            }
+            self.layer_level[i] = l;
+        }
+    }
+
+    /// How much the formants follow the pitch shift, 0 to 1.
+    pub fn set_formant_follow(&mut self, follow: f32) {
+        self.follow = f64::from(follow.clamp(0.0, 1.0));
+    }
+
+    /// Freeze: hold the latest voiced grain and play it on and on (it
+    /// crossfades in once a voiced grain is there, and back out when
+    /// released). `note_hz` plays it at that pitch (a MIDI note);
+    /// otherwise it keeps the pitch it had, moved by any change of
+    /// `transpose_st` since. Real-time safe.
+    pub fn set_freeze(&mut self, on: bool, note_hz: Option<f32>, transpose_st: f32) {
+        self.freeze_hz = note_hz;
+        self.freeze_transpose = f64::from(transpose_st);
+        match (on, self.frozen.state) {
+            (true, FreezeState::Off) => self.frozen.state = FreezeState::Waiting,
+            (false, FreezeState::Waiting) => self.frozen.state = FreezeState::Off,
+            _ => {}
+        }
+        if !on && self.frozen.state == FreezeState::On && self.frozen.fade <= 0.0 {
+            self.frozen.state = FreezeState::Off;
+            self.frozen.voice.active = false;
+        }
+        self.frozen_on = on;
+    }
+
+    /// Whether a frozen grain is sounding.
+    #[must_use]
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.state == FreezeState::On
     }
 
     /// Output delay in samples.
@@ -298,18 +447,43 @@ impl Psola {
         let fr = formant_ratio.clamp(1.0 / MAX_FORMANT_RATIO, MAX_FORMANT_RATIO);
         #[allow(clippy::cast_precision_loss)]
         let c = (n - self.latency) as f64;
-        while self.next_s <= c + self.lead {
-            if !self.place_grain(c, pitch, f64::from(fr)) {
+        let fr = f64::from(fr);
+        let mut v = std::mem::take(&mut self.main);
+        while v.next_s <= c + v.lead {
+            if !self.place_grain(&mut v, c, pitch, fr) {
                 break;
             }
         }
+        self.main = v;
+        self.run_freeze(c, fr);
         #[allow(clippy::cast_possible_truncation)]
         let o = self.out_index(n - self.latency);
-        let out = (self.acc[0][o], self.acc[1][o]);
-        self.acc[0][o] = 0.0;
-        self.acc[1][o] = 0.0;
+        let (mut l, mut r) = self.main.take(o);
+        let mut power = 1.0;
+        for i in 0..LAYERS {
+            if self.layers[i].active {
+                let (a, b) = self.layers[i].take(o);
+                let g = self.layer_level[i];
+                l += g * a;
+                r += g * b;
+                power += g * g;
+            }
+        }
+        if power > 1.0 {
+            // Layers stack up without pushing the level (or clipping):
+            // the sum keeps about the main voice's loudness.
+            let k = power.sqrt().recip();
+            l *= k;
+            r *= k;
+        }
+        if self.frozen.voice.active {
+            let (a, b) = self.frozen.voice.take(o);
+            let f = self.frozen.fade;
+            l += f * (a - l);
+            r += f * (b - r);
+        }
         self.n += 1;
-        out
+        (l, r)
     }
 
     #[inline]
@@ -432,11 +606,17 @@ impl Psola {
     }
 
     /// Overlap-add the grain for the next synthesis mark, then move the
-    /// mark on by one output period.
+    /// mark on by one output period. Returns `false` when the grain must
+    /// wait for more input.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    /// Returns `false` when the grain must wait for more input.
-    fn place_grain(&mut self, c: f64, pitch: &mut impl PitchControl, formant_ratio: f64) -> bool {
-        let s = self.next_s;
+    fn place_grain(
+        &mut self,
+        v: &mut Voice,
+        c: f64,
+        pitch: &mut impl PitchControl,
+        formant_ratio: f64,
+    ) -> bool {
+        let s = v.next_s;
         // The grains play the input `offset` samples behind the synthesis
         // marks. A voiced grain needs two periods of input, an unvoiced
         // one much less: following that difference at every consonant
@@ -450,11 +630,11 @@ impl Psola {
         let floor = (self.sung_period * (2.0 + SEARCH + 1.0 / formant_ratio) + 2.0
             - self.latency as f64)
             .max(0.0);
-        self.offset = (self.offset - OFFSET_RECOVERY * self.lead).max(floor);
-        let target = s - self.offset;
+        v.offset = (v.offset - OFFSET_RECOVERY * v.lead).max(floor);
+        let target = s - v.offset;
         let Some(k) = self.nearest_complete(target) else {
             // Nothing complete yet (just after a reset): silence.
-            self.next_s += self.unvoiced as f64;
+            v.next_s += self.unvoiced as f64;
             return true;
         };
         if k + 1 < self.count && target - (self.mark(k).pos as f64) > 0.5 * self.right(k) {
@@ -469,19 +649,19 @@ impl Psola {
             right
         };
         let step = right / self.glide;
-        self.voicing = if m.voiced {
-            (self.voicing + step).min(1.0)
+        v.voicing = if m.voiced {
+            (v.voicing + step).min(1.0)
         } else {
-            (self.voicing - step).max(0.0)
+            (v.voicing - step).max(0.0)
         };
         // The formant applies from the first sample, voiced or not: the
         // timbre does not switch when the detector makes up its mind.
         // Only the pitch glides in, and unvoiced grains are never
         // transposed (noise put back at another spacing would buzz).
         let fr = formant_ratio;
-        let dt = ((s - self.last_s) / self.sample_rate).max(0.0);
-        self.last_s = s;
-        let (ratio, hl, hr) = if m.voiced {
+        let dt = ((s - v.last_s) / self.sample_rate).max(0.0);
+        v.last_s = s;
+        let (ratio, fr, hl, hr) = if m.voiced {
             let max = f64::from(MAX_PITCH_RATIO);
             // The grain's own period, unless a mark landed off the
             // pulses (consonant onsets): then the detector's.
@@ -491,7 +671,10 @@ impl Psola {
                 f64::from(m.period)
             };
             let pr = pitch.voiced(own, dt).clamp(1.0 / max, max);
-            (pr.powf(self.voicing), left / fr, right / fr)
+            self.main_ratio = pr;
+            let ratio = pr.powf(v.voicing);
+            let fr = self.followed(fr, ratio);
+            (ratio, fr, left / fr, right / fr)
         } else {
             pitch.unvoiced(dt);
             // Kept at the analysis spacing, so the grains still sum to
@@ -499,7 +682,7 @@ impl Psola {
             // envelope, without reading past the recorded input.
             #[allow(clippy::cast_precision_loss)]
             let room = ((self.n - 2 - m.pos) as f64 / fr).max(1.0);
-            (1.0, left, right.min(room))
+            (1.0, fr, left, right.min(room))
         };
         // A grain due late (after waiting, or wider than the previous one)
         // is moved, never cut on its rising edge; the delay follows so the
@@ -509,13 +692,101 @@ impl Psola {
         // on average and leave the output a few cents flat.)
         let late = (c - 1.0 + hl - s).max(0.0);
         let s = s + late;
-        self.offset += late;
-        let start = (s - hl).ceil() as i64;
-        let end = (s + hr).floor() as i64;
+        v.offset += late;
         let a = m.pos as f64;
         // More grains per second going up, fewer going down: keep the
         // loudness where it was (same for narrower or wider grains).
         let gain = if m.voiced { (fr / ratio).sqrt() } else { 1.0 };
+        self.add_grain(&mut v.acc, s, hl, hr, a, fr, gain);
+        let spacing = right / ratio;
+        if m.voiced {
+            self.layer_grains(s, a, left, right, formant_ratio, ratio, spacing, v.voicing);
+        }
+        v.next_s = s + spacing;
+        v.lead = hl.max(hr);
+        true
+    }
+
+    /// Formant ratio once it follows the pitch ratio (chipmunk going up,
+    /// monster going down), by the follow amount.
+    fn followed(&self, fr: f64, ratio: f64) -> f64 {
+        if self.follow <= 0.0 {
+            return fr;
+        }
+        (fr * ratio.powf(self.follow)).clamp(
+            1.0 / f64::from(MAX_FORMANT_RATIO),
+            f64::from(MAX_FORMANT_RATIO),
+        )
+    }
+
+    /// The layers' grains for a voiced main grain at `s`. They sit on
+    /// the main voice's own synthesis marks (every second one an octave
+    /// down, every fourth two octaves down, twice as many an octave up),
+    /// with the same analysis grain: their pulses line up with the main
+    /// voice's, so where their harmonics meet they add up instead of
+    /// cancelling, and they follow its pitch and correction.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn layer_grains(
+        &mut self,
+        s: f64,
+        a: f64,
+        left: f64,
+        right: f64,
+        formant_ratio: f64,
+        ratio: f64,
+        spacing: f64,
+        voicing: f64,
+    ) {
+        let n = self.grain_n;
+        self.grain_n = self.grain_n.wrapping_add(1);
+        if !self.layers.iter().any(|l| l.active) || voicing <= 0.0 {
+            return;
+        }
+        let max = f64::from(MAX_PITCH_RATIO);
+        let mut layers = std::mem::take(&mut self.layers);
+        for (l, &mult) in layers.iter_mut().zip(&LAYER_RATIOS) {
+            if !l.active {
+                continue;
+            }
+            let every = (1.0 / mult).round().max(1.0) as u64;
+            if !n.is_multiple_of(every) {
+                continue;
+            }
+            let lr = (ratio * mult).clamp(1.0 / max, max);
+            let fr = self.followed(formant_ratio, lr);
+            let gain = (fr / lr).sqrt() * voicing;
+            let (hl, hr) = (left / fr, right / fr);
+            self.add_grain(&mut l.acc, s, hl, hr, a, fr, gain);
+            if mult > 1.0 {
+                self.add_grain(&mut l.acc, s + 0.5 * spacing, hl, hr, a, fr, gain);
+            }
+        }
+        self.layers = layers;
+    }
+
+    /// Overlap-add one grain of the input around analysis position `a`
+    /// at output position `s` (asymmetric Hann, read `fr` times faster).
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss
+    )]
+    fn add_grain(
+        &self,
+        acc: &mut [Vec<f32>; CHANNELS],
+        s: f64,
+        hl: f64,
+        hr: f64,
+        a: f64,
+        fr: f64,
+        gain: f64,
+    ) {
+        let start = (s - hl).ceil() as i64;
+        let end = (s + hr).floor() as i64;
         for j in start..=end {
             let d = j as f64 - s;
             let w = if d < 0.0 {
@@ -526,12 +797,103 @@ impl Psola {
             let src = a + d * fr;
             let o = self.out_index(j);
             let w = (w * gain) as f32;
-            self.acc[0][o] += w * self.read(0, src);
-            self.acc[1][o] += w * self.read(1, src);
+            acc[0][o] += w * self.read(0, src);
+            acc[1][o] += w * self.read(1, src);
         }
-        self.next_s = s + right / ratio;
-        self.lead = hl.max(hr);
+    }
+
+    /// Take the newest voiced grain still in the input as the frozen
+    /// one. `false` while there is none (unvoiced, silence).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn capture(&mut self) -> bool {
+        let oldest = self.count.saturating_sub(FREEZE_LOOKBACK);
+        let Some(k) = (oldest..self.count)
+            .rev()
+            .find(|&k| self.mark(k).voiced && self.complete(k))
+        else {
+            return false;
+        };
+        let p = self.right(k).min((self.frozen.buf[0].len() / 2 - 4) as f64);
+        let start = self.mark(k).pos - p.ceil() as i64 - 2;
+        if start < self.n - self.in_mask as i64 {
+            return false;
+        }
+        for ch in 0..CHANNELS {
+            for (j, x) in (start..).zip(self.frozen.buf[ch].iter_mut()) {
+                *x = self.input[ch][(j as usize) & self.in_mask];
+            }
+        }
+        let pos = self.mark(k).pos;
+        let f = &mut self.frozen;
+        f.centre = (pos - start) as f64;
+        f.period = p;
+        f.ratio = self.main_ratio;
+        f.transpose = self.freeze_transpose;
         true
+    }
+
+    /// The frozen voice: crossfade and grains.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn run_freeze(&mut self, c: f64, formant_ratio: f64) {
+        match self.frozen.state {
+            FreezeState::Off => return,
+            FreezeState::Waiting => {
+                if !self.capture() {
+                    return;
+                }
+                self.frozen.state = FreezeState::On;
+                let v = &mut self.frozen.voice;
+                if !v.active {
+                    for b in &mut v.acc {
+                        b.fill(0.0);
+                    }
+                    v.next_s = c;
+                    v.lead = 0.0;
+                    v.active = true;
+                }
+            }
+            FreezeState::On => {}
+        }
+        let f = &mut self.frozen;
+        if self.frozen_on {
+            f.fade = (f.fade + self.freeze_step).min(1.0);
+        } else {
+            f.fade = (f.fade - self.freeze_step).max(0.0);
+            if f.fade <= 0.0 {
+                f.state = FreezeState::Off;
+                f.voice.active = false;
+                return;
+            }
+        }
+        let max = f64::from(MAX_PITCH_RATIO);
+        while f.voice.next_s <= c + f.voice.lead {
+            let p = f.period;
+            let ratio = match self.freeze_hz {
+                Some(hz) => f64::from(hz) * p / self.sample_rate,
+                None => f.ratio * ((self.freeze_transpose - f.transpose) / 12.0).exp2(),
+            }
+            .clamp(1.0 / max, max);
+            let fr = (formant_ratio * ratio.powf(self.follow)).clamp(
+                1.0 / f64::from(MAX_FORMANT_RATIO),
+                f64::from(MAX_FORMANT_RATIO),
+            );
+            let h = p / fr;
+            let s = f.voice.next_s.max(c - 1.0 + h);
+            let gain = ((fr / ratio).sqrt()) as f32;
+            let start = (s - h).ceil() as i64;
+            let end = (s + h).floor() as i64;
+            for j in start..=end {
+                let d = j as f64 - s;
+                let w = (0.5 + 0.5 * (PI * d / h).cos()) as f32 * gain;
+                let src = f.centre + d * fr;
+                let o = (j as usize) & self.out_mask;
+                for ch in 0..CHANNELS {
+                    f.voice.acc[ch][o] += w * read_buf(&f.buf[ch], src);
+                }
+            }
+            f.voice.next_s = s + p / ratio;
+            f.voice.lead = h;
+        }
     }
 
     /// Distance from mark `k - 1` to mark `k`, clamped to a period.
@@ -596,6 +958,27 @@ impl Psola {
         let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
         ((c3 * t + c2) * t + c1) * t + y1
     }
+}
+
+/// `buf` at fractional index `x` (4-point Hermite), zero outside.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn read_buf(buf: &[f32], x: f64) -> f32 {
+    let i = x.floor();
+    let t = (x - i) as f32;
+    let i = i as i64;
+    let at = |k: i64| {
+        if k < 0 {
+            0.0
+        } else {
+            buf.get(k as usize).copied().unwrap_or(0.0)
+        }
+    };
+    let (y0, y1, y2, y3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+    let c1 = 0.5 * (y2 - y0);
+    let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+    let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+    ((c3 * t + c2) * t + c1) * t + y1
 }
 
 #[cfg(test)]
@@ -698,6 +1081,132 @@ mod tests {
 
     fn cents(a: f32, b: f32) -> f32 {
         1200.0 * (a / b).log2()
+    }
+
+    /// Like [`shift`], with the Creative controls: layer levels, formant
+    /// follow, and a freeze switched on at `freeze_at` samples.
+    fn creative(
+        x: &[f32],
+        pitch_st: f32,
+        layers: [f32; LAYERS],
+        follow: f32,
+        freeze_at: Option<usize>,
+    ) -> Vec<f32> {
+        let mut det = Yin::new(SR);
+        let mut ps = Psola::new(SR, LAT);
+        ps.set_layers(layers);
+        ps.set_formant_follow(follow);
+        let pr = semitones_to_ratio(pitch_st);
+        x.iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                ps.set_freeze(freeze_at.is_some_and(|f| i >= f), None, 0.0);
+                det.push_sample(v);
+                #[allow(clippy::cast_possible_truncation)]
+                let period = det.estimate().map(|e| (SR / f64::from(e.hz)) as f32);
+                ps.tick(v, v, period, pr, 1.0).0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn layers_add_octaves_on_the_same_grains() {
+        let x = vowel(220.0, 0.6);
+        // Main voice silent is not possible, so compare spectra: an
+        // octave-down layer puts energy at 110 Hz, absent from the input.
+        let band = |y: &[f32], hz: f64| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, &v) in y.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss)]
+                let ph = 2.0 * PI * hz * i as f64 / SR;
+                re += f64::from(v) * ph.cos();
+                im += f64::from(v) * ph.sin();
+            }
+            re.hypot(im)
+        };
+        let plain = creative(&x, 0.0, [0.0; LAYERS], 0.0, None);
+        let down = creative(&x, 0.0, [1.0, 0.0, 0.0], 0.0, None);
+        let sub = creative(&x, 0.0, [0.0, 1.0, 0.0], 0.0, None);
+        let w = 12_000..28_800;
+        let at = |y: &[f32], hz| band(&y[w.clone()], hz);
+        assert!(at(&down, 110.0) > 8.0 * at(&plain, 110.0), "octave down");
+        assert!(at(&sub, 55.0) > 8.0 * at(&plain, 55.0), "sub");
+        // The main voice is still there, at its pitch.
+        assert!(
+            at(&down, 220.0) > 0.7 * at(&plain, 220.0),
+            "fundamental kept"
+        );
+        // Octave up: the main pitch is still detected (the layer sits on
+        // its second harmonic), and transposition carries the layers.
+        let up = creative(&x, -12.0, [0.0, 0.0, 1.0], 0.0, None);
+        let base = at(&creative(&x, -12.0, [0.0; LAYERS], 0.0, None), 220.0);
+        assert!(at(&up, 220.0) > 1.5 * base, "octave up");
+    }
+
+    #[test]
+    fn freeze_holds_the_grain_after_the_voice_stops() {
+        // Voice for 0.3 s, then a different note, then silence: the freeze
+        // taken at 0.25 s keeps 220 Hz through both.
+        let mut x = vowel(220.0, 0.3);
+        x.extend(vowel(330.0, 0.3));
+        x.extend(vec![0.0; 14_400]);
+        let y = creative(&x, 0.0, [0.0; LAYERS], 0.0, Some(12_000));
+        let note2 = median_pitch(&y[18_000..28_000]);
+        assert!(
+            cents(note2, 220.0).abs() < 15.0,
+            "over the next note: {note2}"
+        );
+        let quiet = median_pitch(&y[30_000..42_000]);
+        assert!(cents(quiet, 220.0).abs() < 15.0, "over silence: {quiet}");
+        // Released: it fades back to the live input.
+        let mut det = Yin::new(SR);
+        let mut ps = Psola::new(SR, LAT);
+        let mut tail = 0.0f32;
+        for (i, &v) in x.iter().enumerate() {
+            ps.set_freeze((12_000..20_000).contains(&i), None, 0.0);
+            det.push_sample(v);
+            #[allow(clippy::cast_possible_truncation)]
+            let period = det.estimate().map(|e| (SR / f64::from(e.hz)) as f32);
+            let o = ps.tick(v, v, period, 1.0, 1.0).0;
+            if i > 30_000 {
+                tail = tail.max(o.abs());
+            }
+        }
+        assert!(tail < 1e-3, "silence after release: {tail}");
+        assert!(!ps.is_frozen());
+    }
+
+    #[test]
+    fn freeze_plays_a_midi_note() {
+        let x = vowel(220.0, 0.6);
+        let mut det = Yin::new(SR);
+        let mut ps = Psola::new(SR, LAT);
+        let y: Vec<f32> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let hz = if i > 14_000 { Some(392.0) } else { None };
+                ps.set_freeze(i >= 9_600, hz, 0.0);
+                det.push_sample(v);
+                #[allow(clippy::cast_possible_truncation)]
+                let period = det.estimate().map(|e| (SR / f64::from(e.hz)) as f32);
+                ps.tick(v, v, period, 1.0, 1.0).0
+            })
+            .collect();
+        let got = median_pitch(&y[17_000..]);
+        assert!(cents(got, 392.0).abs() < 10.0, "{got}");
+    }
+
+    #[test]
+    fn formant_follow_makes_chipmunks_and_monsters() {
+        let x = vowel(196.0, 0.6);
+        let at = |y: &[f32]| centroid(&y[14_000..16_048]);
+        let kept = at(&creative(&x, 12.0, [0.0; LAYERS], 0.0, None));
+        let chip = at(&creative(&x, 12.0, [0.0; LAYERS], 1.0, None));
+        assert!(chip / kept > 1.5, "chipmunk {chip:.0} vs {kept:.0}");
+        let kept = at(&creative(&x, -12.0, [0.0; LAYERS], 0.0, None));
+        let monster = at(&creative(&x, -12.0, [0.0; LAYERS], 1.0, None));
+        assert!(monster / kept < 0.75, "monster {monster:.0} vs {kept:.0}");
     }
 
     #[test]
