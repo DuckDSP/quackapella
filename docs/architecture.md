@@ -44,6 +44,13 @@ d'entrée, somme mono), en lecture seule :
 - voisé / non voisé avec hystérésis (apériodicité < 0,25 pour entrer,
   > 0,40 pour sortir) et porte à -55 dBFS : consonnes, souffle et
   silence ne donnent aucune lecture ;
+- à l'attaque, tant que la longue fenêtre contient encore le silence
+  d'avant, une vérification courte compare seulement les deux dernières
+  périodes (au moins 5 ms) : la note est lue environ 10 ms après son
+  début au lieu de 30. Cette lecture rapide n'est acceptée que si elle
+  est très périodique (apériodicité < 0,1) et confirmée par le pas
+  suivant (à un demi-ton près) : une plosive (p, t, k) ne passe plus pour
+  une note ;
 - médiane sur 5 lectures, en demi-tons : un saut d'octave isolé est
   rejeté, un vrai changement de note passe 5 ms plus tard ;
 - confiance = 1 - apériodicité, que le pitch shift (étape 3) et
@@ -61,9 +68,10 @@ confiance.
 `quack_dsp::shift::Psola`, un TD-PSOLA temps réel guidé par le
 détecteur, à la place de la ligne de retard du chemin traité :
 
-- **marques d'analyse** : une par période, sur le pic du signal passe-bas
-  (1 kHz) cherché à ±0,3 période autour de la position prédite (dernière
-  marque + période lue). Elles suivent l'onde elle-même, donc le retard
+- **marques d'analyse** : une par période, sur un pic fort du signal
+  passe-bas (1 kHz) cherché à ±0,3 période autour de la position prédite
+  (dernière marque + période lue), choisi par corrélation avec la période
+  précédente pour rester sur la même impulsion d'une période à l'autre. Elles suivent l'onde elle-même, donc le retard
   de lecture du détecteur et le vibrato ne les brouillent pas. En non
   voisé, une marque toutes les 2,5 ms ;
 - **grains** : fenêtre de Hann asymétrique qui va de la marque précédente
@@ -78,9 +86,29 @@ détecteur, à la place de la ligne de retard du chemin traité :
   le côté « phasy » d'un vocodeur de phase ;
 - **formant séparé** : lire le grain plus vite ou plus lentement déplace
   l'enveloppe sans toucher la hauteur (±12 demi-tons) ;
-- **non voisé** (s, f, ch, souffle) : toujours replacé tel quel, jamais
-  transposé (du bruit transposé bourdonne) ;
-- niveau gardé à peu près constant (gain `√(formant / ratio)` par grain).
+- **non voisé** (s, f, ch, souffle) : jamais transposé (du bruit
+  transposé bourdonne), mais le Formant s'y applique : chaque grain est lu
+  plus vite ou plus lentement, à espacement inchangé. Le timbre est donc
+  décalé dès le premier échantillon d'une phrase, sans attendre que le
+  détecteur reconnaisse la note : seule la hauteur arrive ensuite. Un détecteur de bruit (part
+  d'énergie dans les aigus, sur 2 ms) force le non voisé sur les
+  consonnes et les éclats de plosive, même si le détecteur de pitch les
+  croit voisés : sinon ces éclats, recouverts par des grains qui se
+  chevauchent, sont doublés (surtout avec un Formant non nul) ;
+- niveau gardé à peu près constant (gain `√(formant / ratio)` par grain) ;
+- **attaques** : les premiers grains d'une note glissent en 12 ms de la
+  hauteur chantée vers la hauteur visée (un petit scoop, au lieu d'un saut
+  qui claque ; le Formant, lui, ne glisse pas), une coupure du détecteur de moins de 10 ms garde la
+  dernière période (pas de va-et-vient entre grains transposés et non
+  transposés), et un grain plus large que le précédent est décalé plutôt
+  que coupé ;
+- **retard de contenu stable** : le retard entre l'entrée et le grain lu
+  ne change plus à chaque passage consonne / voyelle (c'était la cause
+  des « sauts » : un bout de son rejoué ou sauté). Il a un plancher qui
+  dépend de la période chantée (lissée), ne redescend que lentement
+  (3 % par grain), et quand le grain voulu n'est pas encore complet le
+  shifter attend un peu (court blanc) plutôt que de rejouer un grain
+  déjà entendu.
 
 Réglages : *Pitch* (±24 demi-tons), *Fine* (±100 cents), *Formant*
 (±12 demi-tons), lissés sur 20 ms dans le moteur. Ids hôte 200 à 202.
@@ -90,10 +118,9 @@ l'entrée retardée d'exactement 10 ms. Un grain a besoin de ses deux
 périodes complètes ; sous environ 120 Hz c'est plus que le budget, et le
 shifter prend alors le dernier grain complet, ce qui retarde le contenu
 des voix graves de quelques millisecondes de plus (sans clic, sans
-changer la latence déclarée). À la reprise d'une note après un silence
-ou une consonne, les ~25 ms que met le détecteur à se décider passent
-sans transposition : à écouter sur de vraies prises, l'étape 4 pourra
-ajouter une estimation rapide locale si ça s'entend.
+changer la latence déclarée). À la reprise d'une note, les ~10 ms que met
+le détecteur à se décider passent sans transposition, puis le glissé
+prend le relais.
 
 Tests : transposition de -12 à +12 demi-tons à moins de 10 cents
 (voyelle synthétique de 130 à 330 Hz), formants en place à ±1 octave

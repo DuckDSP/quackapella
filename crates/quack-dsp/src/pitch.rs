@@ -48,6 +48,12 @@ const VOICED_ON: f32 = 0.25;
 const VOICED_OFF: f32 = 0.40;
 /// Frames quieter than this (RMS, dBFS) are unvoiced.
 const GATE_DB: f32 = -55.0;
+/// Shortest comparison window of the onset check, in seconds.
+const ONSET_WINDOW_S: f64 = 0.005;
+/// The onset check only takes clearly periodic readings...
+const ONSET_MAX_APERIODICITY: f32 = 0.1;
+/// ...that two hops in a row agree on, within this many semitones.
+const ONSET_AGREEMENT_ST: f32 = 0.5;
 /// Readings in the median smoother (odd).
 pub const MEDIAN_LEN: usize = 5;
 
@@ -151,6 +157,10 @@ pub struct Yin {
     hp_y: f32,
     /// Integration window, shortest and longest lag, in analysis samples.
     window: usize,
+    /// Shortest window of the onset check, in analysis samples.
+    onset_window: usize,
+    /// Onset check's lag at the previous hop, waiting for confirmation.
+    onset_candidate: Option<f32>,
     tau_min: usize,
     tau_max: usize,
     /// Last `window + tau_max + 2` analysis samples, circular.
@@ -226,12 +236,37 @@ impl Yin {
         let recent = &x[n - w..];
         #[allow(clippy::cast_precision_loss)]
         let ms = recent.iter().map(|v| v * v).sum::<f32>() / w as f32;
-        let reading = if ms < self.gate { None } else { self.period() };
-        let voiced = match reading {
+        let o = self.onset_window;
+        #[allow(clippy::cast_precision_loss)]
+        let onset_ms = x[n - o..].iter().map(|v| v * v).sum::<f32>() / o as f32;
+        let mut reading = if ms < self.gate { None } else { self.period() };
+        let mut voiced = match reading {
             Some((_, ap)) if self.voiced => ap < VOICED_OFF,
             Some((_, ap)) => ap < VOICED_ON,
             None => false,
         };
+        if !voiced {
+            // The long frame still holds the silence before a note: look
+            // at the last two periods only, so the note is read ~10 ms
+            // after it starts instead of ~30 ms. A consonant burst can
+            // look periodic over so short a window once: only a clearly
+            // periodic reading confirmed by the next hop counts.
+            let candidate = if onset_ms >= self.gate {
+                self.recent_period()
+                    .filter(|r| r.1 < ONSET_MAX_APERIODICITY)
+            } else {
+                None
+            };
+            if let (Some(r), Some(prev)) = (candidate, self.onset_candidate)
+                && (12.0 * (r.0 / prev).log2()).abs() < ONSET_AGREEMENT_ST
+            {
+                reading = Some(r);
+                voiced = true;
+            }
+            self.onset_candidate = candidate.map(|r| r.0);
+        } else {
+            self.onset_candidate = None;
+        }
         self.voiced = voiced;
         match reading {
             Some((tau, ap)) if voiced => {
@@ -253,6 +288,49 @@ impl Yin {
                 self.current = None;
             }
         }
+    }
+
+    /// Onset check: period of the most recent samples, comparing the
+    /// last `max(tau, onset_window)` samples with the ones `tau` earlier.
+    /// Only a clear dip counts (no fallback to the global minimum).
+    fn recent_period(&mut self) -> Option<(f32, f32)> {
+        let n = self.frame.len();
+        let last = self.tau_max + 1;
+        let x = &self.frame;
+        let mut cum = 0.0;
+        self.cmnd[0] = 1.0;
+        for tau in 1..=last {
+            let w = tau.max(self.onset_window);
+            let cur = &x[n - w..];
+            let lagged = &x[n - w - tau..n - tau];
+            #[allow(clippy::cast_precision_loss)]
+            let d = cur
+                .iter()
+                .zip(lagged)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                / w as f32;
+            self.diff[tau] = d;
+            cum += d;
+            #[allow(clippy::cast_precision_loss)]
+            let v = if cum > 0.0 { d * tau as f32 / cum } else { 1.0 };
+            self.cmnd[tau] = v;
+        }
+        let d = &self.cmnd;
+        let mut tau = (self.tau_min..=self.tau_max).find(|&t| d[t] < PICK_THRESHOLD)?;
+        while tau < self.tau_max && d[tau + 1] < d[tau] {
+            tau += 1;
+        }
+        let (a, b, c) = (self.diff[tau - 1], self.diff[tau], self.diff[tau + 1]);
+        let den = a - 2.0 * b + c;
+        let shift = if den > 0.0 {
+            (0.5 * (a - c) / den).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let lag = tau as f32 + shift;
+        Some((lag, d[tau]))
     }
 
     /// Period (fractional lag) and aperiodicity of `frame`.
@@ -327,6 +405,7 @@ impl PitchDetector for Yin {
         self.tau_max = (rate / f64::from(MIN_HZ)).ceil() as usize;
         self.tau_min = ((rate / f64::from(MAX_HZ)).floor() as usize).max(2);
         self.window = self.tau_max;
+        self.onset_window = ((rate * ONSET_WINDOW_S).round() as usize).max(8);
         let len = self.window + self.tau_max + 2;
         self.ring = vec![0.0; len];
         self.frame = vec![0.0; len];
@@ -349,6 +428,7 @@ impl PitchDetector for Yin {
         self.phase = 0;
         self.since_hop = 0;
         self.voiced = false;
+        self.onset_candidate = None;
         self.history_len = 0;
         self.history_pos = 0;
         self.current = None;
@@ -492,7 +572,7 @@ mod tests {
         let hop = sr * HOP_MS / 1000.0;
         let first = r.iter().position(Option::is_some).expect("voiced");
         let onset_ms = (first as f64 * hop - 9_600.0) / sr * 1000.0;
-        assert!(onset_ms < 40.0, "onset {onset_ms:.1} ms");
+        assert!(onset_ms < 15.0, "onset {onset_ms:.1} ms");
         let last = r.iter().rposition(Option::is_some).expect("voiced");
         let release_ms = (last as f64 * hop - start as f64) / sr * 1000.0;
         assert!(release_ms < 40.0, "release {release_ms:.1} ms");
