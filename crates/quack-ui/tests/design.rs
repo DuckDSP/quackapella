@@ -87,6 +87,7 @@ fn editor_captures() {
             tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
             tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
             frozen: mode == 2.0,
+            vocoder_notes: 0,
             harmony_notes: if mode == 3.0 {
                 (1 << 52) | (1 << 60) | (1 << 64)
             } else {

@@ -40,6 +40,9 @@ pub struct QuackDsp {
     needs_snap: bool,
     left: Box<[f32; SCRATCH_FRAMES]>,
     right: Box<[f32; SCRATCH_FRAMES]>,
+    /// Side-chain input (the vocoder's external carrier).
+    sc_left: Box<[f32; SCRATCH_FRAMES]>,
+    sc_right: Box<[f32; SCRATCH_FRAMES]>,
 }
 
 impl Default for QuackDsp {
@@ -50,6 +53,8 @@ impl Default for QuackDsp {
             needs_snap: true,
             left: Box::new([0.0; SCRATCH_FRAMES]),
             right: Box::new([0.0; SCRATCH_FRAMES]),
+            sc_left: Box::new([0.0; SCRATCH_FRAMES]),
+            sc_right: Box::new([0.0; SCRATCH_FRAMES]),
         }
     }
 }
@@ -87,21 +92,37 @@ impl QuackDsp {
     }
 
     /// Run the engine on `frames` of the buffer from `offset`, through
-    /// the scratch (mono in feeds both sides).
+    /// the scratch (mono in feeds both sides). The main input has as
+    /// many channels as the output; input channels past them are the
+    /// side-chain.
     fn run(&mut self, buffer: &mut AudioBuffer, offset: usize, frames: usize) {
         let (ins, outs) = (buffer.num_input_channels(), buffer.num_output_channels());
+        let main = outs.min(ins);
+        let sc = ins - main;
         let mut done = 0;
         while done < frames {
             let n = (frames - done).min(SCRATCH_FRAMES);
             let at = offset + done;
             let (l, r) = (&mut self.left[..n], &mut self.right[..n]);
             l.copy_from_slice(&buffer.input(0)[at..at + n]);
-            if ins > 1 {
+            if main > 1 {
                 r.copy_from_slice(&buffer.input(1)[at..at + n]);
             } else {
                 r.copy_from_slice(l);
             }
-            self.engine.process(l, r);
+            let side = if sc > 0 {
+                let (a, b) = (&mut self.sc_left[..n], &mut self.sc_right[..n]);
+                a.copy_from_slice(&buffer.input(main)[at..at + n]);
+                if sc > 1 {
+                    b.copy_from_slice(&buffer.input(main + 1)[at..at + n]);
+                } else {
+                    b.copy_from_slice(a);
+                }
+                Some((&a[..], &b[..]))
+            } else {
+                None
+            };
+            self.engine.process_with_sidechain(l, r, side);
             buffer.output(0)[at..at + n].copy_from_slice(l);
             if outs > 1 {
                 buffer.output(1)[at..at + n].copy_from_slice(r);
@@ -116,6 +137,15 @@ pub struct Quackapella;
 impl PluginLogic for Quackapella {
     type Params = QuackParams;
     type DspState = QuackDsp;
+
+    /// Stereo or mono, each with a stereo side-chain input: the
+    /// vocoder's external carrier (AU wires a single side-chain width).
+    fn bus_layouts() -> Vec<BusLayout> {
+        vec![
+            BusLayout::stereo().with_sidechain_input("Sidechain", ChannelConfig::Stereo),
+            BusLayout::mono().with_sidechain_input("Sidechain", ChannelConfig::Stereo),
+        ]
+    }
 
     fn reset(state: &mut QuackDsp, params: &QuackParams, config: &AudioConfig) {
         state
@@ -190,6 +220,7 @@ impl PluginLogic for Quackapella {
             .publish_tune(state.engine.tune(), state.engine.tune_mask());
         params.shared.publish_frozen(state.engine.frozen());
         params.shared.publish_harmony(state.engine.harmony_notes());
+        params.shared.publish_vocoder(state.engine.vocoder_notes());
         ProcessStatus::Normal
     }
 

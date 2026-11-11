@@ -23,6 +23,9 @@ pub struct Shared {
     /// Notes the harmony voices sing (Synth mode).
     harmony_lo: AtomicU64,
     harmony_hi: AtomicU64,
+    /// Notes the vocoder's carrier plays (Synth mode).
+    vocoder_lo: AtomicU64,
+    vocoder_hi: AtomicU64,
 }
 
 impl Shared {
@@ -52,6 +55,13 @@ impl Shared {
         #[allow(clippy::cast_possible_truncation)]
         self.harmony_lo.store(mask as u64, Ordering::Relaxed);
         self.harmony_hi
+            .store((mask >> 64) as u64, Ordering::Relaxed);
+    }
+
+    pub fn publish_vocoder(&self, mask: u128) {
+        #[allow(clippy::cast_possible_truncation)]
+        self.vocoder_lo.store(mask as u64, Ordering::Relaxed);
+        self.vocoder_hi
             .store((mask >> 64) as u64, Ordering::Relaxed);
     }
 
@@ -87,6 +97,8 @@ impl Shared {
             frozen: self.frozen.load(Ordering::Relaxed),
             harmony_notes: u128::from(self.harmony_lo.load(Ordering::Relaxed))
                 | (u128::from(self.harmony_hi.load(Ordering::Relaxed)) << 64),
+            vocoder_notes: u128::from(self.vocoder_lo.load(Ordering::Relaxed))
+                | (u128::from(self.vocoder_hi.load(Ordering::Relaxed)) << 64),
         }
     }
 }

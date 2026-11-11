@@ -157,9 +157,21 @@ pub enum ParamId {
     Double,
     CloseVoicing,
     Latch,
+    Vocoder,
+    Carrier,
+    Bands,
+    VocoderLevel,
+    Response,
+    BandShift,
+    Sibilance,
+    CarrierOctave,
+    Detune,
+    CarrierNoise,
+    CarrierRelease,
+    CarrierFollow,
 }
 
-pub const PARAM_COUNT: usize = 56;
+pub const PARAM_COUNT: usize = 68;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -706,6 +718,130 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Bool { default: false },
     },
+    ParamSpec {
+        key: "vocoder",
+        host_id: 500,
+        name: "Vocoder",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::vocoder::VocoderMode::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "carrier",
+        host_id: 501,
+        name: "Carrier",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::vocoder::Carrier::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "bands",
+        host_id: 502,
+        name: "Bands",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::vocoder::BAND_CHOICES.len() as u32,
+            default: 2,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_level",
+        host_id: 503,
+        name: "Vocoder Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 80.0,
+        },
+    },
+    ParamSpec {
+        key: "response",
+        host_id: 504,
+        name: "Response",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 2.0,
+            max: 100.0,
+            default: 12.0,
+        },
+    },
+    ParamSpec {
+        key: "band_shift",
+        host_id: 505,
+        name: "Band Shift",
+        unit: "st",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "sibilance",
+        host_id: 506,
+        name: "Sibilance",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        },
+    },
+    ParamSpec {
+        key: "carrier_octave",
+        host_id: 507,
+        name: "Carrier Octave",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: 5,
+            default: 2,
+        },
+    },
+    ParamSpec {
+        key: "detune",
+        host_id: 508,
+        name: "Detune",
+        unit: "ct",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 50.0,
+            default: 12.0,
+        },
+    },
+    ParamSpec {
+        key: "carrier_noise",
+        host_id: 509,
+        name: "Carrier Noise",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 5.0,
+        },
+    },
+    ParamSpec {
+        key: "carrier_release",
+        host_id: 510,
+        name: "Carrier Release",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 5.0,
+            max: 1000.0,
+            default: 80.0,
+        },
+    },
+    ParamSpec {
+        key: "carrier_follow",
+        host_id: 511,
+        name: "Carrier Follow",
+        unit: "",
+        kind: ParamKind::Bool { default: true },
+    },
 ];
 
 impl ParamId {
@@ -766,6 +902,18 @@ impl ParamId {
         Self::Double,
         Self::CloseVoicing,
         Self::Latch,
+        Self::Vocoder,
+        Self::Carrier,
+        Self::Bands,
+        Self::VocoderLevel,
+        Self::Response,
+        Self::BandShift,
+        Self::Sibilance,
+        Self::CarrierOctave,
+        Self::Detune,
+        Self::CarrierNoise,
+        Self::CarrierRelease,
+        Self::CarrierFollow,
     ];
 
     #[must_use]
