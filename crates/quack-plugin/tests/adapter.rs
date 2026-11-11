@@ -2,6 +2,7 @@
 //! reported and real, MIDI reaches the engine at its offset, audio
 //! thread does not allocate.
 
+use quack_dsp::latency::VoiceRange;
 use quack_dsp::{ParamId, ParamKind};
 use quack_plugin::{Plugin, QuackDsp, QuackParams, Quackapella};
 use truce::prelude::{AudioConfig, PluginLogic, ProcessContext, TransportInfo};
@@ -70,7 +71,10 @@ fn reported_latency_is_the_real_one() {
         let mut dsp = QuackDsp::default();
         Quackapella::reset(&mut dsp, &params, &AudioConfig::new(sr, 512));
         let lat = Quackapella::latency(&dsp) as usize;
-        assert_eq!(lat, quack_dsp::latency::latency_samples(sr));
+        assert_eq!(
+            lat,
+            quack_dsp::latency::latency_samples(sr, VoiceRange::default(), false)
+        );
         assert_eq!(params.shared.view().latency_samples as usize, lat);
         // Longer than one scratch pass.
         let mut x = vec![0.0f32; 3000];
@@ -82,6 +86,39 @@ fn reported_latency_is_the_real_one() {
             assert!((ch[at] - 0.5).abs() < 1e-6);
         }
     }
+}
+
+#[test]
+fn voice_range_moves_the_reported_latency() {
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
+    for (i, range) in VoiceRange::ALL.iter().enumerate() {
+        params.voice.set_index(i as u32);
+        let mut x = vec![0.0f32; 2048];
+        // The range applies at the next block; the impulse comes after.
+        run(&mut dsp, &params, &x, &EventList::default());
+        let lat = Quackapella::latency(&dsp) as usize;
+        assert_eq!(lat, quack_dsp::latency::latency_samples(SR, *range, false));
+        assert_eq!(params.shared.view().latency_samples as usize, lat);
+        x[100] = 0.5;
+        let out = run(&mut dsp, &params, &x, &EventList::default());
+        let at = out[0].iter().position(|&v| v != 0.0).expect("impulse out");
+        assert_eq!(at, 100 + lat, "{}", range.name());
+    }
+    // Low Latency: shorter, still the real one.
+    params.low_latency.set_value(true);
+    let mut x = vec![0.0f32; 2048];
+    run(&mut dsp, &params, &x, &EventList::default());
+    let lat = Quackapella::latency(&dsp) as usize;
+    assert_eq!(
+        lat,
+        quack_dsp::latency::latency_samples(SR, VoiceRange::Bass, true)
+    );
+    x[100] = 0.5;
+    let out = run(&mut dsp, &params, &x, &EventList::default());
+    let at = out[0].iter().position(|&v| v != 0.0).expect("impulse out");
+    assert_eq!(at, 100 + lat);
 }
 
 #[test]

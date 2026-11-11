@@ -130,9 +130,11 @@ pub enum ParamId {
     NoteB,
     MidiGate,
     Transition,
+    Voice,
+    LowLatency,
 }
 
-pub const PARAM_COUNT: usize = 29;
+pub const PARAM_COUNT: usize = 31;
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -410,6 +412,23 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "voice",
+        host_id: 100,
+        name: "Voice",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::latency::VoiceRange::COUNT,
+            default: 1,
+        },
+    },
+    ParamSpec {
+        key: "low_latency",
+        host_id: 101,
+        name: "Low Latency",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 impl ParamId {
@@ -443,6 +462,8 @@ impl ParamId {
         Self::NoteB,
         Self::MidiGate,
         Self::Transition,
+        Self::Voice,
+        Self::LowLatency,
     ];
 
     #[must_use]

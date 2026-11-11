@@ -24,6 +24,7 @@ pub mod theme;
 
 use egui::{Align2, Color32, Rect, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
+use quack_dsp::latency::VoiceRange;
 use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::{ParamId, VoiceMode};
 
@@ -200,13 +201,48 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         size::VALUE,
         color::TEXT_DIM,
     );
-    text(
+    let lat_caption = text(
         &p,
         pos2(byp.left() - space::L - 70.0, head_y),
         Align2::RIGHT_CENTER,
         "Latency",
         size::CAPTION,
         color::TEXT_FAINT,
+    );
+    // Voice range: the lowest note sets the latency.
+    let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
+    let voice_r = Rect::from_min_size(
+        pos2(lat_caption.left() - space::XL - 150.0, head_y - 15.0),
+        vec2(150.0, 30.0),
+    );
+    controls::stepper(
+        ui,
+        params,
+        ParamId::Voice,
+        voice_r,
+        range.name(),
+        color::QUACK,
+    );
+    let voice_caption = text(
+        &p,
+        pos2(voice_r.left() - space::S, head_y),
+        Align2::RIGHT_CENTER,
+        "Voice",
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+    // Shorter grain attacks for low voices: less latency.
+    let low_r = Rect::from_min_size(
+        pos2(voice_caption.left() - space::XL - 120.0, head_y - 15.0),
+        vec2(120.0, 30.0),
+    );
+    controls::toggle(
+        ui,
+        params,
+        ParamId::LowLatency,
+        low_r,
+        "Low Latency",
+        color::QUACK,
     );
 
     // Mode panel.
@@ -985,7 +1021,7 @@ mod tests {
                 .set(ParamId::Mode, f64::from(mode));
             let view = View {
                 held_notes: (1 << 60) | (1 << 76),
-                latency_samples: 480,
+                latency_samples: 591,
                 sample_rate: 48_000.0,
                 pitch_hz: if mode % 2 == 0 { 0.0 } else { 223.1 },
                 pitch_confidence: 0.92,
