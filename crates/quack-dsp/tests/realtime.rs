@@ -142,6 +142,20 @@ fn heavy(mode: f64) -> ParamValues {
     set("reverb_level", 60.0);
     set("reverb_decay", 0.5);
     set("duck", 30.0);
+    set("low_cut", 120.0);
+    set("presence", 4.0);
+    set("air", 3.0);
+    set("drive", 40.0);
+    set("drive_on", 1.0);
+    set("drive_style", 4.0);
+    set("out_comp", 50.0);
+    set("out_deess", 40.0);
+    set("keep_in_key", 1.0);
+    set("chorus_on", 1.0);
+    set("delay_mod", 50.0);
+    set("delay_width", 50.0);
+    set("reverb_mod", 60.0);
+    set("delay_to_reverb", 40.0);
     v
 }
 

@@ -12,7 +12,7 @@ use quack_dsp::control::ControlState;
 use quack_dsp::params::ParamValues;
 use quack_dsp::presets::FACTORY;
 use quack_ui::theme::{self, color};
-use quack_ui::{BASE_H, BASE_W, Page, ParamAccess, UiState, View, draw};
+use quack_ui::{BASE_H, BASE_W, FxTab, Page, ParamAccess, UiState, View, draw};
 
 struct Values(RefCell<ParamValues>, ControlState);
 
@@ -146,6 +146,8 @@ fn editor_captures() {
             frozen: mode == 2.0,
             comp_db: if mode == 5.0 { -4.2 } else { 0.0 },
             deess_db: if mode == 5.0 { -1.5 } else { 0.0 },
+            out_comp_db: 0.0,
+            out_deess_db: 0.0,
             vocoder_notes: if mode == 4.0 {
                 (1 << 45) | (1 << 48) | (1 << 52)
             } else {
@@ -224,6 +226,32 @@ fn editor_captures() {
         if write {
             support::raster::write_png(&canvas, &out.join(format!("editor-{name}.png")))
                 .expect("write capture");
+        }
+        // The FX page: every other tab too.
+        if mode == 5.0 {
+            for tab in FxTab::ALL {
+                if tab == FxTab::Input {
+                    continue;
+                }
+                st.set_fx_tab(tab);
+                let ctx = egui::Context::default();
+                theme::apply(&ctx, truce_font::JETBRAINS_MONO);
+                #[allow(clippy::cast_precision_loss)]
+                let canvas = support::raster::render(
+                    &ctx,
+                    BASE_W as f32,
+                    BASE_H as f32,
+                    2.0,
+                    3,
+                    color::BG,
+                    |ui| draw(ui, &params, &view, &mut st),
+                );
+                if write {
+                    let tab = tab.name().to_lowercase();
+                    support::raster::write_png(&canvas, &out.join(format!("editor-fx-{tab}.png")))
+                        .expect("write capture");
+                }
+            }
         }
     }
 }

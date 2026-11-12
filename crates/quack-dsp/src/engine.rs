@@ -30,7 +30,10 @@ use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_m
 use crate::chain::{Chain, Routing, Stage, crossfade};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
-use crate::fx::{Division, Dynamics, DynamicsSettings, Space, SpaceSettings};
+use crate::fx::{
+    Chorus, ChorusSettings, Distortion, Division, DriveSettings, DriveStyle, Dynamics,
+    DynamicsSettings, Output, OutputSettings, Space, SpaceSettings, Tone, ToneSettings,
+};
 use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
@@ -116,10 +119,22 @@ pub struct Engine {
     /// bus fed by a send per layer, its return level.
     fx_on: bool,
     dynamics: Dynamics,
+    tone: Tone,
+    chorus: Chorus,
     space: Space,
     space_on: bool,
     fx_return: Ramp,
+    /// Per layer (voice, creative, harmony, vocoder): reverb send,
+    /// delay send, chorus amount, drive amount.
     sends: [Ramp; 4],
+    delay_sends: [Ramp; 4],
+    chorus_amounts: [Ramp; 4],
+    drive_amounts: [Ramp; 4],
+    drives: [Distortion; 4],
+    drive_on: bool,
+    output: Output,
+    /// Transposition before the correction (the voice stays in key).
+    keep_in_key: bool,
 }
 
 impl Default for Engine {
@@ -173,10 +188,19 @@ impl Engine {
             chain: Chain::default(),
             fx_on: false,
             dynamics: Dynamics::default(),
+            tone: Tone::default(),
+            chorus: Chorus::default(),
             space: Space::default(),
             space_on: false,
             fx_return: Ramp::new(0.0),
             sends: [Ramp::new(0.0); 4],
+            delay_sends: [Ramp::new(0.0); 4],
+            chorus_amounts: [Ramp::new(0.0); 4],
+            drive_amounts: [Ramp::new(0.0); 4],
+            drives: Default::default(),
+            drive_on: false,
+            output: Output::default(),
+            keep_in_key: false,
         };
         e.prepare(48_000.0, 512);
         e
@@ -208,6 +232,9 @@ impl Engine {
         .into_iter()
         .chain(self.layers.iter_mut())
         .chain(self.sends.iter_mut())
+        .chain(self.delay_sends.iter_mut())
+        .chain(self.chorus_amounts.iter_mut())
+        .chain(self.drive_amounts.iter_mut())
         {
             r.prepare(sample_rate, SMOOTH_MS);
         }
@@ -223,6 +250,12 @@ impl Engine {
         self.harmony.prepare(sample_rate);
         self.vocoder.prepare(sample_rate, max);
         self.dynamics.prepare(sample_rate);
+        self.tone.prepare(sample_rate);
+        self.chorus.prepare(sample_rate);
+        for d in &mut self.drives {
+            d.prepare(sample_rate);
+        }
+        self.output.prepare(sample_rate);
         self.space.prepare(sample_rate);
         self.notes.clear();
         self.latency = max;
@@ -282,6 +315,12 @@ impl Engine {
         self.harmony.reset();
         self.vocoder.reset();
         self.dynamics.reset();
+        self.tone.reset();
+        self.chorus.reset();
+        for d in &mut self.drives {
+            d.reset();
+        }
+        self.output.reset();
         self.space.reset();
         self.notes.clear();
         self.apply_all(true);
@@ -372,6 +411,10 @@ impl Engine {
                 (&mut self.pitch, st)
             }
             ParamId::Formant => (&mut self.formant, v),
+            ParamId::KeepInKey => {
+                self.keep_in_key = v >= 0.5;
+                return;
+            }
             ParamId::Throat => (&mut self.throat, v / 100.0),
             ParamId::ThroatPitch => (&mut self.throat_pitch, v / 100.0),
             ParamId::Mode => {
@@ -494,10 +537,49 @@ impl Engine {
             | ParamId::ReverbPredelay
             | ParamId::ReverbLevel
             | ParamId::Duck
-            | ParamId::SendVoice
-            | ParamId::SendCreative
-            | ParamId::SendHarmony
-            | ParamId::SendVocoder => {
+            | ParamId::DelayDuck
+            | ParamId::VoiceReverb
+            | ParamId::CreativeReverb
+            | ParamId::HarmonyReverb
+            | ParamId::VocoderReverb
+            | ParamId::DynamicsOn
+            | ParamId::ToneOn
+            | ParamId::DelayOn
+            | ParamId::ReverbOn
+            | ParamId::ChorusOn
+            | ParamId::LowCut
+            | ParamId::Presence
+            | ParamId::Air
+            | ParamId::Drive
+            | ParamId::DelayMod
+            | ParamId::DelayWidth
+            | ParamId::DelayLowCut
+            | ParamId::ReverbSize
+            | ParamId::ReverbMod
+            | ParamId::ReverbLowCut
+            | ParamId::ReverbWidth
+            | ParamId::DelayToReverb
+            | ParamId::ChorusRate
+            | ParamId::ChorusDepth
+            | ParamId::OutputOn
+            | ParamId::OutDeEss
+            | ParamId::OutComp
+            | ParamId::OutCeiling
+            | ParamId::DriveStyle
+            | ParamId::DriveTone
+            | ParamId::DriveOn
+            | ParamId::VoiceChorus
+            | ParamId::CreativeChorus
+            | ParamId::HarmonyChorus
+            | ParamId::VocoderChorus
+            | ParamId::VoiceDelay
+            | ParamId::CreativeDelay
+            | ParamId::HarmonyDelay
+            | ParamId::VocoderDelay
+            | ParamId::VoiceDrive
+            | ParamId::CreativeDrive
+            | ParamId::HarmonyDrive
+            | ParamId::VocoderDrive => {
                 self.update_fx(snap);
                 return;
             }
@@ -553,7 +635,39 @@ impl Engine {
         let f = |id: ParamId| v.get(id) as f32;
         let pct = |id: ParamId| f(id) / 100.0;
         let on = v.get(ParamId::FxOn) >= 0.5;
-        self.dynamics.set(if on {
+        let sw = |id: ParamId| on && v.get(id) >= 0.5;
+        self.tone.set(if sw(ParamId::ToneOn) {
+            ToneSettings {
+                low_cut_hz: f(ParamId::LowCut),
+                presence_db: f(ParamId::Presence),
+                air_db: f(ParamId::Air),
+            }
+        } else {
+            ToneSettings::default()
+        });
+        self.chorus.set(ChorusSettings {
+            rate_hz: f(ParamId::ChorusRate),
+            depth: pct(ParamId::ChorusDepth),
+            mix: if sw(ParamId::ChorusOn) { 1.0 } else { 0.0 },
+        });
+        let drive = DriveSettings {
+            style: DriveStyle::from_index(v.get(ParamId::DriveStyle)),
+            drive: pct(ParamId::Drive),
+            tone: pct(ParamId::DriveTone),
+        };
+        for d in &mut self.drives {
+            d.set(drive);
+        }
+        self.drive_on = sw(ParamId::DriveOn);
+        self.output.set(
+            OutputSettings {
+                deess: pct(ParamId::OutDeEss),
+                comp: pct(ParamId::OutComp),
+                ceiling_db: f(ParamId::OutCeiling),
+            },
+            sw(ParamId::OutputOn),
+        );
+        self.dynamics.set(if sw(ParamId::DynamicsOn) {
             DynamicsSettings {
                 gate_db: f(ParamId::Gate),
                 deess: pct(ParamId::DeEss),
@@ -570,9 +684,17 @@ impl Engine {
         if on && !self.fx_on {
             // Back on: no tail left over from before.
             self.dynamics.reset();
+            self.tone.reset();
+            self.chorus.reset();
+            for d in &mut self.drives {
+                d.reset();
+            }
+            self.output.reset();
             self.space.reset();
         }
         self.fx_on = on;
+        let delay_on = v.get(ParamId::DelayOn) >= 0.5;
+        let reverb_on = v.get(ParamId::ReverbOn) >= 0.5;
         self.space.set(SpaceSettings {
             sync: v.get(ParamId::DelaySync) >= 0.5,
             division: Division::from_index(v.get(ParamId::DelayDivision)),
@@ -580,23 +702,48 @@ impl Engine {
             feedback: pct(ParamId::DelayFeedback),
             ping_pong: v.get(ParamId::DelayPingPong) >= 0.5,
             delay_tone: pct(ParamId::DelayTone),
-            delay_level: pct(ParamId::DelayLevel),
+            delay_level: if delay_on {
+                pct(ParamId::DelayLevel)
+            } else {
+                0.0
+            },
             decay_s: f(ParamId::ReverbDecay),
             damping: pct(ParamId::ReverbDamping),
             predelay_ms: f(ParamId::ReverbPredelay),
-            reverb_level: pct(ParamId::ReverbLevel),
+            reverb_level: if reverb_on {
+                pct(ParamId::ReverbLevel)
+            } else {
+                0.0
+            },
             duck: pct(ParamId::Duck),
+            delay_duck: pct(ParamId::DelayDuck),
+            delay_mod: pct(ParamId::DelayMod),
+            delay_width: pct(ParamId::DelayWidth),
+            delay_low_cut_hz: f(ParamId::DelayLowCut),
+            reverb_size: pct(ParamId::ReverbSize),
+            reverb_mod: pct(ParamId::ReverbMod),
+            reverb_low_cut_hz: f(ParamId::ReverbLowCut),
+            reverb_width: pct(ParamId::ReverbWidth),
+            delay_to_reverb: pct(ParamId::DelayToReverb),
         });
         let ret = if on { pct(ParamId::FxLevel) } else { 0.0 };
-        let sends = [
-            pct(ParamId::SendVoice),
-            pct(ParamId::SendCreative),
-            pct(ParamId::SendHarmony),
-            pct(ParamId::SendVocoder),
-        ];
+        let per_layer = |ids: [ParamId; 4]| ids.map(pct);
+        let sends = per_layer(crate::params::REVERB_SEND_PARAMS);
+        let delays = per_layer(crate::params::DELAY_SEND_PARAMS);
+        let choruses = per_layer(crate::params::CHORUS_AMOUNT_PARAMS);
+        let drives = per_layer(crate::params::DRIVE_AMOUNT_PARAMS);
         for (r, t) in std::iter::once(&mut self.fx_return)
             .chain(self.sends.iter_mut())
-            .zip(std::iter::once(ret).chain(sends))
+            .chain(self.delay_sends.iter_mut())
+            .chain(self.chorus_amounts.iter_mut())
+            .chain(self.drive_amounts.iter_mut())
+            .zip(
+                std::iter::once(ret)
+                    .chain(sends)
+                    .chain(delays)
+                    .chain(choruses)
+                    .chain(drives),
+            )
         {
             if snap {
                 r.snap(t);
@@ -613,6 +760,12 @@ impl Engine {
     #[must_use]
     pub fn fx_reduction_db(&self) -> (f32, f32) {
         self.dynamics.reduction_db()
+    }
+
+    /// Gain reduction of the output compressor and de-esser, in dB (≤ 0).
+    #[must_use]
+    pub fn output_reduction_db(&self) -> (f32, f32) {
+        self.output.reduction_db()
     }
 
     /// Whether the Creative layer is on.
@@ -1002,16 +1155,21 @@ impl Engine {
                 )
             };
             self.retuner.transpose = f64::from(transpose);
+            self.retuner.transpose_first = self.keep_in_key;
             let formant = semitones_to_ratio(formant_st);
             let (in_l, in_r) = if self.fx_on {
-                self.dynamics.tick(voice_l * g_in, voice_r * g_in)
+                let (a, b) = self.tone.pre(voice_l * g_in, voice_r * g_in);
+                let (a, b) = self.dynamics.tick(a, b);
+                self.tone.post(a, b)
             } else {
                 (voice_l * g_in, voice_r * g_in)
             };
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (self.dry[0].tick(voice_l), self.dry[1].tick(voice_r));
-            let g_out = g_out * self.gate_delay.tick(self.gate.tick());
+            // MIDI Gate: mutes the voice and the layers, not the
+            // effects' tails (they ring on after the note).
+            let gate = self.gate_delay.tick(self.gate.tick());
             self.shifter.set_layers([
                 self.layers[0].tick(),
                 self.layers[1].tick(),
@@ -1051,49 +1209,63 @@ impl Engine {
                 .map(|t| t.out)
                 .or_else(|| self.detector.estimate().map(|e| e.note()))
                 .map(|n| f64::from(n + transpose));
-            let sends = [
-                self.sends[0].tick(),
-                self.sends[1].tick(),
-                self.sends[2].tick(),
-                self.sends[3].tick(),
-            ];
+            let tick4 = |r: &mut [Ramp; 4]| [r[0].tick(), r[1].tick(), r[2].tick(), r[3].tick()];
+            let sends = tick4(&mut self.sends);
+            let delays = tick4(&mut self.delay_sends);
+            let choruses = tick4(&mut self.chorus_amounts);
+            let drives = tick4(&mut self.drive_amounts);
             let fx_return = self.fx_return.tick();
-            let ((wet_l, wet_r), (send_l, send_r)) = match self.routing {
+            let fx = self.fx_on;
+            let drive_on = fx && self.drive_on;
+            // Each layer: its drive, then its share of the chorus, the
+            // delay and the reverb.
+            let mut bus = FxBus::default();
+            let mut layer = |i: usize, x: (f32, f32), drv: &mut Distortion| {
+                let x = (x.0 * gate, x.1 * gate);
+                let x = if drive_on {
+                    drv.tick(x.0, x.1, drives[i])
+                } else {
+                    x
+                };
+                if fx {
+                    bus.add(x, choruses[i], delays[i], sends[i]);
+                } else {
+                    bus.wet = (bus.wet.0 + x.0, bus.wet.1 + x.1);
+                }
+            };
+            match self.routing {
                 Routing::Parallel => {
                     // The glitch cuts the creative layer only.
                     let [cl, cr] = buses.creative;
                     let (cl, cr) = self.glitch.tick(cl, cr);
                     let (cl, cr) = (cl * creative_level, cr * creative_level);
-                    let wet_l = buses.lead[0] + buses.harmony[0] + cl;
-                    let wet_r = buses.lead[1] + buses.harmony[1] + cr;
-                    // Each layer's own send to the space bus.
-                    let send = |s: usize, x: f32| x * sends[s];
-                    let mut send_l =
-                        send(0, buses.lead[0]) + send(1, cl) + send(2, buses.harmony[0]);
-                    let mut send_r =
-                        send(0, buses.lead[1]) + send(1, cr) + send(2, buses.harmony[1]);
+                    layer(0, (buses.lead[0], buses.lead[1]), &mut self.drives[0]);
+                    layer(1, (cl, cr), &mut self.drives[1]);
+                    layer(2, (buses.harmony[0], buses.harmony[1]), &mut self.drives[2]);
                     // Vocoder or talkbox, on top of the lead and harmonies.
                     if vocoding {
                         let dry = 0.5 * (dry_l + dry_r) * g_in;
                         let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
-                        let (vl, vr) = self.vocoder.widen(v);
-                        send_l += send(3, vl);
-                        send_r += send(3, vr);
-                        ((wet_l + vl, wet_r + vr), (send_l, send_r))
-                    } else {
-                        ((wet_l, wet_r), (send_l, send_r))
+                        layer(3, self.vocoder.widen(v), &mut self.drives[3]);
                     }
                 }
                 Routing::Series => {
-                    // One output: the whole chain goes out on one send.
+                    // One output: the whole chain takes the voice's
+                    // settings.
                     let s = self.series(&buses, creative_level, voc_level, vocoding, sc, follow);
-                    (s, (s.0 * sends[0], s.1 * sends[0]))
+                    layer(0, s, &mut self.drives[0]);
                 }
+            }
+            let (wet_l, wet_r) = if fx {
+                self.chorus
+                    .tick_send(bus.wet.0, bus.wet.1, bus.chorus.0, bus.chorus.1)
+            } else {
+                bus.wet
             };
             let (wet_l, wet_r) = if self.space_on {
                 // Ducked by the voice as it comes out (lined up with it).
                 let key = 0.5 * (dry_l + dry_r) * g_in;
-                let (fl, fr) = self.space.tick(send_l, send_r, key);
+                let (fl, fr) = self.space.tick_sends(bus.delay, bus.reverb, key);
                 if !self.fx_on && self.fx_return.is_settled() {
                     // Faded out: stop spending on the bus.
                     self.space_on = false;
@@ -1102,11 +1274,18 @@ impl Engine {
             } else {
                 (wet_l, wet_r)
             };
+            // Output dynamics on the whole processed sound.
+            let (wet_l, wet_r) = if fx {
+                self.output.tick(wet_l, wet_r)
+            } else {
+                (wet_l, wet_r)
+            };
             let (dry_l, dry_r) = if self.swap {
                 (track_l, track_r)
             } else {
                 (dry_l, dry_r)
             };
+            let (dry_l, dry_r) = (dry_l * gate, dry_r * gate);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
@@ -1165,6 +1344,25 @@ impl Engine {
     }
 }
 
+/// The layers' sum and what they send to the chorus, delay and reverb.
+#[derive(Debug, Clone, Copy, Default)]
+struct FxBus {
+    wet: (f32, f32),
+    chorus: (f32, f32),
+    delay: (f32, f32),
+    reverb: (f32, f32),
+}
+
+impl FxBus {
+    #[inline]
+    fn add(&mut self, x: (f32, f32), chorus: f32, delay: f32, reverb: f32) {
+        self.wet = (self.wet.0 + x.0, self.wet.1 + x.1);
+        self.chorus = (self.chorus.0 + x.0 * chorus, self.chorus.1 + x.1 * chorus);
+        self.delay = (self.delay.0 + x.0 * delay, self.delay.1 + x.1 * delay);
+        self.reverb = (self.reverb.0 + x.0 * reverb, self.reverb.1 + x.1 * reverb);
+    }
+}
+
 /// Highest input level taken as is (+30 dBFS): only garbage is above.
 const INPUT_CLAMP: f32 = 32.0;
 
@@ -1202,16 +1400,16 @@ mod tests {
         e.prepare(48_000.0, 512);
         e.set_param(ParamId::FxOn, 1.0);
         e.set_param(ParamId::DelayLevel, 50.0);
-        e.set_param(ParamId::SendVoice, 100.0);
+        e.set_param(ParamId::VoiceReverb, 100.0);
         e.reset();
         let lat = e.latency_samples();
         // Reverb tails differ left and right: the left side only.
         let mut y = vec![0.0; 48_000];
         let mut r = vec![0.0; 48_000];
-        y[0] = 1.0;
-        r[0] = 1.0;
+        y[0] = 0.5;
+        r[0] = 0.5;
         e.process(&mut y, &mut r);
-        assert!((y[lat] - 1.0).abs() < 1e-3, "direct {}", y[lat]);
+        assert!((y[lat] - 0.5).abs() < 1e-3, "direct {}", y[lat]);
         assert!(y[..lat].iter().all(|v| v.abs() < 1e-6));
         let tail: f32 = y[lat + 1..].iter().map(|v| v.abs()).sum();
         assert!(tail > 0.01, "no tail {tail}");
@@ -1417,6 +1615,43 @@ mod tests {
         // Scale source: the gate does not apply.
         e.set_param(ParamId::Source, 0.0);
         assert!((run(&mut e) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn midi_gate_leaves_the_effect_tails() {
+        let mut e = Engine::new();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Source, 1.0);
+        v.set(ParamId::MidiGate, 1.0);
+        v.set(ParamId::FxOn, 1.0);
+        v.set(ParamId::ReverbLevel, 100.0);
+        v.set(ParamId::VoiceReverb, 100.0);
+        v.set(ParamId::ReverbDecay, 4.0);
+        e.set_all(&v, true);
+        e.reset();
+        let n = 4_800;
+        let sine = |k: usize| {
+            (0..n)
+                .map(|i| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let t = (k * n + i) as f32 / 48_000.0;
+                    0.3 * (std::f32::consts::TAU * 220.0 * t).sin()
+                })
+                .collect::<Vec<f32>>()
+        };
+        e.note_on(0, 57, 100);
+        for k in 0..5 {
+            let mut l = sine(k);
+            let mut r = l.clone();
+            e.process(&mut l, &mut r);
+        }
+        e.note_off(0, 57);
+        let mut l = sine(5);
+        let mut r = l.clone();
+        e.process(&mut l, &mut r);
+        // Gate closed: the reverb still rings.
+        let tail: f32 = l[n / 2..].iter().map(|x| x * x).sum::<f32>() / (n / 2) as f32;
+        assert!(tail.sqrt() > 1e-3, "{}", tail.sqrt());
     }
 
     #[test]

@@ -427,6 +427,9 @@ impl PluginLogic for Quackapella {
         params
             .shared
             .publish_reduction(state.engine.fx_reduction_db());
+        params
+            .shared
+            .publish_output_reduction(state.engine.output_reduction_db());
         ProcessStatus::Normal
     }
 
