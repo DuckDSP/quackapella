@@ -121,6 +121,8 @@ pub struct UiState {
     page: Page,
     /// Preset browser, values of this frame.
     presets: perform::PresetUi,
+    /// Vocoder page's tab: 0 voice and effects, 1 carrier.
+    vocoder_tab: usize,
 }
 
 impl Default for UiState {
@@ -133,6 +135,7 @@ impl Default for UiState {
             scale_menu: false,
             page: Page::Voice,
             presets: perform::PresetUi::default(),
+            vocoder_tab: 0,
         }
     }
 }
@@ -1245,7 +1248,16 @@ fn vocoder_panel(
         vec2(r.width() - 2.0 * space::L, 26.0),
     );
     let cnames: Vec<&str> = Carrier::ALL.iter().map(|c| c.name()).collect();
-    controls::segmented(ui, params, ParamId::Carrier, car_r, &cnames, &[accent]);
+    let dim = accent.gamma_multiply(0.35);
+    let swapped = params.get_plain(ParamId::VocoderSwap) >= 0.5;
+    controls::segmented(
+        ui,
+        params,
+        ParamId::Carrier,
+        car_r,
+        &cnames,
+        &[if swapped { dim } else { accent }],
+    );
     let playing: Vec<String> = (0..128u8)
         .filter(|n| view.vocoder_notes & (1u128 << n) != 0)
         .map(note_name)
@@ -1258,8 +1270,10 @@ fn vocoder_panel(
         .collect::<Vec<_>>()
         .join(" ");
     let more = if playing.len() > 3 { " …" } else { "" };
+    let carrier = if swapped { Carrier::Sidechain } else { carrier };
     let status = match (mode, carrier) {
         _ if !layer => "Off".to_owned(),
+        _ if swapped => "Voice: side-chain · Carrier: track".to_owned(),
         (_, Carrier::Sidechain) => "Side-chain".to_owned(),
         _ if !playing.is_empty() && view.held_notes == 0 && follow => {
             format!("Follow · {shown}{more}")
@@ -1284,7 +1298,7 @@ fn vocoder_panel(
         },
     );
 
-    let knob_d = 54.0;
+    let knob_d = 50.0;
     let off = |v: f64| {
         if v < 0.5 {
             "Off".to_owned()
@@ -1293,44 +1307,86 @@ fn vocoder_panel(
         }
     };
     let ms = |v: f64| format!("{v:.0}");
+    let pct = |v: f64| format!("{v:.0}");
     let st_fmt = |v: f64| format!("{v:+.1}");
+    let db_fmt = |v: f64| format!("{v:+.0}");
+    let gate_fmt = |v: f64| {
+        if v <= quack_dsp::vocoder::GATE_OFF_DB + 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
     let bands = |v: f64| format!("{}", bands_from_index(v));
     #[allow(clippy::cast_possible_truncation)]
     let octave = |v: f64| format!("{:+}", v.round() as i32 - 2);
     let vocoder_only = mode != VocoderMode::Talkbox;
     let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
-    let dim = accent.gamma_multiply(0.35);
+    let synth = carrier != Carrier::Sidechain;
+    // Tabs: the voice and the effects, or the carrier synth; the inputs
+    // swap on the right (the voice by the side-chain, like the EVOC).
+    let tab_y = car_r.bottom() + space::S + 26.0 + space::S;
+    let tr = Rect::from_min_size(pos2(car_r.left(), tab_y), vec2(220.0, 24.0));
+    controls::tabs(
+        ui,
+        "vocoder",
+        tr,
+        &["Voice & FX", "Carrier"],
+        &mut st.vocoder_tab,
+        accent,
+    );
+    let sr = Rect::from_min_size(pos2(car_r.right() - 190.0, tab_y), vec2(190.0, 24.0));
+    controls::toggle(
+        ui,
+        params,
+        ParamId::VocoderSwap,
+        sr,
+        "Voice from side-chain",
+        accent,
+    );
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, bool);
-    let row1: [Knob; 6] = [
-        (ParamId::BendRange, "Bend", &st_fmt, pitched),
+    let voice_row1: [Knob; 6] = [
         (ParamId::Bands, "Bands", &bands, vocoder_only),
         (ParamId::Response, "Response", &ms, vocoder_only),
         (ParamId::BandShift, "Shift", &st_fmt, true),
-        (ParamId::Sibilance, "Sibilance", &off, true),
-        (ParamId::VocoderWidth, "Width", &off, true),
+        (ParamId::VocoderResonance, "Resonance", &pct, true),
+        (ParamId::VocoderTilt, "Tilt", &db_fmt, true),
+        (ParamId::VocoderGate, "Gate", &gate_fmt, true),
     ];
-    let synth = carrier != Carrier::Sidechain;
-    let row2: [Knob; 6] = [
-        (ParamId::CarrierOctave, "Octave", &octave, pitched),
-        (ParamId::Detune, "Detune", &off, pitched),
-        (ParamId::CarrierNoise, "Noise", &off, pitched),
-        (ParamId::CarrierRelease, "Release", &ms, synth),
-        (ParamId::CarrierGlide, "Glide", &off, pitched),
+    let voice_row2: [Knob; 5] = [
+        (ParamId::Sibilance, "Sibilance", &off, true),
+        (ParamId::Consonants, "Consonants", &off, true),
+        (ParamId::VocoderWidth, "Width", &off, true),
+        (ParamId::Ensemble, "Ensemble", &off, true),
         (ParamId::VocoderLofi, "Lo-Fi", &off, true),
     ];
+    let carrier_row1: [Knob; 6] = [
+        (ParamId::CarrierOctave, "Octave", &octave, pitched),
+        (ParamId::Detune, "Detune", &off, pitched),
+        (ParamId::CarrierSub, "Sub", &off, pitched),
+        (ParamId::CarrierNoise, "Noise", &off, pitched),
+        (ParamId::CarrierGlide, "Glide", &off, pitched),
+        (ParamId::CarrierRelease, "Release", &ms, synth),
+    ];
+    let carrier_row2: [Knob; 1] = [(ParamId::BendRange, "Bend", &st_fmt, pitched)];
     let kw = (r.width() - 2.0 * space::L) / 6.0;
-    let y1 = r.top() + 156.0;
-    let y2 = r.bottom() - 64.0;
-    for (row, y) in [(&row1[..], y1), (&row2[..], y2)] {
+    let y1 = tab_y + 24.0 + 12.0 + knob_d / 2.0;
+    let y2 = r.bottom() - 58.0;
+    let rows: [(&[Knob], f32); 2] = if st.vocoder_tab == 0 {
+        [(&voice_row1[..], y1), (&voice_row2[..], y2)]
+    } else {
+        [(&carrier_row1[..], y1), (&carrier_row2[..], y2)]
+    };
+    for (row, y) in &rows {
         for (i, (id, label, fmt, live)) in row.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
-            let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+            let cx = r.left() + space::L + kw * (i as f32 + 0.5 + (6 - row.len()) as f32 / 2.0);
             controls::knob_named(
                 ui,
                 params,
                 st,
                 *id,
-                pos2(cx, y),
+                pos2(cx, *y),
                 knob_d,
                 id.spec().kind.min(),
                 if *live { accent } else { dim },

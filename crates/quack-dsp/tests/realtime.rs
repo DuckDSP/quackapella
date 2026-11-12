@@ -125,6 +125,12 @@ fn heavy(mode: f64) -> ParamValues {
     set("carrier_follow", 1.0);
     set("vocoder_width", 50.0);
     set("vocoder_lofi", 20.0);
+    set("consonants", 50.0);
+    set("vocoder_resonance", 60.0);
+    set("vocoder_tilt", -4.0);
+    set("vocoder_gate", -70.0);
+    set("ensemble", 50.0);
+    set("carrier_sub", 30.0);
     v
 }
 

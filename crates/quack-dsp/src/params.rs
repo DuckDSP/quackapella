@@ -198,9 +198,16 @@ pub enum ParamId {
     HarmonyPan2,
     HarmonyPan3,
     HarmonyPan4,
+    VocoderSwap,
+    Consonants,
+    VocoderResonance,
+    VocoderTilt,
+    VocoderGate,
+    Ensemble,
+    CarrierSub,
 }
 
-pub const PARAM_COUNT: usize = 96;
+pub const PARAM_COUNT: usize = 103;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -1184,6 +1191,79 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 50.0,
         },
     },
+    ParamSpec {
+        key: "vocoder_swap",
+        host_id: 1000,
+        name: "Voice from Sidechain",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "consonants",
+        host_id: 1001,
+        name: "Consonants",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_resonance",
+        host_id: 1002,
+        name: "Vocoder Resonance",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 25.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_tilt",
+        host_id: 1003,
+        name: "Vocoder Brightness",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_gate",
+        host_id: 1004,
+        name: "Vocoder Gate",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -90.0,
+            max: -20.0,
+            default: -90.0,
+        },
+    },
+    ParamSpec {
+        key: "ensemble",
+        host_id: 1005,
+        name: "Ensemble",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "carrier_sub",
+        host_id: 1006,
+        name: "Carrier Sub",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -1284,6 +1364,13 @@ impl ParamId {
         Self::HarmonyPan2,
         Self::HarmonyPan3,
         Self::HarmonyPan4,
+        Self::VocoderSwap,
+        Self::Consonants,
+        Self::VocoderResonance,
+        Self::VocoderTilt,
+        Self::VocoderGate,
+        Self::Ensemble,
+        Self::CarrierSub,
     ];
 
     #[must_use]

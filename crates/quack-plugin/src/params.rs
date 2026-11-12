@@ -122,6 +122,8 @@ pub enum CarrierParam {
     Noise,
     #[name = "Sidechain"]
     Sidechain,
+    #[name = "PWM"]
+    Pulse,
 }
 
 /// Band counts, in `quack_dsp::vocoder::BAND_CHOICES` order.
@@ -1002,6 +1004,71 @@ pub struct QuackParams {
     )]
     pub harmony_4_pan: FloatParam,
 
+    /// Vocoder enrichments: inputs swapped (the voice by the side-chain),
+    /// consonants, resonance, brightness, gate, ensemble, sub.
+    #[param(id = 1000, name = "Voice from Sidechain")]
+    pub vocoder_swap: BoolParam,
+
+    #[param(
+        id = 1001,
+        name = "Consonants",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub consonants: FloatParam,
+
+    #[param(
+        id = 1002,
+        name = "Vocoder Resonance",
+        range = "linear(0, 100)",
+        default = 25.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vocoder_resonance: FloatParam,
+
+    #[param(
+        id = 1003,
+        name = "Vocoder Brightness",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub vocoder_tilt: FloatParam,
+
+    #[param(
+        id = 1004,
+        name = "Vocoder Gate",
+        range = "linear(-90, -20)",
+        default = -90.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub vocoder_gate: FloatParam,
+
+    #[param(
+        id = 1005,
+        name = "Ensemble",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub ensemble: FloatParam,
+
+    #[param(
+        id = 1006,
+        name = "Carrier Sub",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub carrier_sub: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -1223,6 +1290,31 @@ impl QuackParams {
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }
+        v.set(
+            ParamId::VocoderSwap,
+            f64::from(u8::from(self.vocoder_swap.value())),
+        );
+        v.set(
+            ParamId::Consonants,
+            FloatParamReadF64::value(&self.consonants),
+        );
+        v.set(
+            ParamId::VocoderResonance,
+            FloatParamReadF64::value(&self.vocoder_resonance),
+        );
+        v.set(
+            ParamId::VocoderTilt,
+            FloatParamReadF64::value(&self.vocoder_tilt),
+        );
+        v.set(
+            ParamId::VocoderGate,
+            FloatParamReadF64::value(&self.vocoder_gate),
+        );
+        v.set(ParamId::Ensemble, FloatParamReadF64::value(&self.ensemble));
+        v.set(
+            ParamId::CarrierSub,
+            FloatParamReadF64::value(&self.carrier_sub),
+        );
         v
     }
 

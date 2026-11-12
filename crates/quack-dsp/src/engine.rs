@@ -76,6 +76,10 @@ pub struct Engine {
     throat_pitch: Ramp,
     throat_eq: Throat,
     dry: [DelayLine; CHANNELS],
+    /// Inputs swapped (the voice by the side-chain), and the track's
+    /// own signal delayed for the dry path and the bypass then.
+    swap: bool,
+    track: [DelayLine; CHANNELS],
     notes: NoteStack,
     detector: Yin,
     shifter: Psola,
@@ -135,6 +139,8 @@ impl Engine {
             throat_pitch: Ramp::new(0.0),
             throat_eq: Throat::default(),
             dry: Default::default(),
+            swap: false,
+            track: Default::default(),
             notes: NoteStack::default(),
             detector: Yin::default(),
             shifter: Psola::default(),
@@ -166,7 +172,7 @@ impl Engine {
         self.sample_rate = sample_rate;
         // Allocated for the lowest range; the voice range picks the delay.
         let max = max_latency_samples(sample_rate);
-        for d in &mut self.dry {
+        for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
             d.prepare(max);
         }
         for r in [
@@ -223,7 +229,7 @@ impl Engine {
     /// timeline moves: the host re-aligns). Real-time safe.
     fn set_latency(&mut self, latency: usize) {
         self.latency = latency;
-        for d in &mut self.dry {
+        for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
             d.set_delay(latency);
         }
         self.gate_delay.set_delay(latency);
@@ -245,7 +251,7 @@ impl Engine {
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
     pub fn reset(&mut self) {
-        for d in &mut self.dry {
+        for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
             d.reset();
         }
         self.detector.reset();
@@ -415,7 +421,14 @@ impl Engine {
             | ParamId::FollowChord
             | ParamId::BendRange
             | ParamId::VocoderWidth
-            | ParamId::VocoderLofi => {
+            | ParamId::VocoderLofi
+            | ParamId::VocoderSwap
+            | ParamId::Consonants
+            | ParamId::VocoderResonance
+            | ParamId::VocoderTilt
+            | ParamId::VocoderGate
+            | ParamId::Ensemble
+            | ParamId::CarrierSub => {
                 self.update_vocoder(snap);
                 return;
             }
@@ -658,6 +671,23 @@ impl Engine {
         s.bend_range = v.get(ParamId::BendRange);
         s.width = pct(ParamId::VocoderWidth);
         s.lofi = pct(ParamId::VocoderLofi);
+        s.consonants = pct(ParamId::Consonants);
+        s.resonance = pct(ParamId::VocoderResonance);
+        s.tilt_db = v.get(ParamId::VocoderTilt);
+        s.gate_db = v.get(ParamId::VocoderGate);
+        s.ensemble = pct(ParamId::Ensemble);
+        s.sub = pct(ParamId::CarrierSub);
+        // Inputs swapped: the voice comes by the side-chain, the track
+        // (a synth) is the carrier.
+        let swap = v.get(ParamId::VocoderSwap) >= 0.5;
+        if swap {
+            s.carrier = Carrier::Sidechain;
+        }
+        if swap != self.swap {
+            self.swap = swap;
+            self.detector.reset();
+            self.shifter.reset();
+        }
         self.vocoder.apply_settings();
         self.vocoder.set_notes(&self.notes);
         #[allow(clippy::cast_possible_truncation)]
@@ -810,6 +840,20 @@ impl Engine {
             // good: replaced by silence, absurd levels clamped.
             *l = sanitize(*l);
             *r = sanitize(*r);
+            let (sc_l, sc_r) = sidechain.map_or((0.0, 0.0), |(a, b)| {
+                (
+                    sanitize(a.get(i).copied().unwrap_or(0.0)),
+                    sanitize(b.get(i).copied().unwrap_or(0.0)),
+                )
+            });
+            // Swapped inputs: the voice is the side-chain, the track is
+            // the carrier and stays the dry signal.
+            let (track_l, track_r) = (self.track[0].tick(*l), self.track[1].tick(*r));
+            let (voice_l, voice_r, sc) = if self.swap {
+                (sc_l, sc_r, 0.5 * (*l + *r))
+            } else {
+                (*l, *r, 0.5 * (sc_l + sc_r))
+            };
             let g_in = self.in_gain.tick();
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
@@ -828,10 +872,10 @@ impl Engine {
             };
             self.retuner.transpose = f64::from(transpose);
             let formant = semitones_to_ratio(formant_st);
-            let (in_l, in_r) = (*l * g_in, *r * g_in);
+            let (in_l, in_r) = (voice_l * g_in, voice_r * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
-            let (dry_l, dry_r) = (self.dry[0].tick(*l), self.dry[1].tick(*r));
+            let (dry_l, dry_r) = (self.dry[0].tick(voice_l), self.dry[1].tick(voice_r));
             let g_out = g_out * self.gate_delay.tick(self.gate.tick());
             self.shifter.set_layers([
                 self.layers[0].tick(),
@@ -866,9 +910,6 @@ impl Engine {
                 .tick_buses(sh_l, sh_r, period, &mut steer, formant);
             let voc_level = self.vocoder_level.tick();
             let vocoding = voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off;
-            let sc = sidechain.map_or(0.0, |(a, b)| {
-                0.5 * sanitize(a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0))
-            });
             let follow = self
                 .retuner
                 .reading()
@@ -895,6 +936,11 @@ impl Engine {
                 Routing::Series => {
                     self.series(&buses, creative_level, voc_level, vocoding, sc, follow)
                 }
+            };
+            let (dry_l, dry_r) = if self.swap {
+                (track_l, track_r)
+            } else {
+                (dry_l, dry_r)
             };
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
@@ -1502,5 +1548,48 @@ mod tests {
         assert_eq!(e.notes().latest().map(|n| n.note), Some(67));
         e.all_notes_off();
         assert!(e.notes().held().is_empty());
+    }
+
+    #[test]
+    fn swapped_inputs_vocode_the_side_chain_voice_on_the_track() {
+        let mut e = Engine::new();
+        let lat = e.latency_samples();
+        let mut v = ParamValues::default();
+        v.set(ParamId::VocoderOn, 1.0);
+        v.set(ParamId::VocoderSwap, 1.0);
+        v.set(ParamId::Lead, 0.0);
+        v.set(ParamId::VocoderLevel, 100.0);
+        e.set_all(&v, true);
+        let n = 48_000;
+        // Track: a 110 Hz saw (the synth); side-chain: a buzzy voice.
+        let synth: Vec<f32> = (0..n)
+            .map(|i| (2.0 * ((i as f64 * 110.0 / 48_000.0) % 1.0) - 1.0) as f32 * 0.3)
+            .collect();
+        let voice: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / 48_000.0;
+                (0.3 * (std::f64::consts::TAU * 220.0 * t).sin()
+                    + 0.2 * (std::f64::consts::TAU * 660.0 * t).sin()) as f32
+            })
+            .collect();
+        let rms = |x: &[f32]| {
+            (x.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+        };
+        let (mut l, mut r) = (synth.clone(), synth.clone());
+        e.process_with_sidechain(&mut l, &mut r, Some((&voice, &voice)));
+        assert!(rms(&l[n / 2..]) > 0.01, "vocoded: {}", rms(&l[n / 2..]));
+        // No voice in the side-chain: the synth is not vocoded.
+        let (mut l, mut r) = (synth.clone(), synth.clone());
+        let silent = vec![0.0; n];
+        e.process_with_sidechain(&mut l, &mut r, Some((&silent, &silent)));
+        assert!(rms(&l[n / 2..]) < 1e-3, "silent: {}", rms(&l[n / 2..]));
+        // Dry and bypass are the track, lined up with the latency.
+        v.set(ParamId::Bypass, 1.0);
+        e.set_all(&v, true);
+        let (mut l, mut r) = (synth.clone(), synth.clone());
+        e.process_with_sidechain(&mut l, &mut r, Some((&voice, &voice)));
+        for i in n / 2..n / 2 + 100 {
+            assert!((l[i] - synth[i - lat]).abs() < 1e-5);
+        }
     }
 }
