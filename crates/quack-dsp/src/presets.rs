@@ -237,27 +237,26 @@ use ParamId as P;
 // Enum indices, spelled out for the tables below.
 const NATURAL: f64 = 0.0;
 const TUNE: f64 = 1.0;
-const CREATIVE: f64 = 2.0;
-const SYNTH: f64 = 3.0;
+const ON: f64 = 1.0;
 const MAJOR: f64 = 1.0;
 const SRC_MIDI: f64 = 1.0;
 const SRC_MIDI_EXACT: f64 = 2.0;
-const H_OFF: f64 = 0.0;
-const H_MIDI: f64 = 1.0;
+const H_MIDI: f64 = 0.0;
 const H_SCALE: f64 = 2.0;
 const H_CHORD: f64 = 3.0;
-/// Harmony intervals: index = scale steps + 9.
-const IV_OFF: f64 = 9.0;
-const IV_3RD_UP: f64 = 11.0;
-const IV_5TH_UP: f64 = 13.0;
-const IV_6TH_UP: f64 = 14.0;
-const IV_OCT_UP: f64 = 16.0;
-const IV_3RD_DOWN: f64 = 7.0;
-const IV_4TH_DOWN: f64 = 6.0;
-const IV_6TH_DOWN: f64 = 4.0;
-const IV_OCT_DOWN: f64 = 2.0;
-const VOCODER: f64 = 1.0;
-const TALKBOX: f64 = 2.0;
+/// Harmony intervals: index = semitones + 24 (in the Scale and Chord
+/// sources, a third is a third of the scale either way).
+const IV_OFF: f64 = 24.0;
+const IV_3RD_UP: f64 = 28.0;
+const IV_5TH_UP: f64 = 31.0;
+const IV_6TH_UP: f64 = 33.0;
+const IV_OCT_UP: f64 = 36.0;
+const IV_3RD_DOWN: f64 = 21.0;
+const IV_4TH_DOWN: f64 = 19.0;
+const IV_6TH_DOWN: f64 = 16.0;
+const IV_OCT_DOWN: f64 = 12.0;
+const VOCODER: f64 = 0.0;
+const TALKBOX: f64 = 1.0;
 const SAW: f64 = 0.0;
 const SQUARE: f64 = 1.0;
 const SUPERSAW: f64 = 2.0;
@@ -340,9 +339,9 @@ const VOCODER_MACROS: [MacroDef; MACRO_COUNT] = [
     mac("Voice Blend", &[(P::Lead, 0.6)]),
 ];
 
-/// Harmonies and vocoder off: the Synth presets turn on what they use.
+/// The vocoder layer on, the harmonies off.
 const SYNTH_CLEAN: [(ParamId, f64); 3] =
-    [(P::Mode, SYNTH), (P::Harmony, H_OFF), (P::Correction, 60.0)];
+    [(P::Mode, TUNE), (P::VocoderOn, ON), (P::Correction, 60.0)];
 
 macro_rules! vals {
     ($($id:ident = $v:expr),* $(,)?) => { &[$((P::$id, $v)),*] };
@@ -467,7 +466,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Monster",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Correction = 0.0,
             Pitch = -7.0,
             Formant = -6.0,
@@ -479,7 +479,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Chipmunk",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Correction = 0.0,
             Pitch = 7.0,
             Formant = 6.0
@@ -490,7 +491,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Octave Stack",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Retune = 20.0,
             OctaveDown = 60.0,
             Sub = 30.0,
@@ -502,7 +504,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Robot",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Retune = 0.0,
             Humanize = 0.0,
             Vibrato = 0.0,
@@ -514,7 +517,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Stutter 1/16",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Correction = 0.0,
             Glitch = 30.0,
             GlitchMode = GLITCH_STUTTER,
@@ -526,7 +530,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Tape Stops",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Correction = 0.0,
             Glitch = 25.0,
             GlitchMode = GLITCH_TAPE,
@@ -538,7 +543,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Reverse Bits",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Correction = 0.0,
             Glitch = 25.0,
             GlitchMode = GLITCH_REVERSE,
@@ -550,19 +556,21 @@ pub const FACTORY: &[Factory] = &[
         name: "Freeze Over MIDI",
         category: "Creative",
         values: vals!(
-            Mode = CREATIVE,
+            Mode = TUNE,
+            CreativeOn = ON,
             Source = SRC_MIDI,
             Retune = 0.0,
             FormantFollow = 50.0
         ),
         macros: CREATIVE_MACROS,
     },
-    // Harmonizer (Synth mode).
+    // Harmonizer layer.
     Factory {
         name: "Third Above",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
+            Mode = TUNE,
+            HarmonyOn = ON,
             Scale = MAJOR,
             Harmony = H_SCALE,
             Harmony1 = IV_3RD_UP,
@@ -577,7 +585,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Thirds and Sixths",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
+            Mode = TUNE,
+            HarmonyOn = ON,
             Scale = MAJOR,
             Harmony = H_SCALE,
             Harmony1 = IV_3RD_UP,
@@ -591,7 +600,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Four-Part Choir",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
+            Mode = TUNE,
+            HarmonyOn = ON,
             Scale = MAJOR,
             Harmony = H_SCALE,
             Harmony1 = IV_3RD_UP,
@@ -607,7 +617,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Power Fifths",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
+            Mode = TUNE,
+            HarmonyOn = ON,
             Scale = MAJOR,
             Harmony = H_SCALE,
             Harmony1 = IV_5TH_UP,
@@ -622,7 +633,8 @@ pub const FACTORY: &[Factory] = &[
         name: "MIDI Chords",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
+            Mode = TUNE,
+            HarmonyOn = ON,
             Harmony = H_MIDI,
             HarmonyLevel = 80.0,
             Glide = 40.0
@@ -633,7 +645,8 @@ pub const FACTORY: &[Factory] = &[
         name: "Chord Follower",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
+            Mode = TUNE,
+            HarmonyOn = ON,
             Harmony = H_CHORD,
             Harmony1 = IV_3RD_UP,
             Harmony2 = IV_6TH_UP,
@@ -648,14 +661,16 @@ pub const FACTORY: &[Factory] = &[
         name: "Doubler",
         category: "Harmony",
         values: vals!(
-            Mode = SYNTH,
-            Harmony = H_OFF,
+            Mode = TUNE,
+            HarmonyOn = ON,
+            Harmony1 = IV_OFF,
+            Harmony2 = IV_OFF,
             Double = 70.0,
             Correction = 60.0
         ),
         macros: HARMONY_MACROS,
     },
-    // Vocoder and talkbox (Synth mode).
+    // Vocoder and talkbox layer.
     Factory {
         name: "Classic Vocoder",
         category: "Vocoder",
@@ -741,6 +756,7 @@ pub const FACTORY: &[Factory] = &[
             (P::Bands, BANDS_16),
             (P::Detune, 30.0),
             (P::Lead, 0.0),
+            (P::HarmonyOn, ON),
             (P::Harmony, H_MIDI),
             (P::HarmonyLevel, 40.0),
         ],
@@ -782,13 +798,15 @@ mod tests {
                 }
             }
         }
-        // Synth presets say whether the harmonies sound.
-        for f in FACTORY.iter().filter(|f| f.category == "Vocoder") {
-            assert!(
-                f.values.iter().any(|(id, _)| *id == P::Harmony),
-                "{}",
-                f.name
-            );
+        // Each preset turns on the layer of its category.
+        for (cat, layer) in [
+            ("Creative", P::CreativeOn),
+            ("Harmony", P::HarmonyOn),
+            ("Vocoder", P::VocoderOn),
+        ] {
+            for f in FACTORY.iter().filter(|f| f.category == cat) {
+                assert_eq!(f.values().get(layer), 1.0, "{}", f.name);
+            }
         }
     }
 

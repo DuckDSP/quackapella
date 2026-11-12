@@ -13,7 +13,7 @@
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
 //! 32-bit float, mono or stereo; out: 32-bit float, same channels
-//! (always stereo in the Synth mode, for the harmonies' spread).
+//! (always stereo with the harmonies or the vocoder on, for the harmonies' spread).
 
 use std::f64::consts::{PI, TAU};
 use std::fs;
@@ -142,7 +142,10 @@ fn process(
     // Latency compensation, as the host does.
     let mut out = vec![l[lat..lat + n].to_vec()];
     // The harmonies spread in stereo: a mono take comes out stereo.
-    if chans.len() > 1 || values.get(ParamId::Mode) == 3.0 {
+    if chans.len() > 1
+        || values.get(ParamId::HarmonyOn) >= 0.5
+        || values.get(ParamId::VocoderOn) >= 0.5
+    {
         out.push(r[lat..lat + n].to_vec());
     }
     out

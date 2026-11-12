@@ -98,8 +98,10 @@ pub enum VocoderMode {
 }
 
 impl VocoderMode {
-    pub const COUNT: u32 = 3;
-    pub const ALL: [Self; 3] = [Self::Off, Self::Vocoder, Self::Talkbox];
+    /// The choices of the parameter (`Off` is the layer switched off,
+    /// the `vocoder_on` parameter).
+    pub const COUNT: u32 = 2;
+    pub const ALL: [Self; 2] = [Self::Vocoder, Self::Talkbox];
 
     #[must_use]
     pub fn from_index(i: f64) -> Self {

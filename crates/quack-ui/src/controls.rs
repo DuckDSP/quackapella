@@ -168,6 +168,108 @@ pub(crate) fn knob_named(
     );
 }
 
+/// Horizontal level fader: the fill shows the value, `label` on the
+/// left, the value on the right. Drag (Shift = fine),
+/// wheel, double-click for the default, like the knobs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fader(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    id: ParamId,
+    r: Rect,
+    accent: Color32,
+    label: &str,
+) {
+    let kind = id.spec().kind;
+    let raw = params.get_plain(id);
+    let resp = ui.interact(
+        r,
+        ui.id().with(("quack-fader", id.index())),
+        Sense::click_and_drag(),
+    );
+    if resp.drag_started() {
+        params.begin_edit(id);
+        st.drag = Some((id, kind.normalize(raw)));
+    }
+    if resp.dragged()
+        && let Some((d, n0)) = st.drag
+        && d == id
+        && let (Some(now), Some(from)) = (
+            resp.interact_pointer_pos(),
+            ui.input(|i| i.pointer.press_origin()),
+        )
+    {
+        let fine = if ui.input(|i| i.modifiers.shift) {
+            0.1
+        } else {
+            1.0
+        };
+        let n = (n0 + f64::from((now.x - from.x) / r.width()) * fine).clamp(0.0, 1.0);
+        let target = kind.denormalize(n);
+        if target != raw {
+            params.set_plain(id, target);
+        }
+    }
+    if resp.drag_stopped() && st.drag.is_some_and(|(d, _)| d == id) {
+        st.drag = None;
+        params.end_edit(id);
+    }
+    if resp.double_clicked() {
+        set_once(params, id, kind.default_plain());
+    } else if resp.hovered() && st.drag.is_none() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            let n = kind.normalize(raw) + f64::from(scroll.signum()) * WHEEL_STEP;
+            set_once(params, id, kind.denormalize(n));
+        }
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    crate::perform::attach(ui, &resp, params, id);
+
+    let p = ui.painter();
+    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    #[allow(clippy::cast_possible_truncation)]
+    let t = kind.normalize(params.get_plain(id)) as f32;
+    let inner = r.shrink(2.0);
+    if t > 0.0 {
+        let fill = Rect::from_min_size(inner.min, vec2(inner.width() * t, inner.height()));
+        rounded(
+            p,
+            fill,
+            radius::CONTROL - 1,
+            accent.gamma_multiply(0.28),
+            accent.gamma_multiply(0.28),
+        );
+        p.line_segment(
+            [
+                pos2(fill.right(), inner.top() + 3.0),
+                pos2(fill.right(), inner.bottom() - 3.0),
+            ],
+            egui::Stroke::new(2.0_f32, accent),
+        );
+    }
+    let mid = r.center().y;
+    text(
+        p,
+        pos2(r.left() + 10.0, mid),
+        Align2::LEFT_CENTER,
+        label,
+        size::CAPTION,
+        color::TEXT_DIM,
+    );
+    crate::paint::value(
+        p,
+        pos2(r.right() - 10.0, mid),
+        Align2::RIGHT_CENTER,
+        &format!("{:.0} %", params.get_plain(id)),
+        size::CAPTION + 1.0,
+        color::TEXT,
+    );
+}
+
 /// Segmented choice for an enum parameter: a click on a segment is one
 /// edit. `accents` lights each choice in its own colour.
 pub(crate) fn segmented(

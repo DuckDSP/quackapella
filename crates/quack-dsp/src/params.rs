@@ -175,13 +175,17 @@ pub enum ParamId {
     BendRange,
     VocoderWidth,
     VocoderLofi,
+    CreativeOn,
+    CreativeLevel,
+    HarmonyOn,
+    VocoderOn,
     Macro1,
     Macro2,
     Macro3,
     Macro4,
 }
 
-pub const PARAM_COUNT: usize = 78;
+pub const PARAM_COUNT: usize = 82;
 
 /// The four macro knobs (see [`crate::control`]).
 pub const MACRO_PARAMS: [ParamId; 4] = [
@@ -244,7 +248,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
     ParamSpec {
         key: "mode",
         host_id: 3,
-        name: "Mode",
+        name: "Style",
         unit: "",
         kind: ParamKind::Enum {
             count: crate::mode::VoiceMode::COUNT,
@@ -601,7 +605,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Enum {
             count: crate::harmony::INTERVAL_COUNT,
-            default: (2 + crate::harmony::MAX_STEPS) as u32,
+            default: (4 + crate::harmony::MAX_SEMIS) as u32,
         },
     },
     ParamSpec {
@@ -611,7 +615,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Enum {
             count: crate::harmony::INTERVAL_COUNT,
-            default: (-3 + crate::harmony::MAX_STEPS) as u32,
+            default: (-5 + crate::harmony::MAX_SEMIS) as u32,
         },
     },
     ParamSpec {
@@ -621,7 +625,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Enum {
             count: crate::harmony::INTERVAL_COUNT,
-            default: crate::harmony::MAX_STEPS as u32,
+            default: crate::harmony::MAX_SEMIS as u32,
         },
     },
     ParamSpec {
@@ -631,7 +635,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "",
         kind: ParamKind::Enum {
             count: crate::harmony::INTERVAL_COUNT,
-            default: crate::harmony::MAX_STEPS as u32,
+            default: crate::harmony::MAX_SEMIS as u32,
         },
     },
     ParamSpec {
@@ -922,6 +926,38 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         },
     },
     ParamSpec {
+        key: "creative_on",
+        host_id: 610,
+        name: "Creative",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "creative_level",
+        host_id: 611,
+        name: "Creative Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_on",
+        host_id: 415,
+        name: "Harmony On",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "vocoder_on",
+        host_id: 518,
+        name: "Vocoder On",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
         key: "macro_1",
         host_id: 700,
         name: "Macro 1",
@@ -1043,6 +1079,10 @@ impl ParamId {
         Self::BendRange,
         Self::VocoderWidth,
         Self::VocoderLofi,
+        Self::CreativeOn,
+        Self::CreativeLevel,
+        Self::HarmonyOn,
+        Self::VocoderOn,
         Self::Macro1,
         Self::Macro2,
         Self::Macro3,

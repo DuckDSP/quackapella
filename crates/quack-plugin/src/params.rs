@@ -13,17 +13,13 @@ use truce_params::FloatParamReadF64;
 
 use crate::shared::Shared;
 
-/// Voice modes, in `quack_dsp::VoiceMode` order.
+/// Correction styles, in `quack_dsp::VoiceMode` order.
 #[derive(ParamEnum)]
 pub enum ModeParam {
     #[name = "Natural"]
     Natural,
     #[name = "Tune"]
     Tune,
-    #[name = "Creative"]
-    Creative,
-    #[name = "Synth"]
-    Synth,
 }
 
 /// Voice ranges, in `quack_dsp::latency::VoiceRange` order.
@@ -107,8 +103,6 @@ pub enum SourceParam {
 /// Vocoder modes, in `quack_dsp::vocoder::VocoderMode` order.
 #[derive(ParamEnum)]
 pub enum VocoderParam {
-    #[name = "Off"]
-    Off,
     #[name = "Vocoder"]
     Vocoder,
     #[name = "Talkbox"]
@@ -178,58 +172,118 @@ pub enum FollowChordParam {
 /// Harmony sources, in `quack_dsp::harmony::HarmonyMode` order.
 #[derive(ParamEnum)]
 pub enum HarmonyParam {
-    #[name = "Off"]
-    Off,
     #[name = "MIDI"]
     Midi,
+    #[name = "Fixed"]
+    Fixed,
     #[name = "Scale"]
     Scale,
     #[name = "Chord"]
     Chord,
 }
 
-/// Harmony intervals in scale steps, -9 (a tenth down) to +9, in
-/// `quack_dsp::harmony::interval_steps` order.
+/// Harmony intervals in semitones, -24 to +24, in
+/// `quack_dsp::harmony::interval_semitones` order.
 #[derive(ParamEnum)]
 pub enum IntervalParam {
-    #[name = "10th down"]
+    #[name = "-24 st"]
+    Down24,
+    #[name = "-23 st"]
+    Down23,
+    #[name = "-22 st"]
+    Down22,
+    #[name = "-21 st"]
+    Down21,
+    #[name = "-20 st"]
+    Down20,
+    #[name = "-19 st"]
+    Down19,
+    #[name = "-18 st"]
+    Down18,
+    #[name = "-17 st"]
+    Down17,
+    #[name = "-16 st"]
+    Down16,
+    #[name = "-15 st"]
+    Down15,
+    #[name = "-14 st"]
+    Down14,
+    #[name = "-13 st"]
+    Down13,
+    #[name = "-12 st"]
+    Down12,
+    #[name = "-11 st"]
+    Down11,
+    #[name = "-10 st"]
+    Down10,
+    #[name = "-9 st"]
     Down9,
-    #[name = "9th down"]
+    #[name = "-8 st"]
     Down8,
-    #[name = "Octave down"]
+    #[name = "-7 st"]
     Down7,
-    #[name = "7th down"]
+    #[name = "-6 st"]
     Down6,
-    #[name = "6th down"]
+    #[name = "-5 st"]
     Down5,
-    #[name = "5th down"]
+    #[name = "-4 st"]
     Down4,
-    #[name = "4th down"]
+    #[name = "-3 st"]
     Down3,
-    #[name = "3rd down"]
+    #[name = "-2 st"]
     Down2,
-    #[name = "2nd down"]
+    #[name = "-1 st"]
     Down1,
     #[name = "Off"]
     Off,
-    #[name = "2nd up"]
+    #[name = "+1 st"]
     Up1,
-    #[name = "3rd up"]
+    #[name = "+2 st"]
     Up2,
-    #[name = "4th up"]
+    #[name = "+3 st"]
     Up3,
-    #[name = "5th up"]
+    #[name = "+4 st"]
     Up4,
-    #[name = "6th up"]
+    #[name = "+5 st"]
     Up5,
-    #[name = "7th up"]
+    #[name = "+6 st"]
     Up6,
-    #[name = "Octave up"]
+    #[name = "+7 st"]
     Up7,
-    #[name = "9th up"]
+    #[name = "+8 st"]
     Up8,
-    #[name = "10th up"]
+    #[name = "+9 st"]
     Up9,
+    #[name = "+10 st"]
+    Up10,
+    #[name = "+11 st"]
+    Up11,
+    #[name = "+12 st"]
+    Up12,
+    #[name = "+13 st"]
+    Up13,
+    #[name = "+14 st"]
+    Up14,
+    #[name = "+15 st"]
+    Up15,
+    #[name = "+16 st"]
+    Up16,
+    #[name = "+17 st"]
+    Up17,
+    #[name = "+18 st"]
+    Up18,
+    #[name = "+19 st"]
+    Up19,
+    #[name = "+20 st"]
+    Up20,
+    #[name = "+21 st"]
+    Up21,
+    #[name = "+22 st"]
+    Up22,
+    #[name = "+23 st"]
+    Up23,
+    #[name = "+24 st"]
+    Up24,
 }
 
 #[derive(ParamEnum)]
@@ -288,7 +342,7 @@ pub struct QuackParams {
     )]
     pub mix: FloatParam,
 
-    #[param(id = 3, name = "Mode", default = 0)]
+    #[param(id = 3, name = "Style", default = 0)]
     pub mode: EnumParam<ModeParam>,
 
     #[param(id = 4, name = "Bypass", flags = "automatable | bypass")]
@@ -506,16 +560,16 @@ pub struct QuackParams {
     #[param(id = 400, name = "Harmony", default = 2)]
     pub harmony: EnumParam<HarmonyParam>,
 
-    #[param(id = 401, name = "Harmony 1", default = 11)]
+    #[param(id = 401, name = "Harmony 1", default = 28)]
     pub harmony_1: EnumParam<IntervalParam>,
 
-    #[param(id = 402, name = "Harmony 2", default = 6)]
+    #[param(id = 402, name = "Harmony 2", default = 19)]
     pub harmony_2: EnumParam<IntervalParam>,
 
-    #[param(id = 403, name = "Harmony 3", default = 9)]
+    #[param(id = 403, name = "Harmony 3", default = 24)]
     pub harmony_3: EnumParam<IntervalParam>,
 
-    #[param(id = 404, name = "Harmony 4", default = 9)]
+    #[param(id = 404, name = "Harmony 4", default = 24)]
     pub harmony_4: EnumParam<IntervalParam>,
 
     #[param(
@@ -738,6 +792,26 @@ pub struct QuackParams {
     )]
     pub vocoder_lofi: FloatParam,
 
+    /// Layer switches and the creative layer's depth.
+    #[param(id = 610, name = "Creative")]
+    pub creative_on: BoolParam,
+
+    #[param(
+        id = 611,
+        name = "Creative Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub creative_level: FloatParam,
+
+    #[param(id = 415, name = "Harmony On")]
+    pub harmony_on: BoolParam,
+
+    #[param(id = 518, name = "Vocoder On")]
+    pub vocoder_on: BoolParam,
+
     #[param(
         id = 700,
         name = "Macro 1",
@@ -954,6 +1028,17 @@ impl QuackParams {
         v.set(
             ParamId::VocoderLofi,
             FloatParamReadF64::value(&self.vocoder_lofi),
+        );
+        for (id, p) in [
+            (ParamId::CreativeOn, &self.creative_on),
+            (ParamId::HarmonyOn, &self.harmony_on),
+            (ParamId::VocoderOn, &self.vocoder_on),
+        ] {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
+        v.set(
+            ParamId::CreativeLevel,
+            FloatParamReadF64::value(&self.creative_level),
         );
         for (id, p) in quack_dsp::params::MACRO_PARAMS.into_iter().zip([
             &self.macro_1,

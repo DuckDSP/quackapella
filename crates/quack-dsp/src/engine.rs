@@ -16,13 +16,19 @@
 //!
 //! The autotune ([`Retuner`]) steers the shifter grain by grain: it
 //! gets each grain's own period and returns the grain's pitch ratio
-//! (correction plus transposition). In the Synth mode the harmony
-//! voices ([`Harmonizer`]) are built on the same analysis grains.
+//! (correction plus transposition). The harmony voices ([`Harmonizer`])
+//! are built on the same analysis grains.
+//!
+//! Layers: the lead (correction and transposition, level *Lead*), the
+//! creative effects (on the lead itself: octave layers, formant follow,
+//! freeze, robot, glitch; their depth scaled by *Creative Level*), the
+//! harmonies and the vocoder. Each has its own switch and level, and
+//! they all play together.
 
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
-use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_steps};
+use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
@@ -70,18 +76,18 @@ pub struct Engine {
     /// closes with the audio the notes were played against.
     gate: Ramp,
     gate_delay: DelayLine,
-    /// Creative mode: octave layers (down, sub, up), formant follow,
-    /// freeze, robot, glitch. All at rest in the other modes.
+    /// Creative layer: octave layers (down, sub, up), formant follow,
+    /// freeze, robot, glitch. All at rest with the layer off.
     layers: [Ramp; LAYERS],
     follow: Ramp,
     freeze: bool,
     robot: Robot,
     glitch: Glitch,
-    /// Synth mode: harmony voices, lead and harmony levels.
+    /// Harmony layer: harmony voices, lead and harmony levels.
     harmony: Harmonizer,
     lead: Ramp,
     harmony_level: Ramp,
-    /// Synth mode: vocoder or talkbox on the internal carrier synth or
+    /// Vocoder layer: vocoder or talkbox on the internal carrier synth or
     /// the side-chain, and its level.
     vocoder: Vocoder,
     vocoder_level: Ramp,
@@ -306,12 +312,11 @@ impl Engine {
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
                 self.update_tune();
-                self.update_creative(snap);
-                self.update_harmony(snap);
-                self.update_vocoder(snap);
                 return;
             }
-            ParamId::FormantFollow
+            ParamId::CreativeOn
+            | ParamId::CreativeLevel
+            | ParamId::FormantFollow
             | ParamId::OctaveDown
             | ParamId::Sub
             | ParamId::OctaveUp
@@ -324,7 +329,8 @@ impl Engine {
                 self.update_creative(snap);
                 return;
             }
-            ParamId::Harmony
+            ParamId::HarmonyOn
+            | ParamId::Harmony
             | ParamId::Harmony1
             | ParamId::Harmony2
             | ParamId::Harmony3
@@ -343,7 +349,8 @@ impl Engine {
                 self.update_vocoder(snap);
                 return;
             }
-            ParamId::Vocoder
+            ParamId::VocoderOn
+            | ParamId::Vocoder
             | ParamId::Carrier
             | ParamId::Bands
             | ParamId::VocoderLevel
@@ -398,17 +405,24 @@ impl Engine {
         }
     }
 
-    /// Whether the Creative effects are on: only in the Creative mode,
-    /// so Natural and Tune never hear them.
+    /// Whether the Creative layer is on.
     fn creative(&self) -> bool {
-        self.mode == VoiceMode::Creative
+        self.values.get(ParamId::CreativeOn) >= 0.5
     }
 
-    /// Creative effects from the parameters and the mode.
+    /// Creative effects from the parameters: their depth times the
+    /// layer's level, nothing with the layer off.
     fn update_creative(&mut self, snap: bool) {
         let on = self.creative();
         let v = &self.values;
-        let pct = |id: ParamId| if on { (v.get(id) / 100.0) as f32 } else { 0.0 };
+        #[allow(clippy::cast_possible_truncation)]
+        let depth = if on {
+            (v.get(ParamId::CreativeLevel) / 100.0) as f32
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let pct = |id: ParamId| (v.get(id) / 100.0) as f32 * depth;
         let targets = [
             pct(ParamId::OctaveDown),
             pct(ParamId::Sub),
@@ -435,10 +449,10 @@ impl Engine {
         }
     }
 
-    /// Harmony voices from the parameters, the mode and the held notes:
-    /// only in the Synth mode.
+    /// Harmony voices from the parameters and the held notes, with the
+    /// layer on.
     fn update_harmony(&mut self, snap: bool) {
-        let on = self.mode == VoiceMode::Synth;
+        let on = self.values.get(ParamId::HarmonyOn) >= 0.5;
         let v = &self.values;
         let mode = if on {
             HarmonyMode::from_index(v.get(ParamId::Harmony))
@@ -460,7 +474,7 @@ impl Engine {
         ];
         let mut intervals = [0; INTERVAL_VOICES];
         for (i, id) in intervals.iter_mut().zip(ids) {
-            *i = interval_steps(v.get(id));
+            *i = interval_semitones(v.get(id));
         }
         let pct = |id: ParamId| v.get(id) / 100.0;
         let s = &mut self.harmony.settings;
@@ -492,10 +506,13 @@ impl Engine {
             self.double.set(double);
         }
         #[allow(clippy::cast_possible_truncation)]
-        let (lead, level) = if on {
-            (pct(ParamId::Lead) as f32, pct(ParamId::HarmonyLevel) as f32)
+        // The lead's level is the lead layer's: it holds with every
+        // layer.
+        let lead = pct(ParamId::Lead) as f32;
+        let level = if on {
+            pct(ParamId::HarmonyLevel) as f32
         } else {
-            (1.0, 0.0)
+            0.0
         };
         if snap {
             self.lead.snap(lead);
@@ -506,10 +523,10 @@ impl Engine {
         }
     }
 
-    /// Vocoder settings from the parameters, the mode and the held
-    /// notes: only in the Synth mode.
+    /// Vocoder settings from the parameters and the held notes, with
+    /// the layer on.
     fn update_vocoder(&mut self, snap: bool) {
-        let on = self.mode == VoiceMode::Synth;
+        let on = self.values.get(ParamId::VocoderOn) >= 0.5;
         let v = &self.values;
         let pct = |id: ParamId| v.get(id) / 100.0;
         let mode = if on {
@@ -582,7 +599,7 @@ impl Engine {
         self.glitch.set_transport(tempo, bar_beats, beat);
     }
 
-    /// Whether a frozen grain is sounding (Creative mode).
+    /// Whether a frozen grain is sounding (Creative layer).
     #[must_use]
     pub fn frozen(&self) -> bool {
         self.shifter.is_frozen()
@@ -819,7 +836,8 @@ mod tests {
         let mut e = Engine::new();
         let lat = e.latency_samples();
         let mut v = ParamValues::default();
-        v.set(ParamId::Mode, 2.0);
+        v.set(ParamId::Mode, 1.0);
+        v.set(ParamId::CreativeOn, 1.0);
         v.set(ParamId::Mix, 40.0);
         v.set(ParamId::InputGain, 6.0);
         e.set_all(&v, true);
@@ -834,7 +852,7 @@ mod tests {
         e.set_all(&v, true);
         let y = impulse_response(&mut e, lat + 8);
         assert!((y[lat] - 1.0).abs() < 1e-6);
-        assert_eq!(e.mode(), VoiceMode::Creative);
+        assert_eq!(e.mode(), VoiceMode::Tune);
     }
 
     #[test]
@@ -1001,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn creative_effects_stay_out_of_natural_and_tune() {
+    fn creative_effects_need_their_layer() {
         let x: Vec<f32> = (0..24_000)
             .map(|i| {
                 #[allow(clippy::cast_precision_loss)]
@@ -1048,20 +1066,34 @@ mod tests {
             assert_eq!(l, with, "mode {mode}");
             assert_ne!(plain, with);
         }
+        // Layer on: the effects play over either style.
+        let mut e = Engine::new();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Pitch, 5.0);
+        v.set(ParamId::CreativeOn, 1.0);
+        v.set(ParamId::OctaveDown, 100.0);
+        e.set_all(&v, true);
+        let mut l = x.clone();
+        let mut r = x.clone();
+        e.process(&mut l, &mut r);
+        let mut e = Engine::new();
+        v.set(ParamId::CreativeOn, 0.0);
+        e.set_all(&v, true);
+        let (mut l0, mut r0) = (x.clone(), x.clone());
+        e.process(&mut l0, &mut r0);
+        assert_ne!(l, l0);
     }
 
-    /// Synth mode, the lead muted, one harmony voice.
-    fn harmony_only(mode: f64, steps: i32) -> ParamValues {
+    /// Harmony layer on, the lead muted, one harmony voice `semis`
+    /// away.
+    fn harmony_only(mode: f64, semis: i32) -> ParamValues {
         let mut v = ParamValues::default();
-        v.set(ParamId::Mode, 3.0);
+        v.set(ParamId::HarmonyOn, 1.0);
         v.set(ParamId::Harmony, mode);
         v.set(ParamId::Lead, 0.0);
         v.set(ParamId::HarmonyLevel, 100.0);
-        v.set(
-            ParamId::Harmony1,
-            f64::from(steps + crate::harmony::MAX_STEPS),
-        );
-        v.set(ParamId::Harmony2, f64::from(crate::harmony::MAX_STEPS));
+        v.set(ParamId::Harmony1, crate::harmony::interval_index(semis));
+        v.set(ParamId::Harmony2, crate::harmony::interval_index(0));
         v.set(ParamId::HarmonyHumanize, 0.0);
         v
     }
@@ -1069,12 +1101,17 @@ mod tests {
     #[test]
     fn harmony_sings_a_third_in_the_key() {
         // A3 in C major: a third above is C4, a sixth below C3.
-        let got = tuned_note(&harmony_only(2.0, 2), 0.0, None);
-        assert!((got - 60.0).abs() < 0.05, "{got}");
-        let got = tuned_note(&harmony_only(2.0, -5), 0.0, None);
+        for semis in [3, 4] {
+            let got = tuned_note(&harmony_only(2.0, semis), 0.0, None);
+            assert!((got - 60.0).abs() < 0.05, "{got}");
+        }
+        let got = tuned_note(&harmony_only(2.0, -9), 0.0, None);
         assert!((got - 48.0).abs() < 0.05, "{got}");
+        // Fixed: the exact interval, out of the key.
+        let got = tuned_note(&harmony_only(1.0, 4), 0.0, None);
+        assert!((got - 61.0).abs() < 0.05, "{got}");
         // A minor (key A, minor): a third above A is C too, a second B.
-        let mut v = harmony_only(2.0, 1);
+        let mut v = harmony_only(2.0, 2);
         v.set(ParamId::Key, 9.0);
         v.set(ParamId::Scale, 2.0);
         let got = tuned_note(&v, 0.0, None);
@@ -1083,34 +1120,33 @@ mod tests {
 
     #[test]
     fn harmony_plays_the_midi_note() {
-        let got = tuned_note(&harmony_only(1.0, 0), 0.0, Some(64));
+        let got = tuned_note(&harmony_only(0.0, 0), 0.0, Some(64));
         assert!((got - 64.0).abs() < 0.05, "{got}");
     }
 
     #[test]
-    fn harmony_adds_no_latency_and_stays_in_synth() {
+    fn harmony_adds_no_latency_and_needs_its_layer() {
         let mut e = Engine::new();
         let lat = e.latency_samples();
-        let mut v = harmony_only(2.0, 2);
+        let mut v = harmony_only(2.0, 4);
         v.set(ParamId::Lead, 100.0);
         e.set_all(&v, true);
         assert_eq!(e.latency_samples(), lat);
         // Impulse (unvoiced): only the lead, on time.
         let y = impulse_response(&mut e, lat + 8);
         assert!((y[lat] - 1.0).abs() < 1e-6);
-        // Other modes: no harmony at all, even with the knobs set.
-        v.set(ParamId::Mode, 0.0);
+        // Layer off: no harmony at all, even with the knobs set.
+        v.set(ParamId::HarmonyOn, 0.0);
         let mut e = Engine::new();
         e.set_all(&v, true);
         assert_eq!(e.harmony.settings.mode, HarmonyMode::Off);
     }
 
     #[test]
-    fn vocoder_adds_no_latency_and_stays_in_synth() {
+    fn vocoder_adds_no_latency_and_needs_its_layer() {
         let mut v = ParamValues::default();
-        v.set(ParamId::Mode, 3.0);
-        v.set(ParamId::Harmony, 0.0);
-        v.set(ParamId::Vocoder, 1.0);
+        v.set(ParamId::VocoderOn, 1.0);
+        v.set(ParamId::Vocoder, 0.0);
         let mut e = Engine::new();
         let lat = e.latency_samples();
         e.set_all(&v, true);
@@ -1125,10 +1161,37 @@ mod tests {
         e.process(&mut l, &mut r);
         assert!(l.iter().all(|s| s.is_finite()));
         assert_ne!(e.vocoder_notes() & (1 << 48), 0);
-        // Other modes: no vocoder.
-        v.set(ParamId::Mode, 1.0);
+        // Layer off: no vocoder.
+        v.set(ParamId::VocoderOn, 0.0);
         e.set_all(&v, true);
         assert_eq!(e.vocoder.settings.mode, VocoderMode::Off);
+    }
+
+    #[test]
+    fn every_layer_plays_together() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 1.0);
+        for id in [ParamId::CreativeOn, ParamId::HarmonyOn, ParamId::VocoderOn] {
+            v.set(id, 1.0);
+        }
+        v.set(ParamId::OctaveDown, 60.0);
+        v.set(ParamId::Robot, 50.0);
+        let mut e = Engine::new();
+        let lat = e.latency_samples();
+        e.set_all(&v, true);
+        assert_eq!(e.latency_samples(), lat);
+        e.note_on(0, 48, 100);
+        assert_ne!(e.harmony.settings.mode, HarmonyMode::Off);
+        assert_ne!(e.vocoder.settings.mode, VocoderMode::Off);
+        #[allow(clippy::cast_precision_loss)]
+        let x: Vec<f32> = (0..24_000)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let (mut l, mut r) = (x.clone(), x.clone());
+        e.process(&mut l, &mut r);
+        assert!(l.iter().chain(&r).all(|s| s.is_finite() && s.abs() < 4.0));
+        assert_ne!(e.harmony_notes(), 0);
+        assert_ne!(e.vocoder_notes() & (1 << 48), 0);
     }
 
     #[test]
