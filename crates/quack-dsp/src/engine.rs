@@ -520,6 +520,16 @@ impl Engine {
             // Macros act through the values they modulate (the adapter
             // applies them before the engine sees anything).
             ParamId::Macro1 | ParamId::Macro2 | ParamId::Macro3 | ParamId::Macro4 => return,
+            // Snapshots, morph and MIDI out live in the adapter: the
+            // morph writes the parameters it moves, the MIDI out reads
+            // the engine's readings.
+            ParamId::Morph
+            | ParamId::MorphOn
+            | ParamId::MorphTime
+            | ParamId::SnapshotKeys
+            | ParamId::MidiOut
+            | ParamId::MidiOutChannel
+            | ParamId::MidiOutSource => return,
             _ => {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();

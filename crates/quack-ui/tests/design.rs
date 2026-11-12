@@ -115,6 +115,19 @@ fn editor_captures() {
         v.set(ParamId::Macro1, 40.0);
         v.set(ParamId::Macro2, if mode == 2.0 { 30.0 } else { 0.0 });
         ctl.bind(1, ParamId::Macro1);
+        // Tune page: two snapshots, the morph a third of the way, the
+        // MIDI output on with the snapshot keys.
+        if mode == 1.0 {
+            ctl.store_snapshot(0, &v);
+            let mut b = v;
+            b.set(ParamId::Pitch, 12.0);
+            ctl.store_snapshot(1, &b);
+            v.set(ParamId::MorphOn, 1.0);
+            v.set(ParamId::Morph, 35.0);
+            v.set(ParamId::SnapshotKeys, 2.0);
+            v.set(ParamId::MidiOut, 1.0);
+            v.set(ParamId::MidiOutSource, 1.0);
+        }
         let params = Values(RefCell::new(v), ctl);
         let view = View {
             held_notes: if mode >= 3.0 {
@@ -143,6 +156,7 @@ fn editor_captures() {
             } else {
                 0
             },
+            midi_out_notes: if mode == 1.0 { 1 << 57 } else { 0 },
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);

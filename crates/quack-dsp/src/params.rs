@@ -232,9 +232,16 @@ pub enum ParamId {
     SendCreative,
     SendHarmony,
     SendVocoder,
+    Morph,
+    MorphOn,
+    MorphTime,
+    SnapshotKeys,
+    MidiOut,
+    MidiOutChannel,
+    MidiOutSource,
 }
 
-pub const PARAM_COUNT: usize = 129;
+pub const PARAM_COUNT: usize = 136;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -1564,6 +1571,72 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 30.0,
         },
     },
+    ParamSpec {
+        key: "morph",
+        host_id: 1200,
+        name: "Morph",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "morph_on",
+        host_id: 1201,
+        name: "Morph On",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "morph_time",
+        host_id: 1202,
+        name: "Morph Time",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 4000.0,
+            default: 300.0,
+        },
+    },
+    ParamSpec {
+        key: "snapshot_keys",
+        host_id: 1203,
+        name: "Snapshot Keys",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::snapshot::SnapshotKeys::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "midi_out",
+        host_id: 1210,
+        name: "MIDI Out",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "midi_out_channel",
+        host_id: 1211,
+        name: "MIDI Out Channel",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: 16,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "midi_out_source",
+        host_id: 1212,
+        name: "MIDI Out Source",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::midiout::OutSource::COUNT,
+            default: 0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -1697,6 +1770,13 @@ impl ParamId {
         Self::SendCreative,
         Self::SendHarmony,
         Self::SendVocoder,
+        Self::Morph,
+        Self::MorphOn,
+        Self::MorphTime,
+        Self::SnapshotKeys,
+        Self::MidiOut,
+        Self::MidiOutChannel,
+        Self::MidiOutSource,
     ];
 
     #[must_use]

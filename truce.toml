@@ -18,6 +18,10 @@ category = "effect"
 # (MusicEffect), so Logic can route a MIDI track to it (side-chain MIDI
 # for the autotune notes and the harmonizer).
 midi_input = true
+# MIDI output: the sung notes (MIDI Out, ids 1210+), for hosts that
+# take MIDI from an effect (Reaper, Bitwig...). Logic does not: there
+# the plugin also publishes a virtual MIDI source on macOS.
+midi_output = true
 fourcc = "Qkpl"
 au3_subtype = "Qkp3"
 au_tag = "Effects"

@@ -341,6 +341,43 @@ Rendus d'écoute dans `ecoute/harmoniseur/`.
 
 Aucune latence ajoutée : tout se passe au niveau des paramètres.
 
+## Snapshots, morphing, sortie MIDI
+
+Rangée *Snapshots* et panneau *MIDI Out*, au-dessus des macros (éditeur
+1040 × 904). Paramètres hôte 1200 à 1212, hors presets.
+
+- **Snapshots A et B** (`quack_dsp::snapshot`) : *Save to A / B* fige
+  tous les réglages du son (ceux d'un preset, macros exclues). Sauvés
+  avec la session, pas dans les presets.
+- **Morph** (1200, 0 % = A, 100 % = B) avec *Morph On* (1201) :
+  l'adaptateur écrit les paramètres eux-mêmes (l'éditeur, la session et
+  le moteur suivent, le lissage du moteur fait le fondu). Les réglages
+  continus sont interpolés, les interrupteurs et choix basculent à 50 %.
+  Seuls les réglages différents entre A et B sont écrits, et seulement
+  quand le morph bouge : un réglage commun reste libre, une retouche
+  tient jusqu'au prochain mouvement. Pilotable à la main, par
+  automation, par une macro, par MIDI learn.
+- **Touches A/B** (*Snapshot Keys*, 1203) : deux notes MIDI (C0/C#0 par
+  exemple) font glisser le morph vers A ou B en *Morph Time* (1202). Ces
+  notes ne vont pas plus loin (ni harmoniseur ni autotune). Morph Off :
+  les touches et les boutons A/B rappellent le snapshot d'un coup.
+- **Sortie MIDI** (`quack_dsp::midiout`, 1210 à 1212) : note la plus
+  proche de la voix, avec hystérésis (0,65 demi-ton tenu 15 ms) pour
+  qu'un vibrato ne redéclenche pas ; fin de note après 40 ms sans voix ;
+  vélocité selon le niveau d'entrée. Sources : *Sung*, *Sung + Bend*
+  (pitch bend ±2 demi-tons qui suit vibrato et glissés), *Heard* (cible
+  de l'autotune + transposition), *Heard + Harmony* (plus les notes de
+  l'harmoniseur). Canal 1 à 16.
+  - Envoyée par le port MIDI de l'hôte (`midi_output = true` dans
+    `truce.toml`) pour les hôtes qui prennent le MIDI d'un effet
+    (Reaper, Bitwig). Logic ne le fait pas : sous macOS le plugin publie
+    aussi une source MIDI virtuelle « Quackapella » tant que MIDI Out
+    est actif (`quack-plugin/src/vport.rs`, file sans verrou vidée par
+    un fil toutes les ms ; le thread audio n'appelle jamais CoreMIDI).
+  - Délai : la note part quand le détecteur accroche la voix, 9 ms
+    (Soprano) à 19 ms (Bass) après l'attaque (test
+    `midi_out_onset_per_voice_range`). Aucune latence audio ajoutée.
+
 ## Modes
 
 | Mode | Intention | Formants |
