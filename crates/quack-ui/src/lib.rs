@@ -1636,6 +1636,12 @@ impl FxTab {
 
 impl UiState {
     /// Show an effect on the FX page.
+    /// Open the preset browser on `shelf` (the loaded preset's when
+    /// `None`), as a click on the preset name does.
+    pub fn open_presets(&mut self, shelf: Option<perform::Shelf>) {
+        self.presets.open_browser(shelf);
+    }
+
     pub fn set_fx_tab(&mut self, tab: FxTab) {
         self.fx_tab = tab;
     }
