@@ -345,6 +345,14 @@ const SERIES: f64 = 1.0;
 const CHAIN_CREATIVE_VOCODER_HARMONY: f64 = 2.0;
 const CHAIN_HARMONY_VOCODER_CREATIVE: f64 = 3.0;
 
+/// Voice effects: space, echo, squash, duck.
+const FX_MACROS: [MacroDef; MACRO_COUNT] = [
+    mac("Space", &[(P::SendVoice, 0.4), (P::ReverbLevel, 0.3)]),
+    mac("Echo", &[(P::DelayLevel, 0.6), (P::DelayFeedback, 0.3)]),
+    mac("Squash", &[(P::CompThreshold, -0.4), (P::CompMakeup, 0.2)]),
+    mac("Duck", &[(P::Duck, 0.8)]),
+];
+
 const SYNTH_CLEAN: [(ParamId, f64); 3] =
     [(P::Mode, TUNE), (P::VocoderOn, ON), (P::Correction, 60.0)];
 
@@ -860,6 +868,55 @@ pub const FACTORY: &[Factory] = &[
             Character = 50.0
         ),
         macros: HARMONY_MACROS,
+    },
+    // Voice effects (appended as well).
+    Factory {
+        name: "Live Vocal FX",
+        category: "Natural",
+        values: &[
+            (P::FxOn, ON),
+            (P::Gate, -60.0),
+            (P::DeEss, 50.0),
+            (P::CompThreshold, -24.0),
+            (P::CompRatio, 3.0),
+            (P::CompMakeup, 5.0),
+            (P::DelayLevel, 25.0),
+            (P::DelayFeedback, 30.0),
+            (P::ReverbLevel, 50.0),
+            (P::ReverbDecay, 1.8),
+            (P::Duck, 50.0),
+            (P::SendVoice, 25.0),
+        ],
+        macros: FX_MACROS,
+    },
+    Factory {
+        name: "Ambient Choir",
+        category: "Harmony",
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::HarmonyOn, ON),
+            (P::Scale, MAJOR),
+            (P::Harmony, H_SCALE),
+            (P::Harmony1, IV_3RD_UP),
+            (P::Harmony2, IV_5TH_UP),
+            (P::HarmonyLevel, 70.0),
+            (P::FxOn, ON),
+            (P::DeEss, 40.0),
+            (P::CompThreshold, -20.0),
+            (P::CompRatio, 2.5),
+            (P::CompMakeup, 3.0),
+            (P::DelayLevel, 30.0),
+            (P::DelayPingPong, ON),
+            (P::DelayFeedback, 45.0),
+            (P::ReverbLevel, 80.0),
+            (P::ReverbDecay, 4.5),
+            (P::Duck, 40.0),
+            (P::SendVoice, 10.0),
+            (P::SendHarmony, 80.0),
+        ],
+        macros: FX_MACROS,
     },
 ];
 

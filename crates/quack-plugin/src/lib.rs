@@ -242,6 +242,9 @@ impl PluginLogic for Quackapella {
         params.shared.publish_frozen(state.engine.frozen());
         params.shared.publish_harmony(state.engine.harmony_notes());
         params.shared.publish_vocoder(state.engine.vocoder_notes());
+        params
+            .shared
+            .publish_reduction(state.engine.fx_reduction_db());
         ProcessStatus::Normal
     }
 

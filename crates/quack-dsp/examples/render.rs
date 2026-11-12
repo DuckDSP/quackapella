@@ -14,7 +14,7 @@
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
 //! 32-bit float, mono or stereo; out: 32-bit float, same channels
-//! (always stereo with the harmonies or the vocoder on, for the harmonies' spread).
+//! (always stereo with the harmonies, the vocoder or the effects on).
 
 use std::f64::consts::{PI, TAU};
 use std::fs;
@@ -171,6 +171,7 @@ fn process(
     if chans.len() > 1
         || values.get(ParamId::HarmonyOn) >= 0.5
         || values.get(ParamId::VocoderOn) >= 0.5
+        || values.get(ParamId::FxOn) >= 0.5
     {
         out.push(r[lat..lat + n].to_vec());
     }

@@ -26,6 +26,9 @@ pub struct Shared {
     /// Notes the vocoder's carrier plays (Synth mode).
     vocoder_lo: AtomicU64,
     vocoder_hi: AtomicU64,
+    /// Gain reduction of the input compressor and de-esser (f32 dB bits).
+    comp_db: AtomicU32,
+    deess_db: AtomicU32,
 }
 
 impl Shared {
@@ -65,6 +68,11 @@ impl Shared {
             .store((mask >> 64) as u64, Ordering::Relaxed);
     }
 
+    pub fn publish_reduction(&self, (comp, deess): (f32, f32)) {
+        self.comp_db.store(comp.to_bits(), Ordering::Relaxed);
+        self.deess_db.store(deess.to_bits(), Ordering::Relaxed);
+    }
+
     pub fn publish_frozen(&self, frozen: bool) {
         self.frozen.store(frozen, Ordering::Relaxed);
     }
@@ -99,6 +107,8 @@ impl Shared {
                 | (u128::from(self.harmony_hi.load(Ordering::Relaxed)) << 64),
             vocoder_notes: u128::from(self.vocoder_lo.load(Ordering::Relaxed))
                 | (u128::from(self.vocoder_hi.load(Ordering::Relaxed)) << 64),
+            comp_db: f32::from_bits(self.comp_db.load(Ordering::Relaxed)),
+            deess_db: f32::from_bits(self.deess_db.load(Ordering::Relaxed)),
         }
     }
 }

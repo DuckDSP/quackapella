@@ -336,6 +336,30 @@ pub enum ChainParam {
     VocoderHarmonyCreative,
 }
 
+#[derive(ParamEnum)]
+pub enum DivisionParam {
+    #[name = "1/16"]
+    Sixteenth,
+    #[name = "1/8T"]
+    EighthTriplet,
+    #[name = "1/8"]
+    Eighth,
+    #[name = "1/4T"]
+    QuarterTriplet,
+    #[name = "1/8D"]
+    DottedEighth,
+    #[name = "1/4"]
+    Quarter,
+    #[name = "1/2T"]
+    HalfTriplet,
+    #[name = "1/4D"]
+    DottedQuarter,
+    #[name = "1/2"]
+    Half,
+    #[name = "1 Bar"]
+    Bar,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -1069,6 +1093,239 @@ pub struct QuackParams {
     )]
     pub carrier_sub: FloatParam,
 
+    // Voice effects: input dynamics, delay and reverb on sends.
+    #[param(id = 900, name = "FX On")]
+    pub fx_on: BoolParam,
+
+    #[param(
+        id = 901,
+        name = "FX Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub fx_level: FloatParam,
+
+    #[param(
+        id = 910,
+        name = "Gate",
+        range = "linear(-80, -20)",
+        default = -80.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub gate: FloatParam,
+
+    #[param(
+        id = 911,
+        name = "De-Ess",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub deess: FloatParam,
+
+    #[param(
+        id = 912,
+        name = "De-Ess Freq",
+        range = "linear(3000, 12000)",
+        default = 6500.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub deess_freq: FloatParam,
+
+    #[param(
+        id = 913,
+        name = "Comp Threshold",
+        range = "linear(-48, 0)",
+        default = -18.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub comp_threshold: FloatParam,
+
+    #[param(
+        id = 914,
+        name = "Comp Ratio",
+        range = "linear(1, 20)",
+        default = 1.0,
+        unit = "none",
+        smooth = "none"
+    )]
+    pub comp_ratio: FloatParam,
+
+    #[param(
+        id = 915,
+        name = "Comp Attack",
+        range = "linear(0.1, 50)",
+        default = 5.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub comp_attack: FloatParam,
+
+    #[param(
+        id = 916,
+        name = "Comp Release",
+        range = "linear(10, 800)",
+        default = 120.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub comp_release: FloatParam,
+
+    #[param(
+        id = 917,
+        name = "Comp Makeup",
+        range = "linear(0, 24)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub comp_makeup: FloatParam,
+
+    #[param(id = 920, name = "Delay Sync", default = true)]
+    pub delay_sync: BoolParam,
+
+    #[param(id = 921, name = "Delay Division", default = 4)]
+    pub delay_division: EnumParam<DivisionParam>,
+
+    #[param(
+        id = 922,
+        name = "Delay Time",
+        range = "linear(10, 2000)",
+        default = 375.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub delay_time: FloatParam,
+
+    #[param(
+        id = 923,
+        name = "Delay Feedback",
+        range = "linear(0, 95)",
+        default = 35.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub delay_feedback: FloatParam,
+
+    #[param(id = 924, name = "Delay Ping-Pong")]
+    pub delay_ping_pong: BoolParam,
+
+    #[param(
+        id = 925,
+        name = "Delay Tone",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub delay_tone: FloatParam,
+
+    #[param(
+        id = 926,
+        name = "Delay Level",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub delay_level: FloatParam,
+
+    #[param(
+        id = 930,
+        name = "Reverb Decay",
+        range = "linear(0.2, 10)",
+        default = 2.0,
+        unit = "s",
+        smooth = "none"
+    )]
+    pub reverb_decay: FloatParam,
+
+    #[param(
+        id = 931,
+        name = "Reverb Damping",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub reverb_damping: FloatParam,
+
+    #[param(
+        id = 932,
+        name = "Reverb Pre-Delay",
+        range = "linear(0, 200)",
+        default = 20.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub reverb_predelay: FloatParam,
+
+    #[param(
+        id = 933,
+        name = "Reverb Level",
+        range = "linear(0, 100)",
+        default = 60.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub reverb_level: FloatParam,
+
+    #[param(
+        id = 940,
+        name = "Duck",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub duck: FloatParam,
+
+    #[param(
+        id = 950,
+        name = "Send Voice",
+        range = "linear(0, 100)",
+        default = 15.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub send_voice: FloatParam,
+
+    #[param(
+        id = 951,
+        name = "Send Creative",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub send_creative: FloatParam,
+
+    #[param(
+        id = 952,
+        name = "Send Harmony",
+        range = "linear(0, 100)",
+        default = 40.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub send_harmony: FloatParam,
+
+    #[param(
+        id = 953,
+        name = "Send Vocoder",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub send_vocoder: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -1277,6 +1534,45 @@ impl QuackParams {
         {
             v.set(ParamId::Routing, self.routing.value().to_index() as f64);
             v.set(ParamId::Chain, self.chain.value().to_index() as f64);
+        }
+        // Voice effects.
+        for (id, p) in [
+            (ParamId::FxOn, &self.fx_on),
+            (ParamId::DelaySync, &self.delay_sync),
+            (ParamId::DelayPingPong, &self.delay_ping_pong),
+        ] {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::DelayDivision,
+            self.delay_division.value().to_index() as f64,
+        );
+        for (id, p) in [
+            (ParamId::FxLevel, &self.fx_level),
+            (ParamId::Gate, &self.gate),
+            (ParamId::DeEss, &self.deess),
+            (ParamId::DeEssFreq, &self.deess_freq),
+            (ParamId::CompThreshold, &self.comp_threshold),
+            (ParamId::CompRatio, &self.comp_ratio),
+            (ParamId::CompAttack, &self.comp_attack),
+            (ParamId::CompRelease, &self.comp_release),
+            (ParamId::CompMakeup, &self.comp_makeup),
+            (ParamId::DelayTime, &self.delay_time),
+            (ParamId::DelayFeedback, &self.delay_feedback),
+            (ParamId::DelayTone, &self.delay_tone),
+            (ParamId::DelayLevel, &self.delay_level),
+            (ParamId::ReverbDecay, &self.reverb_decay),
+            (ParamId::ReverbDamping, &self.reverb_damping),
+            (ParamId::ReverbPredelay, &self.reverb_predelay),
+            (ParamId::ReverbLevel, &self.reverb_level),
+            (ParamId::Duck, &self.duck),
+            (ParamId::SendVoice, &self.send_voice),
+            (ParamId::SendCreative, &self.send_creative),
+            (ParamId::SendHarmony, &self.send_harmony),
+            (ParamId::SendVocoder, &self.send_vocoder),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
         }
         for (id, p) in [
             (ParamId::Throat, &self.throat),

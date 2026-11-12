@@ -42,6 +42,7 @@ fn editor_captures() {
         (2.0, "creative"),
         (3.0, "harmony"),
         (4.0, "vocoder"),
+        (5.0, "fx"),
     ] {
         let mut v = ParamValues::default();
         v.set(ParamId::Mode, if mode == 0.0 { 0.0 } else { 1.0 });
@@ -93,6 +94,7 @@ fn editor_captures() {
             "Monster",
             "Four-Part Choir",
             "Voice + Vocoder",
+            "Live Vocal FX",
         ][mode as usize];
         let fi = FACTORY
             .iter()
@@ -129,6 +131,8 @@ fn editor_captures() {
             tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
             tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
             frozen: mode == 2.0,
+            comp_db: if mode == 5.0 { -4.2 } else { 0.0 },
+            deess_db: if mode == 5.0 { -1.5 } else { 0.0 },
             vocoder_notes: if mode == 4.0 {
                 (1 << 45) | (1 << 48) | (1 << 52)
             } else {
@@ -147,6 +151,7 @@ fn editor_captures() {
             2 => Page::Creative,
             3 => Page::Harmony,
             4 => Page::Vocoder,
+            5 => Page::Fx,
             _ => Page::Voice,
         });
         // Four seconds of a phrase in the graph.
