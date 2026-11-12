@@ -251,6 +251,10 @@ struct ClapPluginData<P: PluginExport> {
     /// main thread, which notifies the host. Coalesces a burst of
     /// changes into one host notification per main-thread callback.
     latency_dirty: AtomicBool,
+    /// Latency the host was last told about (DuckDSP patch 1): `activate`
+    /// calls `clap_host_latency::changed` when the fresh value differs,
+    /// the only place CLAP allows that call.
+    latency_reported: AtomicU32,
     /// Queue of GUI-initiated parameter changes to emit as output events.
     gui_changes: Arc<GuiChangeQueue>,
     /// Bounded SPSC handoff for state loads. Host (`state_load`) and
@@ -678,9 +682,20 @@ unsafe extern "C" fn clap_plugin_activate<P: PluginExport>(
             // not the placeholder-rate value from create. No dirty flag:
             // this is the baseline the host reads at activate, not a
             // mid-session change needing changed() / request_restart.
-            data.latency_cache
-                .store(instance.latency(), Ordering::Relaxed);
+            let latency = instance.latency();
+            data.latency_cache.store(latency, Ordering::Relaxed);
             data.tail_cache.store(instance.tail(), Ordering::Relaxed);
+            // DuckDSP patch 1: CLAP only allows `latency.changed` during
+            // `activate`. A change made while active went through
+            // `request_restart` (see `on_main_thread`); report the new
+            // value here, in the activate that restart triggers.
+            if data.latency_reported.swap(latency, Ordering::Relaxed) != latency
+                && !data.host.is_null()
+                && !data.host_latency.is_null()
+                && let Some(changed) = (*data.host_latency).changed
+            {
+                changed(data.host);
+            }
         }
 
         // Pre-grow the widening / narrowing scratch so no host wire /
@@ -792,21 +807,16 @@ unsafe extern "C" fn clap_plugin_on_main_thread<P: PluginExport>(plugin: *const 
             rescan(data.host, CLAP_PARAM_RESCAN_VALUES);
         }
 
-        // Latency changed on the audio thread: tell the host here, off
-        // the audio thread. `changed()` re-reads our reported latency;
-        // an active plugin additionally needs `request_restart` to apply
-        // the new delay compensation.
-        if data.latency_dirty.swap(false, Ordering::Relaxed) && !data.host.is_null() {
-            if !data.host_latency.is_null()
-                && let Some(changed) = (*data.host_latency).changed
-            {
-                changed(data.host);
-            }
-            if data.active.load(Ordering::Relaxed)
-                && let Some(req_restart) = (*data.host).request_restart
-            {
-                req_restart(data.host);
-            }
+        // Latency changed on the audio thread. DuckDSP patch 1: CLAP
+        // forbids `latency.changed` outside `activate`, so an active
+        // plugin asks for a restart and `activate` reports the new value.
+        // An inactive one has nothing to do: the next `activate` reports.
+        if data.latency_dirty.swap(false, Ordering::Relaxed)
+            && !data.host.is_null()
+            && data.active.load(Ordering::Relaxed)
+            && let Some(req_restart) = (*data.host).request_restart
+        {
+            req_restart(data.host);
         }
     }
 }
@@ -4111,7 +4121,8 @@ pub unsafe fn create_plugin_instance<P: PluginExport>(
         let snapshot = instance.snapshot_slot();
         let task_spawner = instance.task_spawner();
         let editor_builder = instance.editor_builder();
-        let latency_cache = AtomicU32::new(instance.latency());
+        let initial_latency = instance.latency();
+        let latency_cache = AtomicU32::new(initial_latency);
         let tail_cache = AtomicU32::new(instance.tail());
 
         // Pre-size the per-block channel-slice scratch from the worst-case
@@ -4151,6 +4162,7 @@ pub unsafe fn create_plugin_instance<P: PluginExport>(
             host_latency: ptr::null(),
             host_tail: ptr::null(),
             latency_dirty: AtomicBool::new(false),
+            latency_reported: AtomicU32::new(initial_latency),
             gui_changes: Arc::new(GuiChangeQueue::new(GUI_QUEUE_CAPACITY)),
             pending_state: Arc::new(StateLoadQueue::new(1)),
             active: AtomicBool::new(false),
