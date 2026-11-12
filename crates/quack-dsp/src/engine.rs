@@ -1167,7 +1167,9 @@ impl Engine {
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (self.dry[0].tick(voice_l), self.dry[1].tick(voice_r));
-            let g_out = g_out * self.gate_delay.tick(self.gate.tick());
+            // MIDI Gate: mutes the voice and the layers, not the
+            // effects' tails (they ring on after the note).
+            let gate = self.gate_delay.tick(self.gate.tick());
             self.shifter.set_layers([
                 self.layers[0].tick(),
                 self.layers[1].tick(),
@@ -1219,6 +1221,7 @@ impl Engine {
             // delay and the reverb.
             let mut bus = FxBus::default();
             let mut layer = |i: usize, x: (f32, f32), drv: &mut Distortion| {
+                let x = (x.0 * gate, x.1 * gate);
                 let x = if drive_on {
                     drv.tick(x.0, x.1, drives[i])
                 } else {
@@ -1282,6 +1285,7 @@ impl Engine {
             } else {
                 (dry_l, dry_r)
             };
+            let (dry_l, dry_r) = (dry_l * gate, dry_r * gate);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
@@ -1611,6 +1615,43 @@ mod tests {
         // Scale source: the gate does not apply.
         e.set_param(ParamId::Source, 0.0);
         assert!((run(&mut e) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn midi_gate_leaves_the_effect_tails() {
+        let mut e = Engine::new();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Source, 1.0);
+        v.set(ParamId::MidiGate, 1.0);
+        v.set(ParamId::FxOn, 1.0);
+        v.set(ParamId::ReverbLevel, 100.0);
+        v.set(ParamId::VoiceReverb, 100.0);
+        v.set(ParamId::ReverbDecay, 4.0);
+        e.set_all(&v, true);
+        e.reset();
+        let n = 4_800;
+        let sine = |k: usize| {
+            (0..n)
+                .map(|i| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let t = (k * n + i) as f32 / 48_000.0;
+                    0.3 * (std::f32::consts::TAU * 220.0 * t).sin()
+                })
+                .collect::<Vec<f32>>()
+        };
+        e.note_on(0, 57, 100);
+        for k in 0..5 {
+            let mut l = sine(k);
+            let mut r = l.clone();
+            e.process(&mut l, &mut r);
+        }
+        e.note_off(0, 57);
+        let mut l = sine(5);
+        let mut r = l.clone();
+        e.process(&mut l, &mut r);
+        // Gate closed: the reverb still rings.
+        let tail: f32 = l[n / 2..].iter().map(|x| x * x).sum::<f32>() / (n / 2) as f32;
+        assert!(tail.sqrt() > 1e-3, "{}", tail.sqrt());
     }
 
     #[test]
