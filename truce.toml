@@ -22,3 +22,13 @@ fourcc = "Qkpl"
 au3_subtype = "Qkp3"
 au_tag = "Effects"
 vst3_subcategory = "Pitch Shift"
+
+# `cargo truce package` (scripts/package-macos.sh): one .pkg holding the
+# three formats. Notarization runs only when the script finds the
+# Developer ID identities and a notarytool profile (else --no-notarize).
+[packaging]
+formats = ["au2", "vst3", "clap"]
+
+[macos.packaging]
+notarize = true
+welcome_html = "packaging/macos/welcome.html"
