@@ -340,6 +340,11 @@ const VOCODER_MACROS: [MacroDef; MACRO_COUNT] = [
 ];
 
 /// The vocoder layer on, the harmonies off.
+/// Series routing and two of its orders (see [`crate::chain::Chain`]).
+const SERIES: f64 = 1.0;
+const CHAIN_CREATIVE_VOCODER_HARMONY: f64 = 2.0;
+const CHAIN_HARMONY_VOCODER_CREATIVE: f64 = 3.0;
+
 const SYNTH_CLEAN: [(ParamId, f64); 3] =
     [(P::Mode, TUNE), (P::VocoderOn, ON), (P::Correction, 60.0)];
 
@@ -764,6 +769,52 @@ pub const FACTORY: &[Factory] = &[
             (P::HarmonyOn, ON),
             (P::Harmony, H_MIDI),
             (P::HarmonyLevel, 40.0),
+        ],
+        macros: VOCODER_MACROS,
+    },
+    // Series chains (appended: program changes keep their numbers).
+    Factory {
+        name: "Vocoder in Thirds",
+        category: "Vocoder",
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Routing, SERIES),
+            (P::Chain, CHAIN_CREATIVE_VOCODER_HARMONY),
+            (P::Vocoder, VOCODER),
+            (P::Carrier, SUPERSAW),
+            (P::Detune, 20.0),
+            (P::VocoderLevel, 100.0),
+            (P::HarmonyOn, ON),
+            (P::Scale, MAJOR),
+            (P::Harmony, H_SCALE),
+            (P::Harmony1, IV_3RD_UP),
+            (P::Harmony2, IV_5TH_UP),
+            (P::HarmonyLevel, 80.0),
+        ],
+        macros: VOCODER_MACROS,
+    },
+    Factory {
+        name: "Glitched Choir Box",
+        category: "Vocoder",
+        values: &[
+            SYNTH_CLEAN[0],
+            SYNTH_CLEAN[1],
+            SYNTH_CLEAN[2],
+            (P::Routing, SERIES),
+            (P::Chain, CHAIN_HARMONY_VOCODER_CREATIVE),
+            (P::Vocoder, TALKBOX),
+            (P::Carrier, SQUARE),
+            (P::VocoderLevel, 70.0),
+            (P::HarmonyOn, ON),
+            (P::Scale, MAJOR),
+            (P::Harmony, H_SCALE),
+            (P::Harmony1, IV_3RD_UP),
+            (P::HarmonyLevel, 70.0),
+            (P::CreativeOn, ON),
+            (P::Glitch, 30.0),
+            (P::GlitchMode, 1.0),
         ],
         macros: VOCODER_MACROS,
     },

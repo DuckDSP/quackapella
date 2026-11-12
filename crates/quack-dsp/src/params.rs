@@ -7,7 +7,7 @@
 //! automation refer to them). Ranges reserved for the next steps:
 //! `100..` pitch detection, `200..` pitch / formant shift, `300..`
 //! autotune, `400..` harmonizer, `500..` vocoder, `600..` Manipulator
-//! style effects, `700..` macros.
+//! style effects, `700..` macros, `800..` layer routing.
 
 /// How a parameter maps between plain and normalized (0..1) values.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -187,9 +187,11 @@ pub enum ParamId {
     Macro2,
     Macro3,
     Macro4,
+    Routing,
+    Chain,
 }
 
-pub const PARAM_COUNT: usize = 86;
+pub const PARAM_COUNT: usize = 88;
 
 /// The four macro knobs (see [`crate::control`]).
 pub const MACRO_PARAMS: [ParamId; 4] = [
@@ -1057,6 +1059,26 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "routing",
+        host_id: 800,
+        name: "Routing",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::chain::Routing::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "chain",
+        host_id: 801,
+        name: "Chain Order",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::chain::Chain::COUNT,
+            default: 0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -1147,6 +1169,8 @@ impl ParamId {
         Self::Macro2,
         Self::Macro3,
         Self::Macro4,
+        Self::Routing,
+        Self::Chain,
     ];
 
     #[must_use]

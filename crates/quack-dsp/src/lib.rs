@@ -14,6 +14,7 @@
 //! | Module | Role |
 //! |---|---|
 //! | [`params`] | Parameter registry: ids, ranges, defaults (source of truth) |
+//! | [`chain`] | Layer routing: parallel or series, module order |
 //! | [`engine`] | Signal chain, latency compensation, dry/wet, bypass [1] |
 //! | [`latency`] | Latency per voice range, delay lines [1] |
 //! | [`midi`] | Held notes from the MIDI input [1] |
@@ -29,6 +30,7 @@
 //! | [`presets`] | Factory library and preset files [8] |
 
 pub mod autotune;
+pub mod chain;
 pub mod control;
 pub mod creative;
 pub mod denormal;

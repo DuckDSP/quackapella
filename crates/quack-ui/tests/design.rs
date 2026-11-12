@@ -106,6 +106,9 @@ fn editor_captures() {
             v.set(ParamId::VocoderLevel, 35.0);
             v.set(ParamId::CreativeOn, 1.0);
             v.set(ParamId::CreativeLevel, 60.0);
+            // Series: the choir into the vocoder, then the glitch.
+            v.set(ParamId::Routing, 1.0);
+            v.set(ParamId::Chain, 1.0);
         }
         v.set(ParamId::Macro1, 40.0);
         v.set(ParamId::Macro2, if mode == 2.0 { 30.0 } else { 0.0 });

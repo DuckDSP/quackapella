@@ -816,6 +816,25 @@ impl Harmonizer {
         &self.mix
     }
 
+    /// Notes the first voices sing now (fractional MIDI notes), for a
+    /// carrier that plays them (harmonies after the vocoder).
+    #[must_use]
+    pub fn sung_notes(&self) -> [Option<f64>; INTERVAL_VOICES] {
+        let mut out = [None; INTERVAL_VOICES];
+        if self.lead.is_none() || self.settings.mode == HarmonyMode::Off {
+            return out;
+        }
+        for (k, o) in out.iter_mut().enumerate() {
+            let s = &self.slots[k];
+            let audible =
+                self.settings.mode == HarmonyMode::Midi || self.settings.voice_gain[k] > 0.05;
+            if s.gate && s.env > 0.1 && audible {
+                *o = s.sung.filter(|n| (0.0..128.0).contains(n));
+            }
+        }
+        out
+    }
+
     /// Notes the voices sing now (rounded), bit n = note n, for the
     /// editor. Empty while the lead is unvoiced.
     #[must_use]
