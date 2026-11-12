@@ -754,7 +754,9 @@ fn voice_panel(
     );
     let shift = params.get_plain(ParamId::Pitch) + params.get_plain(ParamId::Fine) / 100.0;
     let formant = params.get_plain(ParamId::Formant);
+    let throat = params.get_plain(ParamId::Throat);
     let (line1, line2) = voice_summary(shift, formant);
+    let line2 = throat_summary(throat, params.get_plain(ParamId::ThroatPitch)).unwrap_or(line2);
     value(
         p,
         r.right_top() + vec2(-space::L, 20.0),
@@ -777,17 +779,20 @@ fn voice_panel(
     );
     let st_fmt = |v: f64| format!("{v:+.1}");
     let ct_fmt = |v: f64| format!("{v:+.0}");
-    let kw = r.width() / 3.0;
+    let pct = |v: f64| format!("{v:.0}");
+    let kw = r.width() / 5.0;
     let ky = r.center().y - 4.0;
-    let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 5] = [
         (ParamId::Pitch, &st_fmt),
         (ParamId::Fine, &ct_fmt),
         (ParamId::Formant, &st_fmt),
+        (ParamId::Throat, &ct_fmt),
+        (ParamId::ThroatPitch, &pct),
     ];
     for (i, (id, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let cx = r.left() + kw * (i as f32 + 0.5);
-        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
+        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 60.0, accent, fmt);
     }
 }
 
@@ -1013,7 +1018,7 @@ fn harmony_panel(
 
     let knob_d = 64.0;
     let kw = (r.width() - 2.0 * space::L) / 6.0;
-    let row1 = r.top() + 124.0;
+    let row1 = r.top() + 108.0;
     let cap_y = row1 - knob_d * 0.5 - 16.0;
     let intervals_on = mode != HarmonyMode::Midi;
     let key = note_name(params.get_plain(ParamId::Key).round().clamp(0.0, 11.0) as u8 + 60);
@@ -1097,6 +1102,27 @@ fn harmony_panel(
             if live { accent } else { dim },
             "",
         );
+        // And its place in the stereo field.
+        let pr = fr.translate(vec2(0.0, 26.0));
+        controls::fader(
+            ui,
+            params,
+            st,
+            quack_dsp::params::HARMONY_PAN_PARAMS[i],
+            pr,
+            if live { accent } else { dim },
+            "",
+        );
+        if i == quack_dsp::harmony::INTERVAL_VOICES - 1 {
+            text(
+                p,
+                pos2(r.left() + space::L + kw * 5.0, pr.center().y),
+                Align2::CENTER_CENTER,
+                "← Level and pan of each voice",
+                size::CAPTION - 1.0,
+                color::TEXT_FAINT,
+            );
+        }
     }
     let pct = |v: f64| format!("{v:.0}");
     let off = |v: f64| {
@@ -1143,24 +1169,27 @@ fn harmony_panel(
         }
     };
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String);
-    let knobs: [Knob; 6] = [
+    let knobs: [Knob; 8] = [
         (ParamId::Spread, "Spread", &pct),
         (ParamId::HarmonyHumanize, "Humanize", &off),
-        (ParamId::Character, "Character", &off),
-        (ParamId::Expression, "Expression", &pct),
+        (ParamId::HarmonyVibrato, "Vibrato", &off),
+        (ParamId::HarmonyTiming, "Timing", &off),
+        (ParamId::Character, "Timbre", &off),
+        (ParamId::Expression, "Express", &pct),
         (ParamId::Glide, "Glide", &ms),
         (ParamId::Double, "Double", &off),
     ];
+    let kw8 = kw * 6.0 / 8.0;
     for (i, (id, label, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
-        let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+        let cx = r.left() + space::L + kw8 * (i as f32 + 0.5);
         controls::knob_named(
             ui,
             params,
             st,
             id,
             pos2(cx, row2),
-            knob_d,
+            knob_d.min(kw8 - space::S),
             0.0,
             accent,
             fmt,
@@ -1784,6 +1813,30 @@ pub fn voice_summary(shift_st: f64, formant_st: f64) -> (String, String) {
         format!("Formants {formant_st:+.1} st ({dir}), pitch unchanged")
     };
     (line1, line2)
+}
+
+/// What the throat does, for the voice panel (`None` at rest).
+#[must_use]
+pub fn throat_summary(throat_pct: f64, link_pct: f64) -> Option<String> {
+    if throat_pct.abs() < 0.5 {
+        return None;
+    }
+    let t = throat_pct / 100.0;
+    let who = match t {
+        t if t <= -0.75 => "child",
+        t if t <= -0.35 => "younger, smaller",
+        t if t < 0.0 => "a little smaller",
+        t if t < 0.35 => "a little bigger",
+        t if t < 0.75 => "bigger, deeper",
+        _ => "giant",
+    };
+    let pitch = quack_dsp::throat::pitch_st(t, link_pct / 100.0);
+    let fmt = quack_dsp::throat::formant_st(t);
+    Some(if pitch.abs() < 0.05 {
+        format!("Throat: {who} · formants {fmt:+.1} st, body and air")
+    } else {
+        format!("Throat: {who} · formants {fmt:+.1} st, pitch {pitch:+.1} st")
+    })
 }
 
 /// Nearest note and the offset from it in cents, for a pitch in Hz.

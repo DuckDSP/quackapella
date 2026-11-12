@@ -42,6 +42,7 @@ use crate::shift::{Buses, LAYERS, Psola, semitones_to_ratio};
 /// heard as an effect, which is the Tune mode's job.
 pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
+use crate::throat::{self, Throat};
 use crate::vocoder::{Carrier, FollowChord, Vocoder, VocoderMode, bands_from_index};
 
 /// Smoothing time for gains and mix.
@@ -69,6 +70,11 @@ pub struct Engine {
     /// Transposition and formant shift, in semitones.
     pitch: Ramp,
     formant: Ramp,
+    /// Throat size (-1 shortest to +1 longest), its pitch link (0 to
+    /// 1) and its body and top filters (see [`crate::throat`]).
+    throat: Ramp,
+    throat_pitch: Ramp,
+    throat_eq: Throat,
     dry: [DelayLine; CHANNELS],
     notes: NoteStack,
     detector: Yin,
@@ -125,6 +131,9 @@ impl Engine {
             bypass: Ramp::new(0.0),
             pitch: Ramp::new(0.0),
             formant: Ramp::new(0.0),
+            throat: Ramp::new(0.0),
+            throat_pitch: Ramp::new(0.0),
+            throat_eq: Throat::default(),
             dry: Default::default(),
             notes: NoteStack::default(),
             detector: Yin::default(),
@@ -166,6 +175,8 @@ impl Engine {
             &mut self.mix,
             &mut self.pitch,
             &mut self.formant,
+            &mut self.throat,
+            &mut self.throat_pitch,
             &mut self.follow,
             &mut self.lead,
             &mut self.harmony_level,
@@ -183,6 +194,7 @@ impl Engine {
         self.detector.prepare(sample_rate, max_block);
         self.shifter.prepare(sample_rate, max);
         self.retuner.prepare(sample_rate);
+        self.throat_eq.prepare(sample_rate);
         self.robot.prepare(sample_rate);
         self.glitch.prepare(sample_rate);
         self.harmony.prepare(sample_rate);
@@ -239,6 +251,7 @@ impl Engine {
         self.detector.reset();
         self.shifter.reset();
         self.retuner.reset();
+        self.throat_eq.reset();
         self.robot.reset();
         self.glitch.reset();
         self.harmony.reset();
@@ -332,6 +345,8 @@ impl Engine {
                 (&mut self.pitch, st)
             }
             ParamId::Formant => (&mut self.formant, v),
+            ParamId::Throat => (&mut self.throat, v / 100.0),
+            ParamId::ThroatPitch => (&mut self.throat_pitch, v / 100.0),
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
                 self.update_tune();
@@ -371,7 +386,13 @@ impl Engine {
             | ParamId::HarmonyLevel1
             | ParamId::HarmonyLevel2
             | ParamId::HarmonyLevel3
-            | ParamId::HarmonyLevel4 => {
+            | ParamId::HarmonyLevel4
+            | ParamId::HarmonyVibrato
+            | ParamId::HarmonyTiming
+            | ParamId::HarmonyPan1
+            | ParamId::HarmonyPan2
+            | ParamId::HarmonyPan3
+            | ParamId::HarmonyPan4 => {
                 self.update_harmony(snap);
                 self.update_vocoder(snap);
                 return;
@@ -555,6 +576,12 @@ impl Engine {
         #[allow(clippy::cast_possible_truncation)]
         {
             s.spread = pct(ParamId::Spread) as f32;
+        }
+        s.vibrato = pct(ParamId::HarmonyVibrato);
+        s.timing = pct(ParamId::HarmonyTiming);
+        #[allow(clippy::cast_possible_truncation)]
+        for (p, id) in s.pan.iter_mut().zip(crate::params::HARMONY_PAN_PARAMS) {
+            *p = (v.get(id) / 100.0) as f32;
         }
         s.close = v.get(ParamId::CloseVoicing) >= 0.5;
         let double = if on { pct(ParamId::Double) } else { 0.0 };
@@ -787,9 +814,20 @@ impl Engine {
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
-            let transpose = self.pitch.tick();
+            let throat = self.throat.tick();
+            let throat_link = self.throat_pitch.tick();
+            #[allow(clippy::cast_possible_truncation)]
+            let (transpose, formant_st) = if throat == 0.0 {
+                (self.pitch.tick(), self.formant.tick())
+            } else {
+                let t = f64::from(throat);
+                (
+                    self.pitch.tick() + throat::pitch_st(t, f64::from(throat_link)) as f32,
+                    self.formant.tick() + throat::formant_st(t) as f32,
+                )
+            };
             self.retuner.transpose = f64::from(transpose);
-            let formant = semitones_to_ratio(self.formant.tick());
+            let formant = semitones_to_ratio(formant_st);
             let (in_l, in_r) = (*l * g_in, *r * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
@@ -820,9 +858,12 @@ impl Engine {
                 robot: &mut self.robot,
                 harmony: &mut self.harmony,
             };
+            // The throat's body and top, before the grains (the formant
+            // shift moves them with the rest of the tract).
+            let (sh_l, sh_r) = self.throat_eq.tick(throat, in_l, in_r);
             let buses = self
                 .shifter
-                .tick_buses(in_l, in_r, period, &mut steer, formant);
+                .tick_buses(sh_l, sh_r, period, &mut steer, formant);
             let voc_level = self.vocoder_level.tick();
             let vocoding = voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off;
             let sc = sidechain.map_or(0.0, |(a, b)| {

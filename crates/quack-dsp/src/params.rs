@@ -7,7 +7,8 @@
 //! automation refer to them). Ranges reserved for the next steps:
 //! `100..` pitch detection, `200..` pitch / formant shift, `300..`
 //! autotune, `400..` harmonizer, `500..` vocoder, `600..` Manipulator
-//! style effects, `700..` macros, `800..` layer routing.
+//! style effects, `700..` macros, `800..` layer routing, `1100..` throat and
+//! harmony humanize.
 
 /// How a parameter maps between plain and normalized (0..1) values.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -189,9 +190,25 @@ pub enum ParamId {
     Macro4,
     Routing,
     Chain,
+    Throat,
+    ThroatPitch,
+    HarmonyVibrato,
+    HarmonyTiming,
+    HarmonyPan1,
+    HarmonyPan2,
+    HarmonyPan3,
+    HarmonyPan4,
 }
 
-pub const PARAM_COUNT: usize = 88;
+pub const PARAM_COUNT: usize = 96;
+
+/// Stereo place of each harmony interval voice.
+pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
+    ParamId::HarmonyPan1,
+    ParamId::HarmonyPan2,
+    ParamId::HarmonyPan3,
+    ParamId::HarmonyPan4,
+];
 
 /// The four macro knobs (see [`crate::control`]).
 pub const MACRO_PARAMS: [ParamId; 4] = [
@@ -1079,6 +1096,94 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0,
         },
     },
+    ParamSpec {
+        key: "throat",
+        host_id: 1100,
+        name: "Throat",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: -100.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "throat_pitch",
+        host_id: 1101,
+        name: "Throat Pitch",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_vibrato",
+        host_id: 1110,
+        name: "Harmony Vibrato",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_timing",
+        host_id: 1111,
+        name: "Harmony Timing",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_pan_1",
+        host_id: 1120,
+        name: "Harmony 1 Pan",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: -100.0,
+            max: 100.0,
+            default: -100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_pan_2",
+        host_id: 1121,
+        name: "Harmony 2 Pan",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: -100.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_pan_3",
+        host_id: 1122,
+        name: "Harmony 3 Pan",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: -100.0,
+            max: 100.0,
+            default: -50.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_pan_4",
+        host_id: 1123,
+        name: "Harmony 4 Pan",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: -100.0,
+            max: 100.0,
+            default: 50.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -1171,6 +1276,14 @@ impl ParamId {
         Self::Macro4,
         Self::Routing,
         Self::Chain,
+        Self::Throat,
+        Self::ThroatPitch,
+        Self::HarmonyVibrato,
+        Self::HarmonyTiming,
+        Self::HarmonyPan1,
+        Self::HarmonyPan2,
+        Self::HarmonyPan3,
+        Self::HarmonyPan4,
     ];
 
     #[must_use]
