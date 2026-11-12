@@ -1409,7 +1409,7 @@ pub struct QuackParams {
 
     #[param(
         id = 940,
-        name = "Duck",
+        name = "Reverb Duck",
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
@@ -1850,6 +1850,17 @@ pub struct QuackParams {
     )]
     pub vocoder_drive: FloatParam,
 
+    #[param(
+        id = 945,
+        name = "Delay Duck",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_duck: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -2218,6 +2229,7 @@ impl QuackParams {
             (ParamId::CreativeDrive, &self.creative_drive),
             (ParamId::HarmonyDrive, &self.harmony_drive),
             (ParamId::VocoderDrive, &self.vocoder_drive),
+            (ParamId::DelayDuck, &self.delay_duck),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }

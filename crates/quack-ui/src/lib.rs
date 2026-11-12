@@ -127,6 +127,8 @@ pub struct UiState {
     scale_menu: bool,
     /// Layer shown in the big panel.
     page: Page,
+    /// Layer whose effects the mixer shows (the last layer page).
+    mix_layer: Page,
     /// Preset browser, values of this frame.
     presets: perform::PresetUi,
     /// Effect shown on the FX page.
@@ -151,6 +153,7 @@ impl Default for UiState {
             centre: 60.0,
             scale_menu: false,
             page: Page::Voice,
+            mix_layer: Page::Voice,
             presets: perform::PresetUi::default(),
             fx_tab: FxTab::default(),
             vocoder_tab: 0,
@@ -229,6 +232,9 @@ impl UiState {
     /// Show a layer's page in the big panel.
     pub fn set_page(&mut self, page: Page) {
         self.page = page;
+        if page != Page::Fx {
+            self.mix_layer = page;
+        }
     }
 
     /// Close an edit left open (window closed mid-drag).
@@ -385,7 +391,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         pos2(voice_r.right() + space::M, row_top),
         pos2(inner.right(), row_top + row_h),
     );
-    mixer_panel(ui, params, st, mix_r, accent);
+    mixer_panel(ui, params, st, mix_r);
     let midi_r = Rect::from_min_max(pos2(split_x, row_top), mix_r.max);
 
     // Perform row: snapshots and morph under the voice and mixer,
@@ -680,6 +686,9 @@ fn layer_tab(
     );
     if resp.clicked() {
         st.page = page;
+        if page != Page::Fx {
+            st.mix_layer = page;
+        }
     }
     if shown {
         paint::rounded(
@@ -1424,55 +1433,62 @@ fn vocoder_panel(
     );
 }
 
-/// The mixer: input, mix and output levels, then for each layer its
-/// delay and reverb sends and its chorus and drive amounts.
-fn mixer_panel(
-    ui: &egui::Ui,
-    params: &dyn ParamAccess,
-    st: &mut UiState,
-    r: Rect,
-    accent: Color32,
-) {
+/// The mixer, two blocks side by side: the effects of the layer shown
+/// (its delay and reverb sends, its chorus and drive amounts, in its
+/// colour), then the global levels (in blue).
+fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect) {
     let p = ui.painter();
-    panel(p, r);
+    let mode = VoiceMode::from_index(params.get_plain(ParamId::Mode));
+    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
+    // The FX page keeps the last layer shown; in series one set of
+    // amounts serves the whole chain (the voice's).
+    let layer = if series { Page::Voice } else { st.mix_layer };
+    let col = Page::ALL.iter().position(|&l| l == layer).unwrap_or(0);
+    let fx_w = (r.width() - space::M) * 4.0 / 7.0;
+    let fx_r = Rect::from_min_size(r.min, vec2(fx_w, r.height()));
+    let gl_r = Rect::from_min_max(pos2(fx_r.right() + space::M, r.top()), r.max);
+    panel(p, fx_r);
+    panel(p, gl_r);
+
+    let acc = page_accent(layer, mode);
+    let layer_live = layer_on(params, layer);
+    let title = if series {
+        "FX · Chain".to_owned()
+    } else {
+        format!("FX · {}", layer.name())
+    };
+    let title_y = r.top() + 20.0;
     text(
         p,
-        r.left_top() + vec2(space::L, 20.0),
+        pos2(fx_r.left() + space::L, title_y),
         Align2::LEFT_CENTER,
-        "Mixer",
+        &title,
         size::LABEL,
-        color::TEXT_DIM,
+        if layer_live { acc } else { color::TEXT_FAINT },
+    );
+    text(
+        p,
+        pos2(fx_r.right() - space::L, title_y),
+        Align2::RIGHT_CENTER,
+        if series {
+            "Whole chain"
+        } else {
+            "Pick a layer above"
+        },
+        size::CAPTION,
+        color::TEXT_FAINT,
     );
     let fx = params.get_plain(ParamId::FxOn) >= 0.5;
-    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
-    let row_y = |i: usize| {
-        #[allow(clippy::cast_precision_loss)]
-        let y = r.top() + 40.0 + 27.0 * i as f32;
-        y
-    };
-    let fh = 21.0;
-    // Levels, on the right.
-    let lv_w = 118.0;
-    let lv_x = r.right() - space::L - lv_w;
-    for (i, (id, name)) in [
-        (ParamId::InputGain, "In"),
-        (ParamId::Mix, "Mix"),
-        (ParamId::OutputGain, "Out"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let fr = Rect::from_min_size(pos2(lv_x, row_y(i)), vec2(lv_w, fh));
-        controls::fader(ui, params, st, id, fr, accent, name);
-    }
-    // The matrix: rows are the effects, columns the layers.
-    let label_w = 54.0;
-    let left = r.left() + space::L + label_w;
-    let right = lv_x - space::L;
-    let gap = space::XS;
-    let cw = (right - left - 3.0 * gap) / 4.0;
     let fx_switch = |id: ParamId| fx && params.get_plain(id) >= 0.5;
-    let rows: [(&str, [ParamId; 4], bool); 4] = [
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let knob_y = r.top() + 40.0 + (r.height() - 40.0) / 2.0 - 10.0;
+    let knobs: [(&str, [ParamId; 4], bool); 4] = [
         (
             "Delay",
             quack_dsp::params::DELAY_SEND_PARAMS,
@@ -1494,46 +1510,61 @@ fn mixer_panel(
             fx_switch(ParamId::DriveOn),
         ),
     ];
-    for (c, page) in Page::ALL.into_iter().enumerate() {
+    #[allow(clippy::cast_precision_loss)]
+    let kw = (fx_r.width() - 2.0 * space::L) / knobs.len() as f32;
+    for (i, (name, ids, on)) in knobs.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
-        let x = left + (cw + gap) * c as f32;
-        let live = layer_on(params, page) && (!series || c == 0);
-        let acc = page_accent(page, VoiceMode::from_index(params.get_plain(ParamId::Mode)));
-        let name = if series && c == 0 {
-            "Chain"
+        let cx = fx_r.left() + space::L + kw * (i as f32 + 0.5);
+        let a = if layer_live && *on {
+            acc
         } else {
-            page.name()
+            acc.gamma_multiply(0.35)
         };
-        text(
-            p,
-            pos2(x + cw / 2.0, r.top() + 20.0),
-            Align2::CENTER_CENTER,
+        controls::knob_named(
+            ui,
+            params,
+            st,
+            ids[col],
+            pos2(cx, knob_y),
+            54.0,
+            0.0,
+            a,
+            &off,
             name,
-            size::CAPTION,
-            if live { acc } else { color::TEXT_FAINT },
         );
-        for (i, (_, ids, on)) in rows.iter().enumerate() {
-            let fr = Rect::from_min_size(pos2(x, row_y(i)), vec2(cw, fh));
-            let a = if live && *on {
-                acc
-            } else {
-                acc.gamma_multiply(0.3)
-            };
-            controls::fader(ui, params, st, ids[c], fr, a, "");
-        }
     }
-    for (i, (name, _, on)) in rows.iter().enumerate() {
-        text(
-            p,
-            pos2(r.left() + space::L, row_y(i) + fh / 2.0),
-            Align2::LEFT_CENTER,
+
+    text(
+        p,
+        pos2(gl_r.left() + space::L, title_y),
+        Align2::LEFT_CENTER,
+        "Global",
+        size::LABEL,
+        color::TUNE,
+    );
+    let gain = |v: f64| format!("{v:+.0}");
+    let pct = |v: f64| format!("{v:.0}");
+    #[allow(clippy::type_complexity)]
+    let levels: [(ParamId, &str, f64, &dyn Fn(f64) -> String); 3] = [
+        (ParamId::InputGain, "In", 0.0, &gain),
+        (ParamId::Mix, "Mix", 0.0, &pct),
+        (ParamId::OutputGain, "Out", 0.0, &gain),
+    ];
+    let gw = (gl_r.width() - 2.0 * space::L) / 3.0;
+    for (i, (id, name, floor, fmt)) in levels.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = gl_r.left() + space::L + gw * (i as f32 + 0.5);
+        controls::knob_named(
+            ui,
+            params,
+            st,
+            id,
+            pos2(cx, knob_y),
+            54.0,
+            floor,
+            color::TUNE,
+            fmt,
             name,
-            size::CAPTION,
-            if *on {
-                color::TEXT_DIM
-            } else {
-                color::TEXT_FAINT
-            },
         );
     }
 }
@@ -1907,40 +1938,48 @@ fn fx_panel(
                 (ParamId::DelayLowCut, "Low Cut", &hz, live(true)),
             ];
             fx_knobs(ui, params, st, r, y1, 5, 0, &k1);
-            // Sync, its note value and ping-pong, then the options.
+            // Sync, its note value and ping-pong in the first column,
+            // then the options.
             let kw = inner_w / 5.0;
-            let ty = y2 - 30.0;
-            let sr = Rect::from_min_size(pos2(r.left() + space::L, ty), vec2(kw - space::XS, 26.0));
-            controls::toggle(ui, params, ParamId::DelaySync, sr, "Sync", live(true));
+            let ty = y2 - 43.0;
+            let cell = |i: f32| {
+                Rect::from_min_size(
+                    pos2(r.left() + space::L, ty + 30.0 * i),
+                    vec2(kw - space::XS, 26.0),
+                )
+            };
+            controls::toggle(
+                ui,
+                params,
+                ParamId::DelaySync,
+                cell(0.0),
+                "Sync",
+                live(true),
+            );
             let div = quack_dsp::fx::Division::from_index(params.get_plain(ParamId::DelayDivision));
-            let dr =
-                Rect::from_min_size(pos2(sr.right() + space::XS, ty), vec2(kw - space::XS, 26.0));
             controls::stepper(
                 ui,
                 params,
                 ParamId::DelayDivision,
-                dr,
+                cell(1.0),
                 div.name(),
                 live(sync),
-            );
-            let pr = Rect::from_min_size(
-                pos2(r.left() + space::L, ty + 32.0),
-                vec2(kw * 2.0 - space::XS, 26.0),
             );
             controls::toggle(
                 ui,
                 params,
                 ParamId::DelayPingPong,
-                pr,
+                cell(2.0),
                 "Ping-Pong",
                 live(true),
             );
-            let k2: [FxKnob; 3] = [
+            let k2: [FxKnob; 4] = [
                 (ParamId::DelayMod, "Wobble", &off, live(true)),
                 (ParamId::DelayWidth, "Width", &off, live(!ping)),
                 (ParamId::DelayToReverb, "To Reverb", &off, live(true)),
+                (ParamId::DelayDuck, "Duck", &off, live(true)),
             ];
-            fx_knobs(ui, params, st, r, y2, 5, 2, &k2);
+            fx_knobs(ui, params, st, r, y2, 5, 1, &k2);
         }
         FxTab::Reverb => {
             let k1: [FxKnob; 5] = [

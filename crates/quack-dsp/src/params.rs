@@ -278,9 +278,10 @@ pub enum ParamId {
     CreativeDrive,
     HarmonyDrive,
     VocoderDrive,
+    DelayDuck,
 }
 
-pub const PARAM_COUNT: usize = 175;
+pub const PARAM_COUNT: usize = 176;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -1585,7 +1586,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
     ParamSpec {
         key: "duck",
         host_id: 940,
-        name: "Duck",
+        name: "Reverb Duck",
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
@@ -2099,6 +2100,17 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 100.0,
         },
     },
+    ParamSpec {
+        key: "delay_duck",
+        host_id: 945,
+        name: "Delay Duck",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -2278,6 +2290,7 @@ impl ParamId {
         Self::CreativeDrive,
         Self::HarmonyDrive,
         Self::VocoderDrive,
+        Self::DelayDuck,
     ];
 
     #[must_use]

@@ -361,7 +361,7 @@ const FX_MACROS: [MacroDef; MACRO_COUNT] = [
     mac("Space", &[(P::VoiceReverb, 0.4), (P::ReverbLevel, 0.3)]),
     mac("Echo", &[(P::DelayLevel, 0.6), (P::DelayFeedback, 0.3)]),
     mac("Squash", &[(P::CompThreshold, -0.4), (P::CompMakeup, 0.2)]),
-    mac("Duck", &[(P::Duck, 0.8)]),
+    mac("Duck", &[(P::Duck, 0.8), (P::DelayDuck, 0.8)]),
 ];
 
 const SYNTH_CLEAN: [(ParamId, f64); 3] =
@@ -896,6 +896,7 @@ pub const FACTORY: &[Factory] = &[
             (P::ReverbLevel, 50.0),
             (P::ReverbDecay, 1.8),
             (P::Duck, 50.0),
+            (P::DelayDuck, 50.0),
             (P::VoiceReverb, 25.0),
             (P::VoiceDelay, 25.0),
             (P::LowCut, 90.0),
@@ -929,6 +930,7 @@ pub const FACTORY: &[Factory] = &[
             (P::ReverbLevel, 80.0),
             (P::ReverbDecay, 4.5),
             (P::Duck, 40.0),
+            (P::DelayDuck, 40.0),
             (P::VoiceReverb, 10.0),
             (P::HarmonyReverb, 80.0),
             (P::ChorusOn, ON),

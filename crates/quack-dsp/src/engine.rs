@@ -537,6 +537,7 @@ impl Engine {
             | ParamId::ReverbPredelay
             | ParamId::ReverbLevel
             | ParamId::Duck
+            | ParamId::DelayDuck
             | ParamId::VoiceReverb
             | ParamId::CreativeReverb
             | ParamId::HarmonyReverb
@@ -715,6 +716,7 @@ impl Engine {
                 0.0
             },
             duck: pct(ParamId::Duck),
+            delay_duck: pct(ParamId::DelayDuck),
             delay_mod: pct(ParamId::DelayMod),
             delay_width: pct(ParamId::DelayWidth),
             delay_low_cut_hz: f(ParamId::DelayLowCut),

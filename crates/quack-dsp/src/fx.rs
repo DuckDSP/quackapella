@@ -397,8 +397,10 @@ pub struct SpaceSettings {
     pub damping: f32,
     pub predelay_ms: f32,
     pub reverb_level: f32,
-    /// How much the singing voice lowers the bus, 0-1.
+    /// How much the singing voice lowers the reverb, 0-1.
     pub duck: f32,
+    /// The same for the delay, 0-1.
+    pub delay_duck: f32,
     /// Tape-like wobble of the delay time, 0-1.
     pub delay_mod: f32,
     /// Right side later than the left (not in ping-pong), 0-1.
@@ -430,6 +432,7 @@ impl Default for SpaceSettings {
             predelay_ms: 20.0,
             reverb_level: 0.6,
             duck: 0.0,
+            delay_duck: 0.0,
             delay_mod: 0.0,
             delay_width: 0.0,
             delay_low_cut_hz: 150.0,
@@ -714,6 +717,11 @@ impl Space {
         let (l, r) = delay;
         let mut out = (0.0, 0.0);
         let mut fed = 0.0;
+        let env = if s.duck > 0.0 || s.delay_duck > 0.0 {
+            self.duck_env.tick(key)
+        } else {
+            0.0
+        };
 
         if s.delay_level > 0.0 {
             // The time glides to a new value (tape-like), no click.
@@ -748,8 +756,11 @@ impl Space {
             }
             self.delay[0].push(push[0]);
             self.delay[1].push(push[1]);
-            out.0 += dl * s.delay_level;
-            out.1 += dr * s.delay_level;
+            // Ducked by the singing voice on the way out only: the
+            // repeats keep building up underneath.
+            let g = self.duck_gain(s.delay_duck, env);
+            out.0 += dl * s.delay_level * g;
+            out.1 += dr * s.delay_level * g;
             fed = 0.5 * (dl + dr) * s.delay_level * s.delay_to_reverb;
         }
 
@@ -803,18 +814,18 @@ impl Space {
                     wr += taps[i];
                 }
             }
-            let g = 0.5 * s.reverb_level;
+            let g = 0.5 * s.reverb_level * self.duck_gain(s.duck, env);
             let (mid, side) = (0.5 * (wl + wr), 0.5 * (wl - wr) * s.reverb_width);
             out.0 += (mid + side) * g;
             out.1 += (mid - side) * g;
         }
 
-        if s.duck > 0.0 {
-            let env = self.duck_env.tick(key);
-            let g = 1.0 / (1.0 + s.duck * 12.0 * env);
-            out = (out.0 * g, out.1 * g);
-        }
         out
+    }
+
+    #[inline]
+    fn duck_gain(&self, amount: f32, env: f32) -> f32 {
+        1.0 / (1.0 + amount * 12.0 * env)
     }
 }
 
@@ -1415,6 +1426,36 @@ mod tests {
         };
         let open = run(&mut s, 0.0);
         let ducked = run(&mut s, 1.0);
+        assert!(ducked < 0.5 * open, "{ducked} vs {open}");
+    }
+
+    #[test]
+    fn delay_and_reverb_duck_on_their_own() {
+        let mut s = Space::default();
+        s.prepare(48_000.0);
+        let run = |s: &mut Space, set: SpaceSettings| {
+            s.set(set);
+            s.reset();
+            let x = sine(48_000.0, 220.0, 24_000, 0.3);
+            let out: Vec<f32> = x.iter().map(|&v| s.tick(v, v, v).0).collect();
+            rms(&out[12_000..])
+        };
+        let delay = SpaceSettings {
+            reverb_level: 0.0,
+            delay_level: 1.0,
+            ..SpaceSettings::default()
+        };
+        let open = run(&mut s, delay);
+        // The reverb's duck leaves the delay alone.
+        let other = run(&mut s, SpaceSettings { duck: 1.0, ..delay });
+        assert!((other - open).abs() < 1e-6 * open.max(1.0));
+        let ducked = run(
+            &mut s,
+            SpaceSettings {
+                delay_duck: 1.0,
+                ..delay
+            },
+        );
         assert!(ducked < 0.5 * open, "{ducked} vs {open}");
     }
 
