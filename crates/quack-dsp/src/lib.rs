@@ -25,6 +25,7 @@
 //! | [`creative`] | Robot and glitch of the Creative mode [5] |
 //! | [`harmony`] | MIDI-driven harmony voices [6] |
 //! | [`vocoder`] | Vocoder and talkbox [7] |
+//! | [`fx`] | Input dynamics, delay and reverb on sends |
 //! | [`denormal`] | Flush-to-zero while processing [9] |
 //! | [`control`] | Macros, MIDI learn, program changes [8] |
 //! | [`presets`] | Factory library and preset files [8] |
@@ -35,6 +36,7 @@ pub mod control;
 pub mod creative;
 pub mod denormal;
 pub mod engine;
+pub mod fx;
 pub mod harmony;
 pub mod latency;
 pub mod midi;

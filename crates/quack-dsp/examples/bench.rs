@@ -117,6 +117,20 @@ const CASES: &[Case] = &[
         ],
         notes: &[48, 55, 60, 64, 67, 71, 74, 79],
     },
+    Case {
+        name: "natural + every effect",
+        params: &[
+            ("fx_on", 1.0),
+            ("gate", -50.0),
+            ("deess", 50.0),
+            ("comp_ratio", 4.0),
+            ("delay_level", 40.0),
+            ("delay_ping_pong", 1.0),
+            ("reverb_level", 60.0),
+            ("duck", 40.0),
+        ],
+        notes: &[],
+    },
 ];
 
 fn main() {

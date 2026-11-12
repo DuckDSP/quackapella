@@ -90,6 +90,9 @@ pub struct View {
     pub harmony_notes: u128,
     /// Notes the vocoder's carrier plays, bit n = note n.
     pub vocoder_notes: u128,
+    /// Gain reduction of the input compressor and de-esser, dB (≤ 0).
+    pub comp_db: f32,
+    pub deess_db: f32,
 }
 
 /// Seconds of pitch history in the graph.
@@ -146,10 +149,21 @@ pub enum Page {
     Creative,
     Harmony,
     Vocoder,
+    /// The voice effects: not a layer, the bus after them.
+    Fx,
 }
 
 impl Page {
+    /// The layers.
     pub const ALL: [Self; 4] = [Self::Voice, Self::Creative, Self::Harmony, Self::Vocoder];
+    /// Every page: the layers, then the effects.
+    pub const PAGES: [Self; 5] = [
+        Self::Voice,
+        Self::Creative,
+        Self::Harmony,
+        Self::Vocoder,
+        Self::Fx,
+    ];
 
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -158,6 +172,7 @@ impl Page {
             Self::Creative => "Creative",
             Self::Harmony => "Harmony",
             Self::Vocoder => "Vocoder",
+            Self::Fx => "FX",
         }
     }
 
@@ -169,6 +184,7 @@ impl Page {
             Self::Creative => Some(ParamId::CreativeOn),
             Self::Harmony => Some(ParamId::HarmonyOn),
             Self::Vocoder => Some(ParamId::VocoderOn),
+            Self::Fx => Some(ParamId::FxOn),
         }
     }
 
@@ -180,6 +196,7 @@ impl Page {
             Self::Creative => ParamId::CreativeLevel,
             Self::Harmony => ParamId::HarmonyLevel,
             Self::Vocoder => ParamId::VocoderLevel,
+            Self::Fx => ParamId::FxLevel,
         }
     }
 }
@@ -214,6 +231,7 @@ pub fn page_accent(page: Page, style: VoiceMode) -> Color32 {
         Page::Creative => color::CREATIVE,
         Page::Harmony => color::SYNTH,
         Page::Vocoder => color::VOCODER,
+        Page::Fx => color::FX,
     }
 }
 
@@ -325,6 +343,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         Page::Creative => creative_panel(ui, params, st, view, graph_r, page_acc),
         Page::Harmony => harmony_panel(ui, params, st, view, graph_r, page_acc),
         Page::Vocoder => vocoder_panel(ui, params, st, view, graph_r, page_acc),
+        Page::Fx => fx_panel(ui, params, st, view, graph_r, page_acc),
     }
 
     // Bottom row: voice, level, MIDI.
@@ -450,7 +469,7 @@ fn layers_panel(
     let row1 = r.top() + 9.0;
     let row2 = r.top() + 47.0;
     // Right block: voice range and latency, then the style.
-    let right_w = 290.0;
+    let right_w = 262.0;
     let voice_r = Rect::from_min_size(pos2(r.right() - space::L - 150.0, row1), vec2(150.0, 28.0));
     let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
     controls::stepper(
@@ -502,10 +521,13 @@ fn layers_panel(
     let order = layer_order(series, chain);
     let left = route_x + routing_w + space::M;
     let right = low_r.left() - space::XL;
-    let gap = 18.0;
+    let gap = 12.0;
+    // The layers, then the effects' cell after a gap (they come last,
+    // whatever the routing).
+    let cells = order.len() + 1;
     #[allow(clippy::cast_precision_loss)]
-    let w = (right - left - gap * (order.len() - 1) as f32) / order.len() as f32;
-    for (i, page) in order.into_iter().enumerate() {
+    let w = (right - left - gap * (cells - 1) as f32) / cells as f32;
+    for (i, page) in order.into_iter().chain([Page::Fx]).enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let x = left + (w + gap) * i as f32;
         let acc = page_accent(page, style);
@@ -513,7 +535,10 @@ fn layers_panel(
         let tab = Rect::from_min_size(pos2(x, row1), vec2(w, 28.0));
         layer_tab(ui, params, st, tab, page, on, acc);
         let fader = Rect::from_min_size(pos2(x, row2), vec2(w, 28.0));
-        let label = if page == Page::Voice { "Lead" } else { "Level" };
+        let label = match page {
+            Page::Voice => "Lead",
+            _ => "Level",
+        };
         controls::fader(
             ui,
             params,
@@ -523,7 +548,7 @@ fn layers_panel(
             if on { acc } else { acc.gamma_multiply(0.35) },
             label,
         );
-        if series && i > 0 {
+        if series && i > 0 && page != Page::Fx {
             let g = Rect::from_min_size(pos2(x - gap, row1), vec2(gap, row2 + 28.0 - row1));
             chain_link(ui, params, g, chain, i - 1);
         }
@@ -1332,6 +1357,201 @@ fn vocoder_panel(
     );
 }
 
+/// The voice effects: dynamics at the input (gate, de-esser,
+/// compressor), then delay and reverb on a bus fed by each layer's send.
+fn fx_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    layer_switch(ui, params, ParamId::FxOn, r, "FX", accent);
+    let on = params.get_plain(ParamId::FxOn) >= 0.5;
+    let dim = accent.gamma_multiply(0.35);
+    let live = |b: bool| if b && on { accent } else { dim };
+    // Gain reduction, while it works.
+    let gr = if !on {
+        "Off · nothing added to the latency".to_owned()
+    } else if view.comp_db < -0.1 || view.deess_db < -0.1 {
+        format!(
+            "Comp {:.1} dB · De-ess {:.1} dB",
+            view.comp_db, view.deess_db
+        )
+    } else {
+        "No latency added".to_owned()
+    };
+    text(
+        p,
+        pos2(r.right() - space::L, r.top() + 22.0),
+        Align2::RIGHT_CENTER,
+        &gr,
+        size::CAPTION,
+        if on && view.comp_db < -0.1 {
+            accent
+        } else {
+            color::TEXT_FAINT
+        },
+    );
+
+    let off_db = |v: f64| {
+        if v <= f64::from(quack_dsp::fx::GATE_OFF_DB) + 0.01 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let pct = |v: f64| format!("{v:.0}");
+    let db = |v: f64| format!("{v:.0}");
+    let khz = |v: f64| format!("{:.1}k", v / 1000.0);
+    let ratio = |v: f64| {
+        if v < 1.01 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    let ms = |v: f64| {
+        if v < 10.0 {
+            format!("{v:.1}")
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let secs = |v: f64| format!("{v:.1}s");
+    let comp = params.get_plain(ParamId::CompRatio) > 1.01;
+    let deess = params.get_plain(ParamId::DeEss) > 0.5;
+    let sync = params.get_plain(ParamId::DelaySync) >= 0.5;
+    let delay = params.get_plain(ParamId::DelayLevel) > 0.5;
+    let reverb = params.get_plain(ParamId::ReverbLevel) > 0.5;
+    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
+    type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, Color32);
+    let row1: [Knob; 8] = [
+        (ParamId::Gate, "Gate", &off_db, live(true)),
+        (ParamId::DeEss, "De-Ess", &off, live(true)),
+        (ParamId::DeEssFreq, "Freq", &khz, live(deess)),
+        (ParamId::CompThreshold, "Thresh", &db, live(comp)),
+        (ParamId::CompRatio, "Ratio", &ratio, live(true)),
+        (ParamId::CompAttack, "Attack", &ms, live(comp)),
+        (ParamId::CompRelease, "Release", &ms, live(comp)),
+        (ParamId::CompMakeup, "Makeup", &db, live(true)),
+    ];
+    let row2: [Knob; 8] = [
+        (ParamId::DelayLevel, "Delay", &off, live(true)),
+        (ParamId::DelayTime, "Time", &ms, live(delay && !sync)),
+        (ParamId::DelayFeedback, "Feedback", &pct, live(delay)),
+        (ParamId::DelayTone, "Tone", &pct, live(delay)),
+        (ParamId::ReverbLevel, "Reverb", &off, live(true)),
+        (ParamId::ReverbDecay, "Decay", &secs, live(reverb)),
+        (ParamId::ReverbDamping, "Damping", &pct, live(reverb)),
+        (ParamId::ReverbPredelay, "Pre-Delay", &ms, live(reverb)),
+    ];
+    let layer = |pg: Page, b: bool| {
+        if on && b {
+            page_accent(pg, VoiceMode::Natural)
+        } else {
+            dim
+        }
+    };
+    let row3: [Knob; 5] = [
+        (ParamId::Duck, "Duck", &off, live(delay || reverb)),
+        (
+            ParamId::SendVoice,
+            if series { "Chain" } else { "Voice" },
+            &pct,
+            layer(Page::Voice, true),
+        ),
+        (
+            ParamId::SendCreative,
+            "Creative",
+            &pct,
+            layer(Page::Creative, !series),
+        ),
+        (
+            ParamId::SendHarmony,
+            "Harmony",
+            &pct,
+            layer(Page::Harmony, !series),
+        ),
+        (
+            ParamId::SendVocoder,
+            "Vocoder",
+            &pct,
+            layer(Page::Vocoder, !series),
+        ),
+    ];
+    let knob_d = 40.0;
+    let inner_w = r.width() - 2.0 * space::L;
+    let kw = inner_w / 8.0;
+    let y1 = r.top() + 84.0;
+    let y2 = y1 + 86.0;
+    let y3 = y2 + 86.0;
+    for (row, y, x0) in [
+        (&row1[..], y1, 0.0),
+        (&row2[..], y2, 0.0),
+        (&row3[..], y3, 3.0),
+    ] {
+        for (i, (id, name, fmt, acc)) in row.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let cx = r.left() + space::L + kw * (x0 + i as f32 + 0.5);
+            controls::knob_named(
+                ui,
+                params,
+                st,
+                *id,
+                pos2(cx, y),
+                knob_d,
+                id.spec().kind.min(),
+                *acc,
+                *fmt,
+                name,
+            );
+        }
+    }
+    // Delay sync, its note value, ping-pong (row 3, left).
+    let ty = y3 - 24.0;
+    let sr = Rect::from_min_size(
+        pos2(r.left() + space::L, ty),
+        vec2(kw * 1.5 - space::XS, 24.0),
+    );
+    controls::toggle(ui, params, ParamId::DelaySync, sr, "Sync", live(delay));
+    let pr = Rect::from_min_size(
+        pos2(sr.right() + space::XS, ty),
+        vec2(kw * 1.5 - space::S, 24.0),
+    );
+    controls::toggle(
+        ui,
+        params,
+        ParamId::DelayPingPong,
+        pr,
+        "Ping-Pong",
+        live(delay),
+    );
+    let dr = Rect::from_min_size(
+        pos2(r.left() + space::L, ty + 28.0),
+        vec2(kw * 3.0 - space::S, 24.0),
+    );
+    let div = quack_dsp::fx::Division::from_index(params.get_plain(ParamId::DelayDivision));
+    controls::stepper(
+        ui,
+        params,
+        ParamId::DelayDivision,
+        dr,
+        div.name(),
+        live(delay && sync),
+    );
+}
+
 fn held_class(held: u128, class: u8) -> bool {
     (0..128u8).any(|n| n % 12 == class && held & (1u128 << n) != 0)
 }
@@ -1893,7 +2113,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        for (mode, page) in Page::ALL.into_iter().enumerate() {
+        for (mode, page) in Page::PAGES.into_iter().enumerate() {
             let mode = u8::try_from(mode).unwrap_or(0);
             st.set_page(page);
             {
@@ -1916,6 +2136,8 @@ mod tests {
                 frozen: mode == 2,
                 harmony_notes: if mode == 3 { 1 << 64 } else { 0 },
                 vocoder_notes: 0,
+                comp_db: -3.5,
+                deess_db: -1.0,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

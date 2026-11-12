@@ -7,7 +7,8 @@
 //! automation refer to them). Ranges reserved for the next steps:
 //! `100..` pitch detection, `200..` pitch / formant shift, `300..`
 //! autotune, `400..` harmonizer, `500..` vocoder, `600..` Manipulator
-//! style effects, `700..` macros, `800..` layer routing.
+//! style effects, `700..` macros, `800..` layer routing, `900..` voice effects (dynamics, delay,
+//! reverb).
 
 /// How a parameter maps between plain and normalized (0..1) values.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -189,9 +190,35 @@ pub enum ParamId {
     Macro4,
     Routing,
     Chain,
+    FxOn,
+    FxLevel,
+    Gate,
+    DeEss,
+    DeEssFreq,
+    CompThreshold,
+    CompRatio,
+    CompAttack,
+    CompRelease,
+    CompMakeup,
+    DelaySync,
+    DelayDivision,
+    DelayTime,
+    DelayFeedback,
+    DelayPingPong,
+    DelayTone,
+    DelayLevel,
+    ReverbDecay,
+    ReverbDamping,
+    ReverbPredelay,
+    ReverbLevel,
+    Duck,
+    SendVoice,
+    SendCreative,
+    SendHarmony,
+    SendVocoder,
 }
 
-pub const PARAM_COUNT: usize = 88;
+pub const PARAM_COUNT: usize = 114;
 
 /// The four macro knobs (see [`crate::control`]).
 pub const MACRO_PARAMS: [ParamId; 4] = [
@@ -1079,6 +1106,279 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0,
         },
     },
+    ParamSpec {
+        key: "fx_on",
+        host_id: 900,
+        name: "FX On",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "fx_level",
+        host_id: 901,
+        name: "FX Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "gate",
+        host_id: 910,
+        name: "Gate",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -80.0,
+            max: -20.0,
+            default: -80.0,
+        },
+    },
+    ParamSpec {
+        key: "deess",
+        host_id: 911,
+        name: "De-Ess",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "deess_freq",
+        host_id: 912,
+        name: "De-Ess Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 3000.0,
+            max: 12000.0,
+            default: 6500.0,
+        },
+    },
+    ParamSpec {
+        key: "comp_threshold",
+        host_id: 913,
+        name: "Comp Threshold",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -48.0,
+            max: 0.0,
+            default: -18.0,
+        },
+    },
+    ParamSpec {
+        key: "comp_ratio",
+        host_id: 914,
+        name: "Comp Ratio",
+        unit: "",
+        kind: ParamKind::Float {
+            min: 1.0,
+            max: 20.0,
+            default: 1.0,
+        },
+    },
+    ParamSpec {
+        key: "comp_attack",
+        host_id: 915,
+        name: "Comp Attack",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 0.1,
+            max: 50.0,
+            default: 5.0,
+        },
+    },
+    ParamSpec {
+        key: "comp_release",
+        host_id: 916,
+        name: "Comp Release",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 10.0,
+            max: 800.0,
+            default: 120.0,
+        },
+    },
+    ParamSpec {
+        key: "comp_makeup",
+        host_id: 917,
+        name: "Comp Makeup",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 24.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "delay_sync",
+        host_id: 920,
+        name: "Delay Sync",
+        unit: "",
+        kind: ParamKind::Bool { default: true },
+    },
+    ParamSpec {
+        key: "delay_division",
+        host_id: 921,
+        name: "Delay Division",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::fx::Division::COUNT,
+            default: 4,
+        },
+    },
+    ParamSpec {
+        key: "delay_time",
+        host_id: 922,
+        name: "Delay Time",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 10.0,
+            max: 2000.0,
+            default: 375.0,
+        },
+    },
+    ParamSpec {
+        key: "delay_feedback",
+        host_id: 923,
+        name: "Delay Feedback",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 95.0,
+            default: 35.0,
+        },
+    },
+    ParamSpec {
+        key: "delay_ping_pong",
+        host_id: 924,
+        name: "Delay Ping-Pong",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "delay_tone",
+        host_id: 925,
+        name: "Delay Tone",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
+    ParamSpec {
+        key: "delay_level",
+        host_id: 926,
+        name: "Delay Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "reverb_decay",
+        host_id: 930,
+        name: "Reverb Decay",
+        unit: "s",
+        kind: ParamKind::Float {
+            min: 0.2,
+            max: 10.0,
+            default: 2.0,
+        },
+    },
+    ParamSpec {
+        key: "reverb_damping",
+        host_id: 931,
+        name: "Reverb Damping",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        },
+    },
+    ParamSpec {
+        key: "reverb_predelay",
+        host_id: 932,
+        name: "Reverb Pre-Delay",
+        unit: "ms",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 200.0,
+            default: 20.0,
+        },
+    },
+    ParamSpec {
+        key: "reverb_level",
+        host_id: 933,
+        name: "Reverb Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 60.0,
+        },
+    },
+    ParamSpec {
+        key: "duck",
+        host_id: 940,
+        name: "Duck",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "send_voice",
+        host_id: 950,
+        name: "Send Voice",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 15.0,
+        },
+    },
+    ParamSpec {
+        key: "send_creative",
+        host_id: 951,
+        name: "Send Creative",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
+    ParamSpec {
+        key: "send_harmony",
+        host_id: 952,
+        name: "Send Harmony",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 40.0,
+        },
+    },
+    ParamSpec {
+        key: "send_vocoder",
+        host_id: 953,
+        name: "Send Vocoder",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -1171,6 +1471,32 @@ impl ParamId {
         Self::Macro4,
         Self::Routing,
         Self::Chain,
+        Self::FxOn,
+        Self::FxLevel,
+        Self::Gate,
+        Self::DeEss,
+        Self::DeEssFreq,
+        Self::CompThreshold,
+        Self::CompRatio,
+        Self::CompAttack,
+        Self::CompRelease,
+        Self::CompMakeup,
+        Self::DelaySync,
+        Self::DelayDivision,
+        Self::DelayTime,
+        Self::DelayFeedback,
+        Self::DelayPingPong,
+        Self::DelayTone,
+        Self::DelayLevel,
+        Self::ReverbDecay,
+        Self::ReverbDamping,
+        Self::ReverbPredelay,
+        Self::ReverbLevel,
+        Self::Duck,
+        Self::SendVoice,
+        Self::SendCreative,
+        Self::SendHarmony,
+        Self::SendVocoder,
     ];
 
     #[must_use]
