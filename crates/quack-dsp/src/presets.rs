@@ -818,6 +818,49 @@ pub const FACTORY: &[Factory] = &[
         ],
         macros: VOCODER_MACROS,
     },
+    // Throat and humanized harmonies (appended).
+    Factory {
+        name: "Child Voice",
+        category: "Natural",
+        values: vals!(
+            Mode = NATURAL,
+            Correction = 0.0,
+            Throat = -75.0,
+            ThroatPitch = 100.0
+        ),
+        macros: NATURAL_MACROS,
+    },
+    Factory {
+        name: "Giant",
+        category: "Natural",
+        values: vals!(
+            Mode = NATURAL,
+            Correction = 0.0,
+            Throat = 85.0,
+            ThroatPitch = 60.0
+        ),
+        macros: NATURAL_MACROS,
+    },
+    Factory {
+        name: "Human Choir",
+        category: "Harmony",
+        values: vals!(
+            Mode = TUNE,
+            HarmonyOn = ON,
+            Scale = MAJOR,
+            Harmony = H_SCALE,
+            Harmony1 = IV_3RD_UP,
+            Harmony2 = IV_5TH_UP,
+            Harmony3 = IV_OCT_DOWN,
+            Harmony4 = IV_3RD_DOWN,
+            Spread = 90.0,
+            HarmonyHumanize = 60.0,
+            HarmonyVibrato = 60.0,
+            HarmonyTiming = 60.0,
+            Character = 50.0
+        ),
+        macros: HARMONY_MACROS,
+    },
 ];
 
 /// Factory categories, in library order.

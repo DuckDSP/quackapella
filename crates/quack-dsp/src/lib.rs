@@ -21,6 +21,7 @@
 //! | [`mode`] | Voice modes, including the *Natural* mode [1] |
 //! | [`pitch`] | Real-time pitch detection (YIN), voicing, confidence [2] |
 //! | [`shift`] | Pitch shifting with formant preservation [3] |
+//! | [`throat`] | Throat size (age, gender): formants, body, top |
 //! | [`autotune`] | Scales and note targeting [4] |
 //! | [`creative`] | Robot and glitch of the Creative mode [5] |
 //! | [`harmony`] | MIDI-driven harmony voices [6] |
@@ -44,6 +45,7 @@ pub mod pitch;
 pub mod presets;
 pub mod shift;
 pub mod smooth;
+pub mod throat;
 pub mod vocoder;
 
 pub use engine::Engine;

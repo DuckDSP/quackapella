@@ -922,6 +922,86 @@ pub struct QuackParams {
     #[param(id = 801, name = "Chain Order", default = 0)]
     pub chain: EnumParam<ChainParam>,
 
+    #[param(
+        id = 1100,
+        name = "Throat",
+        range = "linear(-100, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub throat: FloatParam,
+
+    #[param(
+        id = 1101,
+        name = "Throat Pitch",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub throat_pitch: FloatParam,
+
+    #[param(
+        id = 1110,
+        name = "Harmony Vibrato",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_vibrato: FloatParam,
+
+    #[param(
+        id = 1111,
+        name = "Harmony Timing",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_timing: FloatParam,
+
+    #[param(
+        id = 1120,
+        name = "Harmony 1 Pan",
+        range = "linear(-100, 100)",
+        default = -100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_1_pan: FloatParam,
+
+    #[param(
+        id = 1121,
+        name = "Harmony 2 Pan",
+        range = "linear(-100, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_2_pan: FloatParam,
+
+    #[param(
+        id = 1122,
+        name = "Harmony 3 Pan",
+        range = "linear(-100, 100)",
+        default = -50.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_3_pan: FloatParam,
+
+    #[param(
+        id = 1123,
+        name = "Harmony 4 Pan",
+        range = "linear(-100, 100)",
+        default = 50.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_4_pan: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -1130,6 +1210,18 @@ impl QuackParams {
         {
             v.set(ParamId::Routing, self.routing.value().to_index() as f64);
             v.set(ParamId::Chain, self.chain.value().to_index() as f64);
+        }
+        for (id, p) in [
+            (ParamId::Throat, &self.throat),
+            (ParamId::ThroatPitch, &self.throat_pitch),
+            (ParamId::HarmonyVibrato, &self.harmony_vibrato),
+            (ParamId::HarmonyTiming, &self.harmony_timing),
+            (ParamId::HarmonyPan1, &self.harmony_1_pan),
+            (ParamId::HarmonyPan2, &self.harmony_2_pan),
+            (ParamId::HarmonyPan3, &self.harmony_3_pan),
+            (ParamId::HarmonyPan4, &self.harmony_4_pan),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
         }
         v
     }
