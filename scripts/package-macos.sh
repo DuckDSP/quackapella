@@ -14,7 +14,8 @@
 # gitignored .cargo/config.toml [env]) override the detection. Without
 # a Developer ID the bundles are signed ad hoc and the .pkg is unsigned:
 # fine on this Mac, but Gatekeeper blocks it on any other one.
-# Output: target/dist/Quackapella-<version>-*.pkg, copied into dist/.
+# Output: target/dist/<crate>-<version>-macos.pkg, copied into dist/ as
+# Quackapella-<version>-macos.pkg.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -54,10 +55,11 @@ export TRUCE_NOTARY_PROFILE="$profile"
 cargo truce "${args[@]}"
 
 mkdir -p dist
-for pkg in target/dist/Quackapella-*.pkg; do
-    [[ -e "$pkg" ]] || continue
-    cp "$pkg" dist/
-    echo "== $(basename "$pkg")"
+for src in target/dist/quack-plugin-*.pkg; do
+    [[ -e "$src" ]] || continue
+    pkg="dist/$(basename "$src" | sed 's/^quack-plugin-/Quackapella-/')"
+    cp "$src" "$pkg"
+    echo "== $pkg"
     pkgutil --check-signature "$pkg" || true
     if [[ $notarize -eq 1 ]]; then
         xcrun stapler validate "$pkg"
