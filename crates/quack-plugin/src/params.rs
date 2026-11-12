@@ -102,6 +102,77 @@ pub enum SourceParam {
     MidiExact,
 }
 
+/// Vocoder modes, in `quack_dsp::vocoder::VocoderMode` order.
+#[derive(ParamEnum)]
+pub enum VocoderParam {
+    #[name = "Off"]
+    Off,
+    #[name = "Vocoder"]
+    Vocoder,
+    #[name = "Talkbox"]
+    Talkbox,
+}
+
+/// Carriers, in `quack_dsp::vocoder::Carrier` order.
+#[derive(ParamEnum)]
+pub enum CarrierParam {
+    #[name = "Saw"]
+    Saw,
+    #[name = "Square"]
+    Square,
+    #[name = "Supersaw"]
+    Supersaw,
+    #[name = "Noise"]
+    Noise,
+    #[name = "Sidechain"]
+    Sidechain,
+}
+
+/// Band counts, in `quack_dsp::vocoder::BAND_CHOICES` order.
+#[derive(ParamEnum)]
+pub enum BandsParam {
+    #[name = "8"]
+    B8,
+    #[name = "16"]
+    B16,
+    #[name = "24"]
+    B24,
+    #[name = "32"]
+    B32,
+}
+
+/// Carrier octave, -2 to +2.
+#[derive(ParamEnum)]
+pub enum OctaveParam {
+    #[name = "-2"]
+    Down2,
+    #[name = "-1"]
+    Down1,
+    #[name = "0"]
+    Zero,
+    #[name = "+1"]
+    Up1,
+    #[name = "+2"]
+    Up2,
+}
+
+/// Follow chords, in `quack_dsp::vocoder::FollowChord` order.
+#[derive(ParamEnum)]
+pub enum FollowChordParam {
+    #[name = "Single"]
+    Single,
+    #[name = "Octave"]
+    Octave,
+    #[name = "Fifth"]
+    Fifth,
+    #[name = "Major"]
+    Major,
+    #[name = "Minor"]
+    Minor,
+    #[name = "Scale"]
+    Scale,
+}
+
 /// Harmony sources, in `quack_dsp::harmony::HarmonyMode` order.
 #[derive(ParamEnum)]
 pub enum HarmonyParam {
@@ -531,6 +602,140 @@ pub struct QuackParams {
     #[param(id = 414, name = "Latch")]
     pub latch: BoolParam,
 
+    /// Vocoder or talkbox (Synth mode).
+    #[param(id = 500, name = "Vocoder")]
+    pub vocoder: EnumParam<VocoderParam>,
+
+    #[param(id = 501, name = "Carrier")]
+    pub carrier: EnumParam<CarrierParam>,
+
+    #[param(id = 502, name = "Bands", default = 2)]
+    pub bands: EnumParam<BandsParam>,
+
+    #[param(
+        id = 503,
+        name = "Vocoder Level",
+        range = "linear(0, 100)",
+        default = 80.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vocoder_level: FloatParam,
+
+    #[param(
+        id = 504,
+        name = "Response",
+        range = "linear(2, 100)",
+        default = 12.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub response: FloatParam,
+
+    #[param(
+        id = 505,
+        name = "Band Shift",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "st",
+        smooth = "none"
+    )]
+    pub band_shift: FloatParam,
+
+    #[param(
+        id = 506,
+        name = "Sibilance",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub sibilance: FloatParam,
+
+    #[param(id = 507, name = "Carrier Octave", default = 2)]
+    pub carrier_octave: EnumParam<OctaveParam>,
+
+    #[param(
+        id = 508,
+        name = "Detune",
+        range = "linear(0, 50)",
+        default = 12.0,
+        unit = "none",
+        smooth = "none"
+    )]
+    pub detune: FloatParam,
+
+    #[param(
+        id = 509,
+        name = "Carrier Noise",
+        range = "linear(0, 100)",
+        default = 5.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub carrier_noise: FloatParam,
+
+    #[param(
+        id = 510,
+        name = "Carrier Release",
+        range = "linear(5, 1000)",
+        default = 80.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub carrier_release: FloatParam,
+
+    /// Without MIDI, the carrier sings the tuned sung note.
+    #[param(id = 511, name = "Carrier Follow", default = true)]
+    pub carrier_follow: BoolParam,
+
+    #[param(
+        id = 512,
+        name = "Carrier Glide",
+        range = "linear(0, 500)",
+        default = 0.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub carrier_glide: FloatParam,
+
+    /// Freezes the vocoder's timbre on the carrier.
+    #[param(id = 513, name = "Vocoder Hold")]
+    pub vocoder_hold: BoolParam,
+
+    #[param(id = 514, name = "Follow Chord")]
+    pub follow_chord: EnumParam<FollowChordParam>,
+
+    #[param(
+        id = 515,
+        name = "Bend Range",
+        range = "linear(0, 12)",
+        default = 2.0,
+        unit = "st",
+        smooth = "none"
+    )]
+    pub bend_range: FloatParam,
+
+    #[param(
+        id = 516,
+        name = "Vocoder Width",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vocoder_width: FloatParam,
+
+    #[param(
+        id = 517,
+        name = "Vocoder Lo-Fi",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub vocoder_lofi: FloatParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -654,6 +859,56 @@ impl QuackParams {
             f64::from(u8::from(self.close_voicing.value())),
         );
         v.set(ParamId::Latch, f64::from(u8::from(self.latch.value())));
+        #[allow(clippy::cast_precision_loss)]
+        {
+            v.set(ParamId::Vocoder, self.vocoder.value().to_index() as f64);
+            v.set(ParamId::Carrier, self.carrier.value().to_index() as f64);
+            v.set(ParamId::Bands, self.bands.value().to_index() as f64);
+            v.set(
+                ParamId::CarrierOctave,
+                self.carrier_octave.value().to_index() as f64,
+            );
+        }
+        for (id, p) in [
+            (ParamId::VocoderLevel, &self.vocoder_level),
+            (ParamId::Response, &self.response),
+            (ParamId::BandShift, &self.band_shift),
+            (ParamId::Sibilance, &self.sibilance),
+            (ParamId::Detune, &self.detune),
+            (ParamId::CarrierNoise, &self.carrier_noise),
+            (ParamId::CarrierRelease, &self.carrier_release),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
+        v.set(
+            ParamId::CarrierFollow,
+            f64::from(u8::from(self.carrier_follow.value())),
+        );
+        v.set(
+            ParamId::VocoderHold,
+            f64::from(u8::from(self.vocoder_hold.value())),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::FollowChord,
+            self.follow_chord.value().to_index() as f64,
+        );
+        v.set(
+            ParamId::CarrierGlide,
+            FloatParamReadF64::value(&self.carrier_glide),
+        );
+        v.set(
+            ParamId::BendRange,
+            FloatParamReadF64::value(&self.bend_range),
+        );
+        v.set(
+            ParamId::VocoderWidth,
+            FloatParamReadF64::value(&self.vocoder_width),
+        );
+        v.set(
+            ParamId::VocoderLofi,
+            FloatParamReadF64::value(&self.vocoder_lofi),
+        );
         v
     }
 }

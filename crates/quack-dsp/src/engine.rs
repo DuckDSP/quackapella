@@ -34,6 +34,7 @@ use crate::shift::{LAYERS, Psola, semitones_to_ratio};
 /// heard as an effect, which is the Tune mode's job.
 pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
+use crate::vocoder::{Carrier, FollowChord, Vocoder, VocoderMode, bands_from_index};
 
 /// Smoothing time for gains and mix.
 const SMOOTH_MS: f64 = 20.0;
@@ -80,6 +81,10 @@ pub struct Engine {
     harmony: Harmonizer,
     lead: Ramp,
     harmony_level: Ramp,
+    /// Synth mode: vocoder or talkbox on the internal carrier synth or
+    /// the side-chain, and its level.
+    vocoder: Vocoder,
+    vocoder_level: Ramp,
     double: Ramp,
 }
 
@@ -120,6 +125,8 @@ impl Engine {
             harmony: Harmonizer::default(),
             lead: Ramp::new(1.0),
             harmony_level: Ramp::new(0.0),
+            vocoder: Vocoder::default(),
+            vocoder_level: Ramp::new(0.0),
             double: Ramp::new(0.0),
         };
         e.prepare(48_000.0, 512);
@@ -143,6 +150,7 @@ impl Engine {
             &mut self.follow,
             &mut self.lead,
             &mut self.harmony_level,
+            &mut self.vocoder_level,
             &mut self.double,
         ]
         .into_iter()
@@ -159,6 +167,7 @@ impl Engine {
         self.robot.prepare(sample_rate);
         self.glitch.prepare(sample_rate);
         self.harmony.prepare(sample_rate);
+        self.vocoder.prepare(sample_rate, max);
         self.notes.clear();
         self.latency = max;
         self.range = VoiceRange::from_index(self.values.get(ParamId::Voice));
@@ -188,6 +197,7 @@ impl Engine {
         }
         self.gate_delay.set_delay(latency);
         self.shifter.set_latency(latency);
+        self.vocoder.set_latency(latency);
         self.shifter.reset();
         self.prime_gate();
     }
@@ -203,6 +213,7 @@ impl Engine {
         self.robot.reset();
         self.glitch.reset();
         self.harmony.reset();
+        self.vocoder.reset();
         self.notes.clear();
         self.apply_all(true);
         self.prime_gate();
@@ -297,6 +308,7 @@ impl Engine {
                 self.update_tune();
                 self.update_creative(snap);
                 self.update_harmony(snap);
+                self.update_vocoder(snap);
                 return;
             }
             ParamId::FormantFollow
@@ -328,6 +340,28 @@ impl Engine {
             | ParamId::CloseVoicing
             | ParamId::Latch => {
                 self.update_harmony(snap);
+                self.update_vocoder(snap);
+                return;
+            }
+            ParamId::Vocoder
+            | ParamId::Carrier
+            | ParamId::Bands
+            | ParamId::VocoderLevel
+            | ParamId::Response
+            | ParamId::BandShift
+            | ParamId::Sibilance
+            | ParamId::CarrierOctave
+            | ParamId::Detune
+            | ParamId::CarrierNoise
+            | ParamId::CarrierRelease
+            | ParamId::CarrierFollow
+            | ParamId::CarrierGlide
+            | ParamId::VocoderHold
+            | ParamId::FollowChord
+            | ParamId::BendRange
+            | ParamId::VocoderWidth
+            | ParamId::VocoderLofi => {
+                self.update_vocoder(snap);
                 return;
             }
             ParamId::Voice => {
@@ -350,6 +384,7 @@ impl Engine {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();
                 self.update_harmony(snap);
+                self.update_vocoder(snap);
                 return;
             }
         };
@@ -468,6 +503,69 @@ impl Engine {
         }
     }
 
+    /// Vocoder settings from the parameters, the mode and the held
+    /// notes: only in the Synth mode.
+    fn update_vocoder(&mut self, snap: bool) {
+        let on = self.mode == VoiceMode::Synth;
+        let v = &self.values;
+        let pct = |id: ParamId| v.get(id) / 100.0;
+        let mode = if on {
+            VocoderMode::from_index(v.get(ParamId::Vocoder))
+        } else {
+            VocoderMode::Off
+        };
+        let s = &mut self.vocoder.settings;
+        s.mode = mode;
+        s.carrier = Carrier::from_index(v.get(ParamId::Carrier));
+        s.bands = bands_from_index(v.get(ParamId::Bands));
+        s.response_s = v.get(ParamId::Response) / 1000.0;
+        s.shift_st = v.get(ParamId::BandShift);
+        s.sibilance = pct(ParamId::Sibilance);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            s.octave = v.get(ParamId::CarrierOctave).round() as i32 - 2;
+        }
+        s.detune_cents = v.get(ParamId::Detune);
+        s.noise = pct(ParamId::CarrierNoise);
+        s.release_s = v.get(ParamId::CarrierRelease) / 1000.0;
+        s.follow = v.get(ParamId::CarrierFollow) >= 0.5;
+        s.chord = FollowChord::from_index(v.get(ParamId::FollowChord));
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let key = v.get(ParamId::Key).round().clamp(0.0, 11.0) as u8;
+        s.scale = scale_mask(
+            key,
+            match Scale::from_index(v.get(ParamId::Scale)) {
+                // Thirds must be thirds: chromatic counts in major.
+                Scale::Chromatic => Scale::Major,
+                sc => sc,
+            },
+        );
+        s.glide_s = v.get(ParamId::CarrierGlide) / 1000.0;
+        s.hold = v.get(ParamId::VocoderHold) >= 0.5;
+        s.bend_range = v.get(ParamId::BendRange);
+        s.width = pct(ParamId::VocoderWidth);
+        s.lofi = pct(ParamId::VocoderLofi);
+        self.vocoder.apply_settings();
+        self.vocoder.set_notes(&self.notes);
+        #[allow(clippy::cast_possible_truncation)]
+        let level = if mode == VocoderMode::Off {
+            0.0
+        } else {
+            pct(ParamId::VocoderLevel) as f32
+        };
+        if snap {
+            self.vocoder_level.snap(level);
+        } else {
+            self.vocoder_level.set(level);
+        }
+    }
+
+    /// Notes the vocoder's carrier plays now (bit n = note n).
+    #[must_use]
+    pub fn vocoder_notes(&self) -> u128 {
+        self.vocoder.sounding()
+    }
+
     /// Notes the harmony voices sing now (bit n = note n).
     #[must_use]
     pub fn harmony_notes(&self) -> u128 {
@@ -541,6 +639,7 @@ impl Engine {
         self.notes.note_on(channel, note, velocity);
         self.update_tune();
         self.update_harmony(false);
+        self.update_vocoder(false);
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
@@ -548,6 +647,7 @@ impl Engine {
         self.notes.note_off(channel, note);
         self.update_tune();
         self.update_harmony(false);
+        self.update_vocoder(false);
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
@@ -556,24 +656,42 @@ impl Engine {
         self.notes.set_sustain(down);
         self.update_tune();
         self.update_harmony(false);
+        self.update_vocoder(false);
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
+    }
+
+    /// MIDI pitch bend, -1 to 1: bends the vocoder's carrier.
+    pub fn pitch_bend(&mut self, bend: f64) {
+        self.vocoder.set_bend(bend);
     }
 
     pub fn all_notes_off(&mut self) {
         self.notes.clear();
         self.update_tune();
         self.update_harmony(false);
+        self.update_vocoder(false);
         self.robot.note = None;
     }
 
     /// Process a stereo block in place. A mono host passes the same
     /// signal on both sides and keeps the left one. Real-time safe.
     pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.process_with_sidechain(left, right, None);
+    }
+
+    /// [`Self::process`] with the side-chain input (a carrier for the
+    /// vocoder), mono or stereo. Real-time safe.
+    pub fn process_with_sidechain(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+    ) {
         debug_assert_eq!(left.len(), right.len());
         let [dl, dr] = &mut self.dry;
         #[allow(clippy::cast_possible_truncation)]
         let sr = self.sample_rate as f32;
-        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
             let g_in = self.in_gain.tick();
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
@@ -612,6 +730,26 @@ impl Engine {
             let (wet_l, wet_r) = self
                 .shifter
                 .tick_with(in_l, in_r, period, &mut steer, formant);
+            // Vocoder or talkbox, on top of the lead and harmonies.
+            let voc_level = self.vocoder_level.tick();
+            let (wet_l, wet_r) =
+                if voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off {
+                    let sc = sidechain.map_or(0.0, |(a, b)| {
+                        0.5 * (a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0))
+                    });
+                    let follow = self
+                        .retuner
+                        .reading()
+                        .map(|t| t.out)
+                        .or_else(|| self.detector.estimate().map(|e| e.note()))
+                        .map(|n| f64::from(n + transpose));
+                    let dry = 0.5 * (dry_l + dry_r) * g_in;
+                    let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
+                    let (vl, vr) = self.vocoder.widen(v);
+                    (wet_l + vl, wet_r + vr)
+                } else {
+                    (wet_l, wet_r)
+                };
             let (wet_l, wet_r) = self.glitch.tick(wet_l, wet_r);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
@@ -939,6 +1077,32 @@ mod tests {
         let mut e = Engine::new();
         e.set_all(&v, true);
         assert_eq!(e.harmony.settings.mode, HarmonyMode::Off);
+    }
+
+    #[test]
+    fn vocoder_adds_no_latency_and_stays_in_synth() {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 3.0);
+        v.set(ParamId::Harmony, 0.0);
+        v.set(ParamId::Vocoder, 1.0);
+        let mut e = Engine::new();
+        let lat = e.latency_samples();
+        e.set_all(&v, true);
+        assert_eq!(e.latency_samples(), lat);
+        e.note_on(0, 48, 100);
+        // A sung vowel: the carrier sounds under it.
+        #[allow(clippy::cast_precision_loss)]
+        let x: Vec<f32> = (0..24_000)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let (mut l, mut r) = (x.clone(), x.clone());
+        e.process(&mut l, &mut r);
+        assert!(l.iter().all(|s| s.is_finite()));
+        assert_ne!(e.vocoder_notes() & (1 << 48), 0);
+        // Other modes: no vocoder.
+        v.set(ParamId::Mode, 1.0);
+        e.set_all(&v, true);
+        assert_eq!(e.vocoder.settings.mode, VocoderMode::Off);
     }
 
     #[test]

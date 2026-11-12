@@ -22,16 +22,17 @@ mod controls;
 mod paint;
 pub mod theme;
 
-use egui::{Align2, Color32, Rect, pos2, vec2};
+use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
 use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
 use quack_dsp::harmony::{HarmonyMode, interval_short, interval_steps};
 use quack_dsp::latency::VoiceRange;
 use quack_dsp::params::NOTE_PARAMS;
+use quack_dsp::vocoder::{Carrier, VocoderMode, bands_from_index};
 use quack_dsp::{ParamId, VoiceMode};
 
 use paint::{panel, spaced, text, value, well};
-use theme::{color, size, space};
+use theme::{color, radius, size, space};
 
 /// Editor size in points (fixed for now; zoom comes with step 8, with
 /// the AUv2 resize patch already in `vendor/`).
@@ -76,6 +77,8 @@ pub struct View {
     pub frozen: bool,
     /// Notes the harmony voices sing (Synth mode), bit n = note n.
     pub harmony_notes: u128,
+    /// Notes the vocoder's carrier plays (Synth mode), bit n = note n.
+    pub vocoder_notes: u128,
 }
 
 /// Seconds of pitch history in the graph.
@@ -103,6 +106,8 @@ pub struct UiState {
     centre: f32,
     /// Scale list open.
     scale_menu: bool,
+    /// Synth mode page: the vocoder instead of the harmonies.
+    vocoder_page: bool,
 }
 
 impl Default for UiState {
@@ -113,6 +118,7 @@ impl Default for UiState {
             head: 0,
             centre: 60.0,
             scale_menu: false,
+            vocoder_page: false,
         }
     }
 }
@@ -310,7 +316,17 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     if mode == VoiceMode::Creative {
         creative_panel(ui, params, st, view, graph_r, accent);
     } else if mode == VoiceMode::Synth {
-        harmony_panel(ui, params, st, view, graph_r, accent);
+        // Two pages share the place: harmonies and vocoder.
+        let tabs = Rect::from_min_size(
+            pos2(mode_r.right() - space::L - 220.0, mode_r.bottom() - 36.0),
+            vec2(220.0, 26.0),
+        );
+        synth_tabs(ui, params, st, tabs, accent);
+        if st.vocoder_page {
+            vocoder_panel(ui, params, st, view, graph_r, accent);
+        } else {
+            harmony_panel(ui, params, st, view, graph_r, accent);
+        }
     } else {
         pitch_graph(&p, graph_r, view, st, accent);
     }
@@ -864,6 +880,204 @@ fn harmony_panel(
             label,
         );
     }
+}
+
+/// Harmony and Vocoder page tabs (editor state, not parameters). A lit
+/// dot marks the page whose effect is on.
+fn synth_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, accent: Color32) {
+    let p = ui.painter();
+    paint::rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    let on = [
+        HarmonyMode::from_index(params.get_plain(ParamId::Harmony)) != HarmonyMode::Off,
+        VocoderMode::from_index(params.get_plain(ParamId::Vocoder)) != VocoderMode::Off,
+    ];
+    let w = r.width() / 2.0;
+    for (i, label) in ["Harmony", "Vocoder"].into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let seg = Rect::from_min_size(pos2(r.left() + w * i as f32, r.top()), vec2(w, r.height()));
+        let resp = ui.interact(seg, ui.id().with(("quack-synth-tab", i)), Sense::click());
+        if resp.clicked() {
+            st.vocoder_page = i == 1;
+        }
+        let lit = st.vocoder_page == (i == 1);
+        if lit {
+            paint::rounded(
+                p,
+                seg.shrink(2.0),
+                radius::CONTROL - 1,
+                accent.gamma_multiply(0.22),
+                accent.gamma_multiply(0.8),
+            );
+        } else if resp.hovered() {
+            paint::rounded(
+                p,
+                seg.shrink(2.0),
+                radius::CONTROL - 1,
+                color::RAISED,
+                color::RAISED,
+            );
+        }
+        let c = if lit { accent } else { color::TEXT_DIM };
+        text(
+            p,
+            seg.center() + vec2(5.0, 0.0),
+            Align2::CENTER_CENTER,
+            label,
+            size::BODY,
+            c,
+        );
+        let dot = pos2(seg.left() + 14.0, seg.center().y);
+        p.circle_filled(dot, 3.0, if on[i] { accent } else { color::BORDER });
+    }
+}
+
+/// The Synth mode's vocoder and talkbox: the voice shapes the internal
+/// carrier synth (or the side-chain).
+fn vocoder_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 22.0),
+        Align2::LEFT_CENTER,
+        "Vocoder",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let mode = VocoderMode::from_index(params.get_plain(ParamId::Vocoder));
+    let seg = Rect::from_min_size(
+        pos2(r.right() - space::L - 240.0, r.top() + 8.0),
+        vec2(240.0, 28.0),
+    );
+    let names: Vec<&str> = VocoderMode::ALL.iter().map(|m| m.name()).collect();
+    controls::segmented(ui, params, ParamId::Vocoder, seg, &names, &[accent]);
+    // Carrier choice, and what plays it.
+    let carrier = Carrier::from_index(params.get_plain(ParamId::Carrier));
+    let car_r = Rect::from_min_size(
+        pos2(r.left() + space::L, r.top() + 48.0),
+        vec2(r.width() - 2.0 * space::L, 26.0),
+    );
+    let cnames: Vec<&str> = Carrier::ALL.iter().map(|c| c.name()).collect();
+    controls::segmented(ui, params, ParamId::Carrier, car_r, &cnames, &[accent]);
+    let playing: Vec<String> = (0..128u8)
+        .filter(|n| view.vocoder_notes & (1u128 << n) != 0)
+        .map(note_name)
+        .collect();
+    let follow = params.get_plain(ParamId::CarrierFollow) >= 0.5;
+    let shown = playing
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let more = if playing.len() > 3 { " …" } else { "" };
+    let status = match (mode, carrier) {
+        (VocoderMode::Off, _) => "-".to_owned(),
+        (_, Carrier::Sidechain) => "Side-chain".to_owned(),
+        _ if !playing.is_empty() && view.held_notes == 0 && follow => {
+            format!("Follow · {shown}{more}")
+        }
+        _ if !playing.is_empty() => format!("{shown}{more}"),
+        _ if follow => "Sing or play".to_owned(),
+        _ => "Play MIDI".to_owned(),
+    };
+    text(
+        p,
+        pos2(r.left() + space::L + 80.0, r.top() + 22.0),
+        Align2::LEFT_CENTER,
+        &status,
+        size::CAPTION,
+        if playing.is_empty() || mode == VocoderMode::Off {
+            color::TEXT_FAINT
+        } else {
+            accent
+        },
+    );
+
+    let knob_d = 54.0;
+    let pct = |v: f64| format!("{v:.0}");
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let ms = |v: f64| format!("{v:.0}");
+    let st_fmt = |v: f64| format!("{v:+.1}");
+    let bands = |v: f64| format!("{}", bands_from_index(v));
+    #[allow(clippy::cast_possible_truncation)]
+    let octave = |v: f64| format!("{:+}", v.round() as i32 - 2);
+    let vocoder_only = mode != VocoderMode::Talkbox;
+    let dim = accent.gamma_multiply(0.35);
+    type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, bool);
+    let row1: [Knob; 6] = [
+        (ParamId::VocoderLevel, "Level", &pct, true),
+        (ParamId::Bands, "Bands", &bands, vocoder_only),
+        (ParamId::Response, "Response", &ms, vocoder_only),
+        (ParamId::BandShift, "Shift", &st_fmt, true),
+        (ParamId::Sibilance, "Sibilance", &off, true),
+        (ParamId::VocoderWidth, "Width", &off, true),
+    ];
+    let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
+    let synth = carrier != Carrier::Sidechain;
+    let row2: [Knob; 6] = [
+        (ParamId::CarrierOctave, "Octave", &octave, pitched),
+        (ParamId::Detune, "Detune", &off, pitched),
+        (ParamId::CarrierNoise, "Noise", &off, pitched),
+        (ParamId::CarrierRelease, "Release", &ms, synth),
+        (ParamId::CarrierGlide, "Glide", &off, pitched),
+        // Bend Range stays a host parameter (rarely changed live).
+        (ParamId::VocoderLofi, "Lo-Fi", &off, true),
+    ];
+    let kw = (r.width() - 2.0 * space::L) / 6.0;
+    let y1 = r.top() + 156.0;
+    let y2 = r.bottom() - 64.0;
+    for (row, y) in [(&row1[..], y1), (&row2[..], y2)] {
+        for (i, (id, label, fmt, live)) in row.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+            controls::knob_named(
+                ui,
+                params,
+                st,
+                *id,
+                pos2(cx, y),
+                knob_d,
+                id.spec().kind.min(),
+                if *live { accent } else { dim },
+                *fmt,
+                label,
+            );
+        }
+    }
+    // Follow (the carrier sings the tuned note without MIDI) and its
+    // chord, Hold (the timbre frozen on the carrier).
+    let row = car_r.bottom() + space::S;
+    let fr = Rect::from_min_size(pos2(car_r.left(), row), vec2(80.0, 26.0));
+    controls::toggle(ui, params, ParamId::CarrierFollow, fr, "Follow", accent);
+    let hr = Rect::from_min_size(pos2(car_r.right() - 70.0, row), vec2(70.0, 26.0));
+    controls::toggle(ui, params, ParamId::VocoderHold, hr, "Hold", accent);
+    let cr = Rect::from_min_max(
+        pos2(fr.right() + space::S, row),
+        pos2(hr.left() - space::S, row + 26.0),
+    );
+    let chords = ["One", "Oct", "5th", "Maj", "Min", "Scale"];
+    controls::segmented(
+        ui,
+        params,
+        ParamId::FollowChord,
+        cr,
+        &chords,
+        &[if follow && synth { accent } else { dim }],
+    );
 }
 
 fn held_class(held: u128, class: u8) -> bool {
@@ -1444,6 +1658,7 @@ mod tests {
                 tune_mask: 0b1010_1011_0101,
                 frozen: mode == 2,
                 harmony_notes: if mode == 3 { 1 << 64 } else { 0 },
+                vocoder_notes: 0,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));
