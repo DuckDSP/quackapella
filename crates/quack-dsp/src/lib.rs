@@ -24,9 +24,11 @@
 //! | [`creative`] | Robot and glitch of the Creative mode [5] |
 //! | [`harmony`] | MIDI-driven harmony voices [6] |
 //! | [`vocoder`] | Vocoder and talkbox [7] |
+//! | [`denormal`] | Flush-to-zero while processing [9] |
 
 pub mod autotune;
 pub mod creative;
+pub mod denormal;
 pub mod engine;
 pub mod harmony;
 pub mod latency;

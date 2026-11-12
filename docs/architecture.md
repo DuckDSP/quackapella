@@ -346,7 +346,68 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
    intervalles dans la gamme, accords MIDI, humanisation, stéréo.
 7. Vocodeur et talkbox avec porteuse interne.
 8. Interface complète, presets, macros, MIDI learn, zoom.
-9. Optimisation CPU et tests en live.
+9. **Optimisation CPU et tests en live** : voir « Charge CPU et
+   robustesse » ci-dessous.
+
+## Charge CPU et robustesse
+
+Mesure : `cargo run --release -p quack-dsp --example bench` (options
+`--sr 96000`, `--case synth`). Un chanteur synthétique passe dans chaque
+configuration en blocs hôte de 32 et 64 échantillons ; le banc donne la
+part d'un cœur utilisée en temps réel et le pire bloc (part de la durée
+du bloc), chaque bloc gardant son meilleur temps sur cinq passes pour ne
+pas compter les préemptions du système.
+
+À 48 kHz, sur un cœur x86 de la machine de CI (le Mac est au moins aussi
+rapide) :
+
+| Configuration | Avant | Après | Pire bloc (32) |
+|---|---|---|---|
+| Natural | 2,0 % | 0,9 % | 2 % |
+| Creative (octaves, robot, glitch) | 2,7 % | 1,6 % | 3 % |
+| Synth, harmonies 4 voix + doubleur | 3,6 % | 2,5 % | 4 % |
+| Synth, vocodeur 32 bandes, 8 notes supersaw | 4,2 % | 2,4 % | 4 % |
+| Synth, talkbox | 4,3 % | 2,4 % | 6 % |
+| Synth, tout ensemble | 5,7 % | 4,1 % | 6 % |
+
+À 96 kHz, tout ensemble : 7,6 % (pire bloc 19 % en blocs de 32). La
+taille du bloc ne change rien au coût : tout est calculé par
+échantillon.
+
+Ce qui a été optimisé (sans changer le son) :
+
+- **YIN** : la fonction de différence (l'essentiel du détecteur) est
+  sommée sur huit accumulateurs, ce qui la vectorise (SSE, NEON) ; les
+  notes détectées sont identiques au millième de demi-ton sur la prise
+  de Vincent.
+- **Harmoniseur** : les voix éteintes ne coûtent plus rien, les gains de
+  pan (sin, cos) et le formant de chaque voix ne sont recalculés que
+  quand ils bougent (30 appels libm par échantillon avant, même
+  harmoniseur coupé).
+- **Porteuse du vocodeur** : rapports de désaccord des oscillateurs
+  calculés une fois par réglage (40 `exp2` par échantillon avant en
+  supersaw 8 notes), `fmod` remplacé par une soustraction exacte.
+- **Dénormaux** : flush-to-zero pendant `process` (`denormal`), restauré
+  ensuite pour l'hôte.
+
+Le SIMD explicite n'a pas été ajouté ailleurs : le reste est fait de
+filtres récursifs (non vectorisables par échantillon) et ne dépasse pas
+quelques pour cent d'un cœur.
+
+Robustesse (`crates/quack-dsp/tests/realtime.rs`) :
+
+- aucune allocation dans `process`, les changements de paramètres (tous,
+  sur toute leur plage, y compris Voice et Low Latency), le MIDI et le
+  transport, dans les quatre modes, en blocs de 1, 32, 64 et 4096 ;
+- NaN, infinis et niveaux absurdes en entrée (remplacés par du silence
+  ou bornés à +30 dBFS), pitch bend, transport et paramètres NaN :
+  sortie finie, le son revient dès que l'entrée est propre ;
+- même sortie quelle que soit la taille des blocs, même plus grands que
+  le maximum annoncé par l'hôte ;
+- changement de sample rate (22,05 à 192 kHz) sur le même moteur ;
+- silence après une prise : la sortie retombe à zéro, sans dénormaux ;
+- chaque valeur de chaque paramètre à choix, sur le réglage Synth le
+  plus lourd : sortie finie et bornée.
 
 ## Vérifications
 

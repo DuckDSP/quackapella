@@ -331,6 +331,11 @@ pub struct Harmonizer {
     lead_ref: f64,
     lead_slow: f64,
     mix: [VoiceMix; MAX_VOICES],
+    /// Last pan and its gains, and last character and its formant
+    /// ratio, per voice: the trigonometry and `exp2` are only redone
+    /// when they move (CPU, they would cost 30 libm calls a sample).
+    pan_cache: [(f32, [f32; 2]); MAX_VOICES],
+    formant_cache: [(f64, f64); MAX_VOICES],
     /// Per-sample humanize update divider.
     wander_tick: u32,
     /// Unvoiced time since the last voiced grain.
@@ -354,6 +359,8 @@ impl Default for Harmonizer {
             lead_ref: 60.0,
             lead_slow: 60.0,
             mix: [VoiceMix::default(); MAX_VOICES],
+            pan_cache: [(f32::NAN, [0.0; 2]); MAX_VOICES],
+            formant_cache: [(f64::NAN, 1.0); MAX_VOICES],
             wander_tick: 0,
             gap: 0.0,
             applied: HarmonyMode::Off,
@@ -692,6 +699,13 @@ impl Harmonizer {
         let norm = power.max(1.0).powf(-0.25);
         for (i, s) in self.slots.iter().enumerate() {
             let active = s.env > 0.0;
+            if !active {
+                // Silent: no grains placed, and grains still playing
+                // out get no gain (as with env = 0).
+                self.mix[i].active = false;
+                self.mix[i].gain = [0.0; 2];
+                continue;
+            }
             let doubler = i >= MIDI_VOICES;
             let g = if doubler {
                 // Two takes, each a little under the lead.
@@ -699,13 +713,20 @@ impl Harmonizer {
             } else {
                 s.env * s.velocity * norm * level
             };
-            // Equal power, 1 in the centre.
-            let a = (f64::from(s.pan) + 1.0) * std::f64::consts::FRAC_PI_4;
-            #[allow(clippy::cast_possible_truncation)]
-            let (gl, gr) = (
-                (a.cos() * std::f64::consts::SQRT_2) as f32,
-                (a.sin() * std::f64::consts::SQRT_2) as f32,
-            );
+            let (pan, cached) = &mut self.pan_cache[i];
+            if *pan != s.pan {
+                // Equal power, 1 in the centre.
+                let a = (f64::from(s.pan) + 1.0) * std::f64::consts::FRAC_PI_4;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    *cached = [
+                        (a.cos() * std::f64::consts::SQRT_2) as f32,
+                        (a.sin() * std::f64::consts::SQRT_2) as f32,
+                    ];
+                }
+                *pan = s.pan;
+            }
+            let [gl, gr] = *cached;
             let (lag_ms, character) = if doubler {
                 (
                     DOUBLE_LAG_MIN_MS + DOUBLE_LAG_RANGE_MS * s.lag.value,
@@ -717,11 +738,16 @@ impl Harmonizer {
                     st.character,
                 )
             };
+            let (ch, formant) = &mut self.formant_cache[i];
+            if *ch != character {
+                *formant = (character * CHARACTER_ST[i] / 12.0).exp2();
+                *ch = character;
+            }
             self.mix[i] = VoiceMix {
                 active,
                 gain: [g * gl, g * gr],
                 lag: lag_ms * 0.001 * self.sample_rate,
-                formant: (character * CHARACTER_ST[i] / 12.0).exp2(),
+                formant: *formant,
             };
         }
         &self.mix

@@ -688,10 +688,16 @@ impl Engine {
         sidechain: Option<(&[f32], &[f32])>,
     ) {
         debug_assert_eq!(left.len(), right.len());
+        let _ftz = crate::denormal::NoDenormals::new();
         let [dl, dr] = &mut self.dry;
         #[allow(clippy::cast_possible_truncation)]
         let sr = self.sample_rate as f32;
         for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+            // A NaN or an infinity from the host (or a broken plugin
+            // before us) would stay in the filters and delay lines for
+            // good: replaced by silence, absurd levels clamped.
+            *l = sanitize(*l);
+            *r = sanitize(*r);
             let g_in = self.in_gain.tick();
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
@@ -735,7 +741,9 @@ impl Engine {
             let (wet_l, wet_r) =
                 if voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off {
                     let sc = sidechain.map_or(0.0, |(a, b)| {
-                        0.5 * (a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0))
+                        0.5 * sanitize(
+                            a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0),
+                        )
                     });
                     let follow = self
                         .retuner
@@ -756,6 +764,21 @@ impl Engine {
             *l = out_l + (dry_l - out_l) * byp;
             *r = out_r + (dry_r - out_r) * byp;
         }
+    }
+}
+
+/// Highest input level taken as is (+30 dBFS): only garbage is above.
+const INPUT_CLAMP: f32 = 32.0;
+
+/// Input sample made safe for the filters: NaN and infinities become
+/// silence, levels beyond [`INPUT_CLAMP`] are clamped. Free for normal
+/// audio (it comes out bit for bit).
+#[inline]
+fn sanitize(x: f32) -> f32 {
+    if x.is_finite() {
+        x.clamp(-INPUT_CLAMP, INPUT_CLAMP)
+    } else {
+        0.0
     }
 }
 

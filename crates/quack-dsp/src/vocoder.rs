@@ -406,6 +406,13 @@ struct Voice {
     age: u64,
 }
 
+/// `x % 1.0` for `x` in `0..2` (a phase plus at most one cycle),
+/// exactly, without the `fmod` call.
+#[inline]
+fn wrap(x: f64) -> f64 {
+    if x >= 1.0 { x - 1.0 } else { x }
+}
+
 /// PolyBLEP correction around a discontinuity at phase 0.
 #[inline]
 fn blep(t: f64, dt: f64) -> f64 {
@@ -469,6 +476,10 @@ pub struct Vocoder {
     follow_note: Option<f64>,
     /// Pitch bend, -1..1, and the MIDI portamento.
     bend: f64,
+    /// Detune (cents) the oscillator ratios below were computed for:
+    /// `exp2` once per change, not per oscillator and sample.
+    detune_key: f64,
+    detune_ratio: [f64; OSCS],
     midi_glide_coef: f64,
     last_hz: f64,
     leap_count: usize,
@@ -525,6 +536,8 @@ impl Default for Vocoder {
             notes: NoteStack::default(),
             follow_note: None,
             bend: 0.0,
+            detune_key: f64::NAN,
+            detune_ratio: [1.0; OSCS],
             midi_glide_coef: 1.0,
             last_hz: 0.0,
             leap_count: 0,
@@ -798,7 +811,11 @@ impl Vocoder {
 
     /// MIDI pitch bend, -1 to 1 (bends the carrier by the bend range).
     pub fn set_bend(&mut self, bend: f64) {
-        self.bend = bend.clamp(-1.0, 1.0);
+        self.bend = if bend.is_finite() {
+            bend.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
     }
 
     fn free_voice(&self) -> usize {
@@ -909,6 +926,13 @@ impl Vocoder {
         let norm = 1.0 / (oscs as f64).sqrt();
         let (att, rel) = (self.attack_coef, self.release_coef);
         let bend = (self.bend * s.bend_range / 12.0).exp2();
+        if self.detune_key != s.detune_cents {
+            self.detune_key = s.detune_cents;
+            for (r, spread) in self.detune_ratio.iter_mut().zip(SPREAD) {
+                *r = (spread * detune).exp2();
+            }
+        }
+        let ratios = self.detune_ratio;
         let mut out = 0.0;
         let mut level = 0.0;
         for v in &mut self.voices {
@@ -933,18 +957,19 @@ impl Vocoder {
                 continue;
             }
             let mut x = 0.0;
-            for (o, spread) in SPREAD.iter().enumerate().take(oscs) {
-                let hz = v.hz * bend * (spread * detune).exp2();
+            let hz_bent = v.hz * bend;
+            for (o, ratio) in ratios.iter().enumerate().take(oscs) {
+                let hz = hz_bent * ratio;
                 let dt = (hz / sr).min(0.5);
                 let t = v.phase[o];
                 x += match s.carrier {
                     Carrier::Square => {
                         let sq = if t < 0.5 { 1.0 } else { -1.0 };
-                        sq + blep(t, dt) - blep((t + 0.5) % 1.0, dt)
+                        sq + blep(t, dt) - blep(wrap(t + 0.5), dt)
                     }
                     _ => 2.0 * t - 1.0 - blep(t, dt),
                 };
-                v.phase[o] = (t + dt) % 1.0;
+                v.phase[o] = wrap(t + dt);
             }
             out += x * norm * v.gain;
         }
