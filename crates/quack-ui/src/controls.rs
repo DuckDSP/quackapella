@@ -505,14 +505,32 @@ pub(crate) fn choice_menu(
     labels: &[&str],
     accent: Color32,
 ) -> bool {
+    choice_menu_at(ui, params, id, anchor, labels, accent, false)
+}
+
+/// [`choice_menu`] hanging under `anchor`, or standing above it with
+/// `up` (near the bottom of the editor). A click on `anchor` itself
+/// never closes it (the click that opened it lands there).
+pub(crate) fn choice_menu_at(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    id: ParamId,
+    anchor: Rect,
+    labels: &[&str],
+    accent: Color32,
+    up: bool,
+) -> bool {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let lit = params.get_plain(id).max(0.0).round() as usize;
     let row = 26.0;
     #[allow(clippy::cast_precision_loss)]
-    let r = Rect::from_min_size(
-        pos2(anchor.left(), anchor.bottom() + 4.0),
-        vec2(anchor.width(), row * labels.len() as f32 + 8.0),
-    );
+    let h = row * labels.len() as f32 + 8.0;
+    let top = if up {
+        anchor.top() - 4.0 - h
+    } else {
+        anchor.bottom() + 4.0
+    };
+    let r = Rect::from_min_size(pos2(anchor.left(), top), vec2(anchor.width(), h));
     let mut open = true;
     egui::Area::new(ui.id().with(("quack-menu", id.index())))
         .fixed_pos(r.min)

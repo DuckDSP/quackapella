@@ -137,9 +137,11 @@ pub struct UiState {
     vocoder_tab: usize,
     /// Perform row lists open, and where they hang from.
     keys_menu: bool,
+    voice_menu: bool,
     channel_menu: bool,
     source_menu: bool,
     keys_rect: egui::Rect,
+    voice_rect: egui::Rect,
     channel_rect: egui::Rect,
     source_rect: egui::Rect,
 }
@@ -158,9 +160,11 @@ impl Default for UiState {
             fx_tab: FxTab::default(),
             vocoder_tab: 0,
             keys_menu: false,
+            voice_menu: false,
             channel_menu: false,
             source_menu: false,
             keys_rect: egui::Rect::NOTHING,
+            voice_rect: egui::Rect::NOTHING,
             channel_rect: egui::Rect::NOTHING,
             source_rect: egui::Rect::NOTHING,
         }
@@ -459,14 +463,17 @@ fn layers_panel(
     let right_w = 262.0;
     let voice_r = Rect::from_min_size(pos2(r.right() - space::L - 150.0, row1), vec2(150.0, 28.0));
     let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
-    controls::stepper(
+    if controls::stepper(
         ui,
         params,
         ParamId::Voice,
         voice_r,
         range.name(),
         color::QUACK,
-    );
+    ) {
+        st.voice_menu = !st.voice_menu;
+    }
+    st.voice_rect = voice_r;
     let low_r = Rect::from_min_size(
         pos2(r.right() - space::L - right_w, row1),
         vec2(right_w - 150.0 - space::S, 28.0),

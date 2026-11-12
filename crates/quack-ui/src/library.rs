@@ -103,6 +103,14 @@ pub fn save(dir: &Path, preset: &Preset) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Delete a user preset file.
+///
+/// # Errors
+/// Any I/O error.
+pub fn delete(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
 /// Find a user preset by name.
 #[must_use]
 pub fn find(dir: &Path, name: &str) -> Option<Preset> {
@@ -182,6 +190,8 @@ mod tests {
         save_favorites(&dir, &favs).expect("favorites");
         assert_eq!(favorites(&dir), favs);
         assert_eq!(list(&dir).len(), 1);
+        delete(&path).expect("delete");
+        assert!(list(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

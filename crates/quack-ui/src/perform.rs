@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::control::{MACRO_COUNT, can_modulate};
+use quack_dsp::latency::VoiceRange;
 use quack_dsp::midiout::OutSource;
 use quack_dsp::params::{MACRO_PARAMS, ParamValues};
 use quack_dsp::presets::{self, CATEGORIES, FACTORY, Preset};
@@ -44,6 +45,9 @@ pub struct PresetUi {
     shelf: Option<Shelf>,
     search: String,
     favs: Option<BTreeSet<String>>,
+    /// User preset whose delete button was clicked once (a second
+    /// click deletes it).
+    deleting: Option<String>,
 }
 
 impl PresetUi {
@@ -468,7 +472,8 @@ fn star(p: &egui::Painter, c: egui::Pos2, r: f32, on: bool, col: Color32) {
 /// the presets of the shelf on the right with a search field and a
 /// favorite star each, the hovered preset's description below. A
 /// click loads the preset and leaves the browser open to try the next;
-/// Escape or a click outside closes it.
+/// Escape or a click outside closes it. A user preset has a delete
+/// button (x), which asks for a second click.
 fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Rect) {
     let users: Vec<Entry> = st.presets.users().to_vec();
     let all = items(&users);
@@ -499,6 +504,9 @@ fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Re
     let r = Rect::from_min_size(pos2(x, anchor.bottom() + 6.0), size_v);
     let mut pick: Option<Item> = None;
     let mut toggle: Option<String> = None;
+    let mut delete: Option<Item> = None;
+    let mut arm_delete: Option<Option<String>> = None;
+    let deleting = st.presets.deleting.clone();
     let mut new_shelf = None;
     let mut hovered: Option<Item> = None;
     let mut close = false;
@@ -654,9 +662,72 @@ fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Re
                                 color::TEXT_FAINT.gamma_multiply(0.6)
                             },
                         );
+                        // User presets: a delete button, clicked twice.
+                        let mut del_clicked = false;
+                        if it.factory.is_none() {
+                            let armed = deleting.as_deref() == Some(it.key.as_str());
+                            let del_r = if armed {
+                                Rect::from_min_size(
+                                    pos2(row.right() - 112.0, row.top() + 2.0),
+                                    vec2(108.0, row.height() - 4.0),
+                                )
+                            } else {
+                                Rect::from_center_size(
+                                    pos2(row.right() - 14.0, row.center().y),
+                                    vec2(22.0, 22.0),
+                                )
+                            };
+                            let dresp = ui.interact(
+                                del_r,
+                                ui.id().with(("quack-del", &it.key)),
+                                Sense::click(),
+                            );
+                            let p = ui.painter();
+                            if armed {
+                                rounded(
+                                    p,
+                                    del_r,
+                                    radius::CONTROL - 1,
+                                    color::METER_OVER.gamma_multiply(0.25),
+                                    color::METER_OVER,
+                                );
+                                text(
+                                    p,
+                                    del_r.center(),
+                                    Align2::CENTER_CENTER,
+                                    "Click to delete",
+                                    size::CAPTION - 3.0,
+                                    color::METER_OVER,
+                                );
+                            } else if resp.hovered() || dresp.hovered() {
+                                let c = if dresp.hovered() {
+                                    color::METER_OVER
+                                } else {
+                                    color::TEXT_FAINT
+                                };
+                                let m = del_r.center();
+                                for (a, b) in [(-4.0, 4.0), (4.0, -4.0)] {
+                                    p.line_segment(
+                                        [m + vec2(-4.0, a), m + vec2(4.0, b)],
+                                        egui::Stroke::new(1.5_f32, c),
+                                    );
+                                }
+                            }
+                            if dresp.hovered() {
+                                hovered = Some((*it).clone());
+                            }
+                            if dresp.clicked() {
+                                del_clicked = true;
+                                if armed {
+                                    delete = Some((*it).clone());
+                                } else {
+                                    arm_delete = Some(Some(it.key.clone()));
+                                }
+                            }
+                        }
                         if sresp.clicked() {
                             toggle = Some(it.key.clone());
-                        } else if resp.clicked() {
+                        } else if resp.clicked() && !del_clicked {
                             pick = Some((*it).clone());
                         }
                         let t = text(
@@ -684,7 +755,7 @@ fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Re
                         }
                         // Program change number (factory) and, off its
                         // own shelf, the category.
-                        let mut rx = row.right() - 8.0;
+                        let mut rx = row.right() - if it.factory.is_none() { 32.0 } else { 8.0 };
                         if let Some(i) = it.factory {
                             let pc = text(
                                 p,
@@ -749,6 +820,37 @@ fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Re
             close = out || ui.input(|i| i.key_pressed(egui::Key::Escape));
         });
     st.presets.search = search;
+    // A click anywhere else disarms the delete button.
+    if let Some(a) = arm_delete {
+        st.presets.deleting = a;
+    } else if pick.is_some() || toggle.is_some() || new_shelf.is_some() {
+        st.presets.deleting = None;
+    }
+    if let Some(it) = delete {
+        st.presets.deleting = None;
+        let now = ui.input(|i| i.time);
+        if let Some(path) = &it.path {
+            match library::delete(path) {
+                Ok(()) => {
+                    st.presets.note = Some((format!("Deleted \u{201c}{}\u{201d}", it.name), now));
+                    if st.presets.favs().contains(&it.key) {
+                        st.presets.toggle_favorite(&it.key, now);
+                    }
+                    // The sound stays; it is just no longer a preset.
+                    if let Some(ctl) = params.control()
+                        && ctl.factory().is_none()
+                        && ctl.user_preset() == it.name
+                    {
+                        ctl.set_loaded(None, "");
+                        st.presets.seen = Some(ctl.recall_count());
+                        st.presets.baseline = None;
+                    }
+                }
+                Err(e) => st.presets.note = Some((format!("Could not delete: {e}"), now)),
+            }
+        }
+        st.presets.users = None;
+    }
     if let Some(s) = new_shelf {
         st.presets.shelf = Some(s);
     }
@@ -1394,10 +1496,27 @@ pub(crate) fn perform_menus(
         );
     }
     if st.channel_menu {
-        let r = Rect::from_min_size(st.channel_rect.min, vec2(st.channel_rect.width(), 0.0));
-        let r = r.translate(vec2(0.0, -26.0 * 16.0 - 12.0));
-        st.channel_menu =
-            controls::choice_menu(ui, params, ParamId::MidiOutChannel, r, &CHANNELS, accent);
+        // Above the stepper: the list is taller than the room below.
+        st.channel_menu = controls::choice_menu_at(
+            ui,
+            params,
+            ParamId::MidiOutChannel,
+            st.channel_rect,
+            &CHANNELS,
+            accent,
+            true,
+        );
+    }
+    if st.voice_menu {
+        let labels: Vec<&str> = VoiceRange::ALL.iter().map(|v| v.name()).collect();
+        st.voice_menu = controls::choice_menu(
+            ui,
+            params,
+            ParamId::Voice,
+            st.voice_rect,
+            &labels,
+            color::QUACK,
+        );
     }
     if st.source_menu {
         st.source_menu = controls::choice_menu(
