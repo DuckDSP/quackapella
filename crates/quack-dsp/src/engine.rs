@@ -380,6 +380,9 @@ impl Engine {
                 }
                 return;
             }
+            // Macros act through the values they modulate (the adapter
+            // applies them before the engine sees anything).
+            ParamId::Macro1 | ParamId::Macro2 | ParamId::Macro3 | ParamId::Macro4 => return,
             _ => {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();

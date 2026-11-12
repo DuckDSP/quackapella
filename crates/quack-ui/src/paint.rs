@@ -72,6 +72,30 @@ pub(crate) fn knob(p: &Painter, c: Pos2, size: f32, t: f32, accent: Color32) {
     );
 }
 
+/// Macro modulation on a knob: a thin outer arc from the set value `t`
+/// to the modulated one `m`, and a dot where the macros take it.
+pub(crate) fn mod_arc(p: &Painter, c: Pos2, size: f32, t: f32, m: f32, accent: Color32) {
+    let scale = size / 64.0;
+    let radius = 31.5 * scale;
+    let (a, b) = (t.clamp(0.0, 1.0), m.clamp(0.0, 1.0));
+    let at = |u: f32| {
+        let ang = std::f32::consts::PI * (0.75 + 1.5 * u);
+        c + vec2(ang.cos(), ang.sin()) * radius
+    };
+    let pts: Vec<Pos2> = (0..=24)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let u = a + (b - a) * i as f32 / 24.0;
+            at(u)
+        })
+        .collect();
+    p.add(Shape::line(
+        pts,
+        Stroke::new(1.5_f32, color::TEXT.gamma_multiply(0.7)),
+    ));
+    p.circle_filled(at(b), 2.5 * scale.max(0.8), accent.gamma_multiply(1.2));
+}
+
 /// The value inside a knob, as in Knock: number in the value font, unit
 /// smaller and dimmer; shrunk until it fits the face.
 pub(crate) fn knob_value(p: &Painter, r: Rect, val: &str, unit: &str, size: f32) {

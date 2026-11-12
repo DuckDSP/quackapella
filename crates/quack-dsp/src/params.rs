@@ -7,7 +7,7 @@
 //! automation refer to them). Ranges reserved for the next steps:
 //! `100..` pitch detection, `200..` pitch / formant shift, `300..`
 //! autotune, `400..` harmonizer, `500..` vocoder, `600..` Manipulator
-//! style effects.
+//! style effects, `700..` macros.
 
 /// How a parameter maps between plain and normalized (0..1) values.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -175,9 +175,21 @@ pub enum ParamId {
     BendRange,
     VocoderWidth,
     VocoderLofi,
+    Macro1,
+    Macro2,
+    Macro3,
+    Macro4,
 }
 
-pub const PARAM_COUNT: usize = 74;
+pub const PARAM_COUNT: usize = 78;
+
+/// The four macro knobs (see [`crate::control`]).
+pub const MACRO_PARAMS: [ParamId; 4] = [
+    ParamId::Macro1,
+    ParamId::Macro2,
+    ParamId::Macro3,
+    ParamId::Macro4,
+];
 
 /// The twelve note switches of the autotune, C first.
 pub const NOTE_PARAMS: [ParamId; 12] = [
@@ -909,6 +921,50 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "macro_1",
+        host_id: 700,
+        name: "Macro 1",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "macro_2",
+        host_id: 701,
+        name: "Macro 2",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "macro_3",
+        host_id: 702,
+        name: "Macro 3",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "macro_4",
+        host_id: 703,
+        name: "Macro 4",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -987,6 +1043,10 @@ impl ParamId {
         Self::BendRange,
         Self::VocoderWidth,
         Self::VocoderLofi,
+        Self::Macro1,
+        Self::Macro2,
+        Self::Macro3,
+        Self::Macro4,
     ];
 
     #[must_use]

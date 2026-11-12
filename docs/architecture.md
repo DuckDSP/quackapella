@@ -309,6 +309,38 @@ harmony=2 harmony_1=11` (indices d'intervalle : 9 = Off, 11 = tierce
 au-dessus, 4 = sixte en dessous) ; en mode Synth le rendu sort en stéréo.
 Rendus d'écoute dans `ecoute/harmoniseur/`.
 
+## Presets, macros, MIDI learn (étape 8)
+
+- **Presets d'usine** (`quack_dsp::presets::FACTORY`, compilés dans le
+  plugin) : 32 presets en cinq catégories (Natural, Tune, Creative,
+  Harmony, Vocoder), chacun avec ses quatre macros. Un preset règle tout
+  sauf ce qui dépend du chanteur et de la session : Bypass, *Voice*,
+  Low Latency, gain d'entrée et tonalité (*Key*).
+- **Presets utilisateur** : fichiers texte `.qkpreset` (`clé = valeur`,
+  paramètres par leur clé stable du registre), dans
+  `~/Library/Audio/Presets/DuckDSP/Quackapella/` sous macOS. Lus à
+  l'ouverture du navigateur, écrits par *Save*. Une marque `*` signale
+  un preset modifié.
+- **Macros** : paramètres hôte 700 à 703 (automatisables). Chaque macro
+  déplace jusqu'à 8 paramètres, chacun de -100 à +100 % de sa plage à
+  fond, par-dessus la valeur réglée (bornée). L'adaptateur applique les
+  macros aux valeurs avant le moteur (`QuackParams::engine_values`) :
+  l'hôte garde la valeur de base, le bouton montre un arc fin jusqu'à la
+  valeur modulée. Interdit aux macros : Mode, Bypass, Voice et Low
+  Latency (ils changeraient la latence ou toute la chaîne).
+- **MIDI learn** : clic droit sur n'importe quel contrôle, *MIDI learn*,
+  puis bouger un contrôleur. Un CC par paramètre (macros comprises), le
+  CC écrit directement la valeur du paramètre sur le thread audio
+  (atomiques, sans allocation). CC 64 et 120 à 127 restent réservés.
+- **Program Change** (désactivé par défaut) : le programme n rappelle le
+  preset d'usine n, sur le thread audio.
+- Macros, CC appris, preset chargé et zoom sont sauvés avec la session
+  (`#[persist] control`, texte indexé par clé de paramètre).
+- **Zoom** 75 à 200 % (rangée Macros) ; l'éditeur redimensionne la
+  fenêtre et adopte la taille si l'hôte la change lui-même.
+
+Aucune latence ajoutée : tout se passe au niveau des paramètres.
+
 ## Modes
 
 | Mode | Intention | Formants |
@@ -345,7 +377,7 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
 6. **Harmoniseur** : voix sur les grains de la voix, MIDI polyphonique,
    intervalles dans la gamme, accords MIDI, humanisation, stéréo.
 7. Vocodeur et talkbox avec porteuse interne.
-8. Interface complète, presets, macros, MIDI learn, zoom.
+8. **Interface complète, presets, macros, MIDI learn, zoom.**
 9. **Optimisation CPU et tests en live** : voir « Charge CPU et
    robustesse » ci-dessous.
 

@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use quack_dsp::ParamId;
+use quack_dsp::control::ControlState;
 use quack_dsp::params::ParamValues;
+use truce::core::custom_state::{PersistField, StateCursor, StateField};
 use truce::prelude::*;
 use truce_params::FloatParamReadF64;
 
@@ -736,6 +738,50 @@ pub struct QuackParams {
     )]
     pub vocoder_lofi: FloatParam,
 
+    #[param(
+        id = 700,
+        name = "Macro 1",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub macro_1: FloatParam,
+
+    #[param(
+        id = 701,
+        name = "Macro 2",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub macro_2: FloatParam,
+
+    #[param(
+        id = 702,
+        name = "Macro 3",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub macro_3: FloatParam,
+
+    #[param(
+        id = 703,
+        name = "Macro 4",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub macro_4: FloatParam,
+
+    /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
+    #[persist]
+    pub control: ControlCell,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -909,6 +955,64 @@ impl QuackParams {
             ParamId::VocoderLofi,
             FloatParamReadF64::value(&self.vocoder_lofi),
         );
+        for (id, p) in quack_dsp::params::MACRO_PARAMS.into_iter().zip([
+            &self.macro_1,
+            &self.macro_2,
+            &self.macro_3,
+            &self.macro_4,
+        ]) {
+            v.set(id, FloatParamReadF64::value(p));
+        }
         v
+    }
+
+    /// What the engine plays: the host values with the macros applied.
+    #[must_use]
+    pub fn engine_values(&self) -> ParamValues {
+        let mut v = self.to_values();
+        self.control.apply_macros(&mut v);
+        v
+    }
+
+    /// Recall factory preset `i` from the audio thread (MIDI program
+    /// change): atomics only, the setup parameters stay. Returns
+    /// whether it exists.
+    pub fn recall_factory(&self, i: usize) -> bool {
+        let Some(f) = quack_dsp::presets::FACTORY.get(i) else {
+            return false;
+        };
+        let values = f.values();
+        for id in ParamId::ALL {
+            if quack_dsp::presets::in_preset(id) {
+                let spec = id.spec();
+                self.set_normalized(spec.host_id, spec.kind.normalize(values.get(id)));
+            }
+        }
+        self.control.recall_factory_macros(i);
+        true
+    }
+}
+
+/// [`ControlState`] as a saved field of the host state: written as the
+/// text of [`ControlState::to_text`], keyed by parameter key.
+#[derive(Debug, Default)]
+pub struct ControlCell(pub ControlState);
+
+impl std::ops::Deref for ControlCell {
+    type Target = ControlState;
+    fn deref(&self) -> &ControlState {
+        &self.0
+    }
+}
+
+impl PersistField for ControlCell {
+    fn persist_write(&self, buf: &mut Vec<u8>) {
+        self.0.to_text().write_field(buf);
+    }
+
+    fn persist_read(&self, cursor: &mut StateCursor) {
+        if let Some(text) = String::read_field(cursor) {
+            self.0.load_text(&text);
+        }
     }
 }

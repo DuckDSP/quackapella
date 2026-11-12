@@ -207,3 +207,72 @@ fn process_does_not_allocate() {
         Quackapella::process(&mut dsp, &params, &mut buffer, &ev, &mut ctx);
     });
 }
+
+#[test]
+fn learned_cc_and_program_change_move_the_parameters() {
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
+    params.control.arm(ParamId::Retune);
+    let cc = |cc, value| EventBody::ControlChange {
+        group: 0,
+        channel: 0,
+        cc,
+        value,
+    };
+    let mut ev = EventList::with_capacity(2);
+    ev.push(Event::new(0, cc(21, 127)));
+    run(&mut dsp, &params, &[0.0; 64], &ev);
+    assert_eq!(params.control.cc_for(ParamId::Retune), Some(21));
+    let retune = params.get_plain(ParamId::Retune.spec().host_id).unwrap();
+    assert!((retune - 400.0).abs() < 1e-6, "{retune}");
+
+    // Program changes only when switched on; the setup stays.
+    params.set_plain(ParamId::Voice.spec().host_id, 3.0);
+    let pc = |program| EventBody::ProgramChange {
+        group: 0,
+        channel: 0,
+        program,
+    };
+    let hard = quack_dsp::presets::FACTORY
+        .iter()
+        .position(|f| f.name == "Hard Tune")
+        .unwrap();
+    #[allow(clippy::cast_possible_truncation)]
+    let program = hard as u8;
+    let mut ev = EventList::with_capacity(1);
+    ev.push(Event::new(0, pc(program)));
+    run(&mut dsp, &params, &[0.0; 64], &ev);
+    assert_eq!(params.control.factory(), None);
+    params.control.set_program_change(true);
+    run(&mut dsp, &params, &[0.0; 64], &ev);
+    assert_eq!(params.control.factory(), Some(hard));
+    assert_eq!(params.get_plain(ParamId::Retune.spec().host_id), Some(0.0));
+    assert_eq!(params.get_plain(ParamId::Mode.spec().host_id), Some(1.0));
+    assert_eq!(params.get_plain(ParamId::Voice.spec().host_id), Some(3.0));
+    assert_eq!(params.control.names()[0], "Hardness");
+}
+
+#[test]
+fn control_state_is_saved_with_the_session() {
+    let a = QuackParams::default();
+    a.control.bind(7, ParamId::Macro2);
+    a.control.set_depth(1, ParamId::Formant, -40);
+    a.control.set_name(1, "Darker");
+    let blob = a.serialize_persist();
+    let b = QuackParams::default();
+    b.load_persist(&blob);
+    assert_eq!(b.control.cc_for(ParamId::Macro2), Some(7));
+    assert_eq!(b.control.depth(1, ParamId::Formant), -40);
+    assert_eq!(b.control.names()[1], "Darker");
+}
+
+#[test]
+fn macros_reach_the_engine_values() {
+    let params = QuackParams::default();
+    params.control.set_depth(0, ParamId::Pitch, 25);
+    params.set_plain(ParamId::Macro1.spec().host_id, 100.0);
+    let v = params.engine_values();
+    assert!((v.get(ParamId::Pitch) - 12.0).abs() < 1e-9);
+    assert_eq!(params.to_values().get(ParamId::Pitch), 0.0);
+}
