@@ -12,7 +12,7 @@ use quack_dsp::control::ControlState;
 use quack_dsp::params::ParamValues;
 use quack_dsp::presets::FACTORY;
 use quack_ui::theme::{self, color};
-use quack_ui::{BASE_H, BASE_W, ParamAccess, UiState, View, draw};
+use quack_ui::{BASE_H, BASE_W, Page, ParamAccess, UiState, View, draw};
 
 struct Values(RefCell<ParamValues>, ControlState);
 
@@ -34,14 +34,20 @@ impl ParamAccess for Values {
 fn editor_captures() {
     let write = std::env::var_os("QUACK_WRITE_CAPTURES").is_some();
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design");
+    // One capture per page; `mode` is the case (0 natural, 1 tune,
+    // 2 creative, 3 harmony, 4 vocoder).
     for (mode, name) in [
         (0.0, "natural"),
         (1.0, "tune"),
         (2.0, "creative"),
-        (3.0, "synth"),
+        (3.0, "harmony"),
+        (4.0, "vocoder"),
     ] {
         let mut v = ParamValues::default();
-        v.set(ParamId::Mode, mode);
+        v.set(ParamId::Mode, if mode == 0.0 { 0.0 } else { 1.0 });
+        if mode == 2.0 {
+            v.set(ParamId::CreativeOn, 1.0);
+        }
         v.set(ParamId::InputGain, 3.0);
         v.set(ParamId::Mix, 80.0);
         v.set(ParamId::Pitch, if mode == 0.0 { -5.0 } else { 12.0 });
@@ -61,7 +67,9 @@ fn editor_captures() {
             v.set(ParamId::Pitch, 0.0);
             v.set(ParamId::Fine, 0.0);
             v.set(ParamId::Harmony, 3.0);
-            v.set(ParamId::Harmony3, 16.0);
+            v.set(ParamId::Harmony3, 12.0);
+            v.set(ParamId::VocoderOn, 1.0);
+            v.set(ParamId::VocoderLevel, 35.0);
             v.set(ParamId::Lead, 90.0);
             v.set(ParamId::Double, 40.0);
             v.set(ParamId::Latch, 1.0);
@@ -79,21 +87,32 @@ fn editor_captures() {
         // A factory preset of the mode loaded, its macros half up, one
         // parameter learned.
         let ctl = ControlState::default();
-        let pick = ["Transparent Fix", "Hard Tune", "Monster", "Four-Part Choir"][mode as usize];
+        let pick = [
+            "Transparent Fix",
+            "Hard Tune",
+            "Monster",
+            "Four-Part Choir",
+            "Voice + Vocoder",
+        ][mode as usize];
         let fi = FACTORY
             .iter()
             .position(|f| f.name == pick)
             .expect("factory preset");
         ctl.recall_factory_macros(fi);
         let fv = quack_dsp::presets::merge(&v, &FACTORY[fi].values());
-        let v = if mode == 3.0 { fv } else { v };
-        let mut v = v;
+        let mut v = if mode >= 3.0 { fv } else { v };
+        if mode == 3.0 {
+            v.set(ParamId::VocoderOn, 1.0);
+            v.set(ParamId::VocoderLevel, 35.0);
+            v.set(ParamId::CreativeOn, 1.0);
+            v.set(ParamId::CreativeLevel, 60.0);
+        }
         v.set(ParamId::Macro1, 40.0);
         v.set(ParamId::Macro2, if mode == 2.0 { 30.0 } else { 0.0 });
         ctl.bind(1, ParamId::Macro1);
         let params = Values(RefCell::new(v), ctl);
         let view = View {
-            held_notes: if mode == 3.0 {
+            held_notes: if mode >= 3.0 {
                 (1 << 57) | (1 << 60) | (1 << 64)
             } else {
                 (1 << 57) | (1 << 64)
@@ -107,7 +126,11 @@ fn editor_captures() {
             tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
             tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
             frozen: mode == 2.0,
-            vocoder_notes: 0,
+            vocoder_notes: if mode == 4.0 {
+                (1 << 45) | (1 << 48) | (1 << 52)
+            } else {
+                0
+            },
             harmony_notes: if mode == 3.0 {
                 (1 << 52) | (1 << 60) | (1 << 64)
             } else {
@@ -117,6 +140,12 @@ fn editor_captures() {
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);
         let mut st = UiState::default();
+        st.set_page(match mode as u8 {
+            2 => Page::Creative,
+            3 => Page::Harmony,
+            4 => Page::Vocoder,
+            _ => Page::Voice,
+        });
         // Four seconds of a phrase in the graph.
         for i in 0..240 {
             let t = f64::from(i) / 60.0;

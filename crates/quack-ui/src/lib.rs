@@ -28,7 +28,9 @@ pub mod theme;
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
 use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
-use quack_dsp::harmony::{HarmonyMode, interval_short, interval_steps};
+use quack_dsp::harmony::{
+    HarmonyMode, interval_degree, interval_quality, interval_semitones, interval_short,
+};
 use quack_dsp::latency::VoiceRange;
 use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::vocoder::{Carrier, VocoderMode, bands_from_index};
@@ -81,11 +83,11 @@ pub struct View {
     pub tune_target: f32,
     pub tune_out: f32,
     pub tune_mask: u16,
-    /// A frozen grain is sounding (Creative mode).
+    /// A frozen grain is sounding (Creative layer).
     pub frozen: bool,
-    /// Notes the harmony voices sing (Synth mode), bit n = note n.
+    /// Notes the harmony voices sing, bit n = note n.
     pub harmony_notes: u128,
-    /// Notes the vocoder's carrier plays (Synth mode), bit n = note n.
+    /// Notes the vocoder's carrier plays, bit n = note n.
     pub vocoder_notes: u128,
 }
 
@@ -114,8 +116,8 @@ pub struct UiState {
     centre: f32,
     /// Scale list open.
     scale_menu: bool,
-    /// Synth mode page: the vocoder instead of the harmonies.
-    vocoder_page: bool,
+    /// Layer shown in the big panel.
+    page: Page,
     /// Preset browser, values of this frame.
     presets: perform::PresetUi,
 }
@@ -128,13 +130,65 @@ impl Default for UiState {
             head: 0,
             centre: 60.0,
             scale_menu: false,
-            vocoder_page: false,
+            page: Page::Voice,
             presets: perform::PresetUi::default(),
         }
     }
 }
 
+/// The layers, in the strip's order. Each has a page in the big panel
+/// (the voice's is the pitch graph).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Page {
+    #[default]
+    Voice,
+    Creative,
+    Harmony,
+    Vocoder,
+}
+
+impl Page {
+    pub const ALL: [Self; 4] = [Self::Voice, Self::Creative, Self::Harmony, Self::Vocoder];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Voice => "Voice",
+            Self::Creative => "Creative",
+            Self::Harmony => "Harmony",
+            Self::Vocoder => "Vocoder",
+        }
+    }
+
+    /// The layer's switch (the voice is always on).
+    #[must_use]
+    pub const fn switch(self) -> Option<ParamId> {
+        match self {
+            Self::Voice => None,
+            Self::Creative => Some(ParamId::CreativeOn),
+            Self::Harmony => Some(ParamId::HarmonyOn),
+            Self::Vocoder => Some(ParamId::VocoderOn),
+        }
+    }
+
+    /// The layer's level.
+    #[must_use]
+    pub const fn level(self) -> ParamId {
+        match self {
+            Self::Voice => ParamId::Lead,
+            Self::Creative => ParamId::CreativeLevel,
+            Self::Harmony => ParamId::HarmonyLevel,
+            Self::Vocoder => ParamId::VocoderLevel,
+        }
+    }
+}
+
 impl UiState {
+    /// Show a layer's page in the big panel.
+    pub fn set_page(&mut self, page: Page) {
+        self.page = page;
+    }
+
     /// Close an edit left open (window closed mid-drag).
     pub fn end_open_edits(&mut self, params: &dyn ParamAccess) {
         if let Some((id, _)) = self.drag.take() {
@@ -148,24 +202,23 @@ pub fn mode_accent(mode: VoiceMode) -> Color32 {
     match mode {
         VoiceMode::Natural => color::NATURAL,
         VoiceMode::Tune => color::TUNE,
-        VoiceMode::Creative => color::CREATIVE,
-        VoiceMode::Synth => color::SYNTH,
     }
 }
 
-fn mode_blurb(mode: VoiceMode) -> &'static str {
-    match mode {
-        VoiceMode::Natural => {
-            "Unheard correction: vibrato and scoops kept, short notes left alone, formants preserved."
-        }
-        VoiceMode::Tune => {
-            "The audible effect, from pop tune to robot: fast retune, set note transitions."
-        }
-        VoiceMode::Creative => {
-            "Pitch and formants apart: monster, chipmunk, freeze, glitch, octaves."
-        }
-        VoiceMode::Synth => "Harmonies played over MIDI, vocoder, talkbox and synthetic voices.",
+/// Accent of a layer: the voice in its correction style's.
+#[must_use]
+pub fn page_accent(page: Page, style: VoiceMode) -> Color32 {
+    match page {
+        Page::Voice => mode_accent(style),
+        Page::Creative => color::CREATIVE,
+        Page::Harmony => color::SYNTH,
+        Page::Vocoder => color::VOCODER,
     }
+}
+
+/// Whether a layer sounds (its switch on).
+fn layer_on(params: &dyn ParamAccess, page: Page) -> bool {
+    page.switch().is_none_or(|id| params.get_plain(id) >= 0.5)
 }
 
 const NOTE_NAMES: [&str; 12] = [
@@ -235,88 +288,13 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         color::TEXT_FAINT,
     );
 
-    // Mode panel: modes, then the voice range and latency switch.
+    // Layers strip: each layer's switch, page and level; then the
+    // correction style, the voice range and the latency switch.
     let mode_r = Rect::from_min_size(
         pos2(inner.left(), inner.top() + 48.0),
         vec2(inner.width(), 82.0),
     );
-    panel(&p, mode_r);
-    text(
-        &p,
-        mode_r.left_top() + vec2(space::L, 22.0),
-        Align2::LEFT_CENTER,
-        "Mode",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    let seg = Rect::from_min_size(
-        mode_r.left_top() + vec2(space::L + 64.0, 7.0),
-        vec2(mode_r.width() * 0.5, 30.0),
-    );
-    let names: Vec<&str> = VoiceMode::ALL.iter().map(|m| m.name()).collect();
-    let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
-    controls::segmented(ui, params, ParamId::Mode, seg, &names, &accents);
-    text(
-        &p,
-        pos2(seg.left(), mode_r.bottom() - 22.0),
-        Align2::LEFT_CENTER,
-        mode_blurb(mode),
-        size::BODY,
-        color::TEXT,
-    );
-    // Voice range: the lowest note sets the latency.
-    let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
-    let voice_r = Rect::from_min_size(
-        pos2(mode_r.right() - space::L - 150.0, seg.top()),
-        vec2(150.0, 30.0),
-    );
-    controls::stepper(
-        ui,
-        params,
-        ParamId::Voice,
-        voice_r,
-        range.name(),
-        color::QUACK,
-    );
-    let voice_caption = text(
-        &p,
-        pos2(voice_r.left() - space::S, voice_r.center().y),
-        Align2::RIGHT_CENTER,
-        "Voice",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    // Shorter grain attacks for low voices: less latency.
-    let low_r = Rect::from_min_size(
-        pos2(voice_caption.left() - space::M - 116.0, seg.top()),
-        vec2(116.0, 30.0),
-    );
-    controls::toggle(
-        ui,
-        params,
-        ParamId::LowLatency,
-        low_r,
-        "Low Latency",
-        color::QUACK,
-    );
-    let formants = if mode.preserves_formants() {
-        "Formants preserved"
-    } else {
-        "Formants free"
-    };
-    let formants_x = if mode == VoiceMode::Synth {
-        mode_r.right() - space::L - 220.0 - space::M
-    } else {
-        mode_r.right() - space::L
-    };
-    text(
-        &p,
-        pos2(formants_x, mode_r.bottom() - 22.0),
-        Align2::RIGHT_CENTER,
-        formants,
-        size::CAPTION,
-        accent,
-    );
+    layers_panel(ui, params, st, mode_r, mode);
 
     // Presets between the wordmark and the latency (drawn after the
     // mode panel so the browser opens over it).
@@ -340,22 +318,12 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     if now > 0.0 {
         st.record(view, now);
     }
-    if mode == VoiceMode::Creative {
-        creative_panel(ui, params, st, view, graph_r, accent);
-    } else if mode == VoiceMode::Synth {
-        // Two pages share the place: harmonies and vocoder.
-        let tabs = Rect::from_min_size(
-            pos2(mode_r.right() - space::L - 220.0, mode_r.bottom() - 36.0),
-            vec2(220.0, 26.0),
-        );
-        synth_tabs(ui, params, st, tabs, accent);
-        if st.vocoder_page {
-            vocoder_panel(ui, params, st, view, graph_r, accent);
-        } else {
-            harmony_panel(ui, params, st, view, graph_r, accent);
-        }
-    } else {
-        pitch_graph(&p, graph_r, view, st, accent);
+    let page_acc = page_accent(st.page, mode);
+    match st.page {
+        Page::Voice => pitch_graph(&p, graph_r, view, st, accent),
+        Page::Creative => creative_panel(ui, params, st, view, graph_r, page_acc),
+        Page::Harmony => harmony_panel(ui, params, st, view, graph_r, page_acc),
+        Page::Vocoder => vocoder_panel(ui, params, st, view, graph_r, page_acc),
     }
 
     // Bottom row: voice, level, MIDI.
@@ -466,6 +434,166 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     }
 }
 
+/// The layers strip: one cell per layer (switch, name opening its
+/// page, level), then the correction style, the voice range and the
+/// latency switch on the right.
+fn layers_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    r: Rect,
+    style: VoiceMode,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    let row1 = r.top() + 9.0;
+    let row2 = r.top() + 47.0;
+    // Right block: voice range and latency, then the style.
+    let right_w = 290.0;
+    let voice_r = Rect::from_min_size(pos2(r.right() - space::L - 150.0, row1), vec2(150.0, 28.0));
+    let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
+    controls::stepper(
+        ui,
+        params,
+        ParamId::Voice,
+        voice_r,
+        range.name(),
+        color::QUACK,
+    );
+    let low_r = Rect::from_min_size(
+        pos2(r.right() - space::L - right_w, row1),
+        vec2(right_w - 150.0 - space::S, 28.0),
+    );
+    controls::toggle(
+        ui,
+        params,
+        ParamId::LowLatency,
+        low_r,
+        "Low Latency",
+        color::QUACK,
+    );
+    let style_r = Rect::from_min_size(pos2(low_r.left() + 52.0, row2), vec2(right_w - 52.0, 28.0));
+    text(
+        p,
+        pos2(low_r.left(), style_r.center().y),
+        Align2::LEFT_CENTER,
+        "Style",
+        size::CAPTION,
+        color::TEXT_FAINT,
+    );
+    let names: Vec<&str> = VoiceMode::ALL.iter().map(|m| m.name()).collect();
+    let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
+    controls::segmented(ui, params, ParamId::Mode, style_r, &names, &accents);
+
+    // Layer cells.
+    let left = r.left() + space::L;
+    let right = low_r.left() - space::XL;
+    let gap = space::S;
+    #[allow(clippy::cast_precision_loss)]
+    let w = (right - left - gap * (Page::ALL.len() - 1) as f32) / Page::ALL.len() as f32;
+    for (i, page) in Page::ALL.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let x = left + (w + gap) * i as f32;
+        let acc = page_accent(page, style);
+        let on = layer_on(params, page);
+        let tab = Rect::from_min_size(pos2(x, row1), vec2(w, 28.0));
+        layer_tab(ui, params, st, tab, page, on, acc);
+        let fader = Rect::from_min_size(pos2(x, row2), vec2(w, 28.0));
+        let label = if page == Page::Voice { "Lead" } else { "Level" };
+        controls::fader(
+            ui,
+            params,
+            st,
+            page.level(),
+            fader,
+            if on { acc } else { acc.gamma_multiply(0.35) },
+            label,
+        );
+    }
+}
+
+/// A layer's tab: the switch (a dot) on the left, the name opening the
+/// layer's page. The voice has no switch.
+fn layer_tab(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    r: Rect,
+    page: Page,
+    on: bool,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    let shown = st.page == page;
+    let power = Rect::from_min_size(r.min, vec2(r.height(), r.height()));
+    let name_r = Rect::from_min_max(pos2(power.right(), r.top()), r.max);
+    let resp = ui.interact(
+        name_r,
+        ui.id().with(("quack-layer-tab", page as u8)),
+        Sense::click(),
+    );
+    if resp.clicked() {
+        st.page = page;
+    }
+    if shown {
+        paint::rounded(
+            p,
+            r,
+            radius::CONTROL,
+            accent.gamma_multiply(0.22),
+            accent.gamma_multiply(0.8),
+        );
+    } else {
+        paint::rounded(
+            p,
+            r,
+            radius::CONTROL,
+            if resp.hovered() {
+                color::BORDER
+            } else {
+                color::RAISED
+            },
+            color::BORDER,
+        );
+    }
+    text(
+        p,
+        name_r.center() - vec2(power.width() * 0.25, 0.0),
+        Align2::CENTER_CENTER,
+        page.name(),
+        size::BODY,
+        if shown { accent } else { color::TEXT_DIM },
+    );
+    // The switch: a lit dot when the layer sounds.
+    let dot = power.center() + vec2(2.0, 0.0);
+    if let Some(id) = page.switch() {
+        let presp = ui.interact(
+            power,
+            ui.id().with(("quack-layer-on", page as u8)),
+            Sense::click(),
+        );
+        if presp.clicked() {
+            set_once(params, id, if on { 0.0 } else { 1.0 });
+        }
+        crate::perform::attach(ui, &presp, params, id);
+        let ring = if presp.hovered() {
+            color::TEXT_DIM
+        } else {
+            color::TEXT_FAINT
+        };
+        p.circle_stroke(
+            dot,
+            6.5,
+            egui::Stroke::new(1.5_f32, if on { accent } else { ring }),
+        );
+        if on {
+            p.circle_filled(dot, 3.5, accent);
+        }
+    } else {
+        p.circle_filled(dot, 3.5, accent);
+    }
+}
+
 /// Pitch, fine and formant knobs, with what the setting does.
 fn voice_panel(
     ui: &egui::Ui,
@@ -523,8 +651,8 @@ fn voice_panel(
     }
 }
 
-/// The Creative mode's effects: layers, formant follow, robot, freeze,
-/// glitch. Takes the pitch graph's place in that mode.
+/// The creative layer: octave layers, formant follow, robot, freeze,
+/// glitch, all on the lead itself.
 fn creative_panel(
     ui: &egui::Ui,
     params: &dyn ParamAccess,
@@ -535,14 +663,7 @@ fn creative_panel(
 ) {
     let p = ui.painter();
     panel(p, r);
-    text(
-        p,
-        r.left_top() + vec2(space::L, 22.0),
-        Align2::LEFT_CENTER,
-        "Manipulate",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
+    layer_switch(ui, params, ParamId::CreativeOn, r, "Creative", accent);
     // Freeze: the big switch, with its state.
     let fz = Rect::from_min_size(
         pos2(r.right() - space::L - 120.0, r.top() + 8.0),
@@ -704,9 +825,8 @@ fn creative_panel(
     );
 }
 
-/// The Synth mode's harmony voices: source, intervals, levels and what
-/// makes them sound like several singers. Takes the pitch graph's place
-/// in that mode.
+/// The harmony layer: switch, source, intervals and what makes the
+/// voices sound like several singers.
 fn harmony_panel(
     ui: &egui::Ui,
     params: &dyn ParamAccess,
@@ -717,14 +837,7 @@ fn harmony_panel(
 ) {
     let p = ui.painter();
     panel(p, r);
-    text(
-        p,
-        r.left_top() + vec2(space::L, 22.0),
-        Align2::LEFT_CENTER,
-        "Harmony",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
+    layer_switch(ui, params, ParamId::HarmonyOn, r, "Harmony", accent);
     let mode = HarmonyMode::from_index(params.get_plain(ParamId::Harmony));
     let seg = Rect::from_min_size(
         pos2(r.right() - space::L - 280.0, r.top() + 8.0),
@@ -744,7 +857,10 @@ fn harmony_panel(
     };
     value(
         p,
-        pos2(r.left() + space::L + 74.0, r.top() + 22.0),
+        pos2(
+            r.left() + space::L + LAYER_SWITCH_W + space::M,
+            r.top() + 22.0,
+        ),
         Align2::LEFT_CENTER,
         &status,
         size::VALUE,
@@ -755,11 +871,11 @@ fn harmony_panel(
         },
     );
 
-    let knob_d = 58.0;
+    let knob_d = 64.0;
     let kw = (r.width() - 2.0 * space::L) / 6.0;
-    let row1 = r.top() + 104.0;
+    let row1 = r.top() + 124.0;
     let cap_y = row1 - knob_d * 0.5 - 16.0;
-    let intervals_on = matches!(mode, HarmonyMode::Scale | HarmonyMode::Chord);
+    let intervals_on = mode != HarmonyMode::Midi;
     let key = note_name(params.get_plain(ParamId::Key).round().clamp(0.0, 11.0) as u8 + 60);
     let key = key.trim_end_matches(char::is_numeric).to_owned();
     let scale = Scale::from_index(params.get_plain(ParamId::Scale));
@@ -777,9 +893,9 @@ fn harmony_panel(
         })
         .collect();
     let caption = match mode {
-        HarmonyMode::Off => "Harmonies off".to_owned(),
-        HarmonyMode::Midi => "Every held MIDI note is a voice".to_owned(),
-        HarmonyMode::Scale => format!("Steps of {key} {} from the lead", scale.name()),
+        HarmonyMode::Off | HarmonyMode::Midi => "Every held MIDI note is a voice".to_owned(),
+        HarmonyMode::Fixed => "Exact intervals from the lead (semitones)".to_owned(),
+        HarmonyMode::Scale => format!("Semitones from the lead, kept in {key} {}", scale.name()),
         HarmonyMode::Chord if chord.is_empty() => {
             format!("Hold a chord · until then, {key} {}", scale.name())
         }
@@ -791,13 +907,9 @@ fn harmony_panel(
         Align2::CENTER_CENTER,
         &caption,
         size::CAPTION - 1.0,
-        if mode == HarmonyMode::Off {
-            color::TEXT_FAINT
-        } else {
-            accent
-        },
+        accent,
     );
-    let interval = |v: f64| interval_short(interval_steps(v));
+    let interval = |v: f64| interval_short(interval_semitones(v));
     let dim = accent.gamma_multiply(0.35);
     for (i, id) in [
         ParamId::Harmony1,
@@ -810,7 +922,13 @@ fn harmony_panel(
     {
         #[allow(clippy::cast_precision_loss)]
         let cx = r.left() + space::L + kw * (i as f32 + 0.5);
-        let label = format!("Voice {}", i + 1);
+        let semis = interval_semitones(params.get_plain(id));
+        let label = match mode {
+            _ if semis == 0 => format!("Voice {}", i + 1),
+            HarmonyMode::Fixed => interval_quality(semis),
+            HarmonyMode::Scale | HarmonyMode::Chord => interval_degree(semis),
+            _ => format!("Voice {}", i + 1),
+        };
         controls::knob_named(
             ui,
             params,
@@ -823,6 +941,22 @@ fn harmony_panel(
             &interval,
             &label,
         );
+        // The voice's own level, under it.
+        let fr = Rect::from_center_size(
+            pos2(cx, row1 + knob_d * 0.5 + 38.0),
+            vec2(kw - space::S, 22.0),
+        );
+        let level = quack_dsp::params::HARMONY_LEVEL_PARAMS[i];
+        let live = intervals_on && semis != 0;
+        controls::fader(
+            ui,
+            params,
+            st,
+            level,
+            fr,
+            if live { accent } else { dim },
+            "",
+        );
     }
     let pct = |v: f64| format!("{v:.0}");
     let off = |v: f64| {
@@ -832,35 +966,10 @@ fn harmony_panel(
             format!("{v:.0}")
         }
     };
-    let levels: [(ParamId, &str); 2] = [(ParamId::Lead, "Lead"), (ParamId::HarmonyLevel, "Voices")];
-    for (i, (id, label)) in levels.into_iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let cx = r.left() + space::L + kw * (i as f32 + 4.5);
-        controls::knob_named(
-            ui,
-            params,
-            st,
-            id,
-            pos2(cx, row1),
-            knob_d,
-            0.0,
-            accent,
-            &off,
-            label,
-        );
-    }
-    text(
-        p,
-        pos2(r.left() + space::L + kw * 5.0, cap_y),
-        Align2::CENTER_CENTER,
-        "Levels",
-        size::CAPTION - 1.0,
-        color::TEXT_FAINT,
-    );
-
-    // Close voicing and latch, between the rows (MIDI notes).
-    let tog_y = row1 + knob_d * 0.5 + 34.0;
-    let close_r = Rect::from_min_size(pos2(r.left() + space::L + 8.0, tog_y), vec2(132.0, 26.0));
+    // Close voicing and latch, for the played notes (MIDI and Chord).
+    let tog_x = r.left() + space::L + kw * 4.0 + space::M;
+    let tog_w = kw * 2.0 - 2.0 * space::M;
+    let close_r = Rect::from_min_size(pos2(tog_x, row1 - 34.0), vec2(tog_w, 28.0));
     controls::toggle(
         ui,
         params,
@@ -869,16 +978,16 @@ fn harmony_panel(
         "Close Voicing",
         accent,
     );
-    let latch_r = Rect::from_min_size(pos2(close_r.right() + space::S, tog_y), vec2(84.0, 26.0));
+    let latch_r = Rect::from_min_size(pos2(tog_x, close_r.bottom() + space::S), vec2(tog_w, 28.0));
     controls::toggle(ui, params, ParamId::Latch, latch_r, "Latch", accent);
     text(
         p,
-        pos2(latch_r.right() + space::M, latch_r.center().y),
-        Align2::LEFT_CENTER,
+        pos2(latch_r.center().x, latch_r.bottom() + 16.0),
+        Align2::CENTER_CENTER,
         match mode {
             HarmonyMode::Midi => "The sustain pedal holds notes too",
             HarmonyMode::Chord => "Latch or pedal hold the chord",
-            _ => "For the MIDI and Chord modes",
+            _ => "MIDI and Chord sources",
         },
         size::CAPTION - 1.0,
         color::TEXT_FAINT,
@@ -920,56 +1029,26 @@ fn harmony_panel(
     }
 }
 
-/// Harmony and Vocoder page tabs (editor state, not parameters). A lit
-/// dot marks the page whose effect is on.
-fn synth_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, accent: Color32) {
-    let p = ui.painter();
-    paint::rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
-    let on = [
-        HarmonyMode::from_index(params.get_plain(ParamId::Harmony)) != HarmonyMode::Off,
-        VocoderMode::from_index(params.get_plain(ParamId::Vocoder)) != VocoderMode::Off,
-    ];
-    let w = r.width() / 2.0;
-    for (i, label) in ["Harmony", "Vocoder"].into_iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let seg = Rect::from_min_size(pos2(r.left() + w * i as f32, r.top()), vec2(w, r.height()));
-        let resp = ui.interact(seg, ui.id().with(("quack-synth-tab", i)), Sense::click());
-        if resp.clicked() {
-            st.vocoder_page = i == 1;
-        }
-        let lit = st.vocoder_page == (i == 1);
-        if lit {
-            paint::rounded(
-                p,
-                seg.shrink(2.0),
-                radius::CONTROL - 1,
-                accent.gamma_multiply(0.22),
-                accent.gamma_multiply(0.8),
-            );
-        } else if resp.hovered() {
-            paint::rounded(
-                p,
-                seg.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
-        }
-        let c = if lit { accent } else { color::TEXT_DIM };
-        text(
-            p,
-            seg.center() + vec2(5.0, 0.0),
-            Align2::CENTER_CENTER,
-            label,
-            size::BODY,
-            c,
-        );
-        let dot = pos2(seg.left() + 14.0, seg.center().y);
-        p.circle_filled(dot, 3.0, if on[i] { accent } else { color::BORDER });
-    }
+/// Width of a layer's switch in its page's title.
+const LAYER_SWITCH_W: f32 = 110.0;
+
+/// A layer's switch as its page's title (top left of `r`).
+fn layer_switch(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    id: ParamId,
+    r: Rect,
+    label: &str,
+    accent: Color32,
+) {
+    let sw = Rect::from_min_size(
+        pos2(r.left() + space::L, r.top() + 8.0),
+        vec2(LAYER_SWITCH_W, 28.0),
+    );
+    controls::toggle(ui, params, id, sw, label, accent);
 }
 
-/// The Synth mode's vocoder and talkbox: the voice shapes the internal
+/// The vocoder layer, vocoder or talkbox: the voice shapes the internal
 /// carrier synth (or the side-chain).
 fn vocoder_panel(
     ui: &egui::Ui,
@@ -981,14 +1060,8 @@ fn vocoder_panel(
 ) {
     let p = ui.painter();
     panel(p, r);
-    text(
-        p,
-        r.left_top() + vec2(space::L, 22.0),
-        Align2::LEFT_CENTER,
-        "Vocoder",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
+    layer_switch(ui, params, ParamId::VocoderOn, r, "Vocoder", accent);
+    let layer = params.get_plain(ParamId::VocoderOn) >= 0.5;
     let mode = VocoderMode::from_index(params.get_plain(ParamId::Vocoder));
     let seg = Rect::from_min_size(
         pos2(r.right() - space::L - 240.0, r.top() + 8.0),
@@ -1017,7 +1090,7 @@ fn vocoder_panel(
         .join(" ");
     let more = if playing.len() > 3 { " …" } else { "" };
     let status = match (mode, carrier) {
-        (VocoderMode::Off, _) => "-".to_owned(),
+        _ if !layer => "Off".to_owned(),
         (_, Carrier::Sidechain) => "Side-chain".to_owned(),
         _ if !playing.is_empty() && view.held_notes == 0 && follow => {
             format!("Follow · {shown}{more}")
@@ -1028,11 +1101,14 @@ fn vocoder_panel(
     };
     text(
         p,
-        pos2(r.left() + space::L + 80.0, r.top() + 22.0),
+        pos2(
+            r.left() + space::L + LAYER_SWITCH_W + space::M,
+            r.top() + 22.0,
+        ),
         Align2::LEFT_CENTER,
         &status,
         size::CAPTION,
-        if playing.is_empty() || mode == VocoderMode::Off {
+        if playing.is_empty() || !layer {
             color::TEXT_FAINT
         } else {
             accent
@@ -1040,7 +1116,6 @@ fn vocoder_panel(
     );
 
     let knob_d = 54.0;
-    let pct = |v: f64| format!("{v:.0}");
     let off = |v: f64| {
         if v < 0.5 {
             "Off".to_owned()
@@ -1054,17 +1129,17 @@ fn vocoder_panel(
     #[allow(clippy::cast_possible_truncation)]
     let octave = |v: f64| format!("{:+}", v.round() as i32 - 2);
     let vocoder_only = mode != VocoderMode::Talkbox;
+    let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
     let dim = accent.gamma_multiply(0.35);
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, bool);
     let row1: [Knob; 6] = [
-        (ParamId::VocoderLevel, "Level", &pct, true),
+        (ParamId::BendRange, "Bend", &st_fmt, pitched),
         (ParamId::Bands, "Bands", &bands, vocoder_only),
         (ParamId::Response, "Response", &ms, vocoder_only),
         (ParamId::BandShift, "Shift", &st_fmt, true),
         (ParamId::Sibilance, "Sibilance", &off, true),
         (ParamId::VocoderWidth, "Width", &off, true),
     ];
-    let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
     let synth = carrier != Carrier::Sidechain;
     let row2: [Knob; 6] = [
         (ParamId::CarrierOctave, "Octave", &octave, pitched),
@@ -1072,7 +1147,6 @@ fn vocoder_panel(
         (ParamId::CarrierNoise, "Noise", &off, pitched),
         (ParamId::CarrierRelease, "Release", &ms, synth),
         (ParamId::CarrierGlide, "Glide", &off, pitched),
-        // Bend Range stays a host parameter (rarely changed live).
         (ParamId::VocoderLofi, "Lo-Fi", &off, true),
     ];
     let kw = (r.width() - 2.0 * space::L) / 6.0;
@@ -1679,11 +1753,16 @@ mod tests {
             )),
             ..Default::default()
         };
-        for mode in 0..4 {
-            params
-                .values
-                .borrow_mut()
-                .set(ParamId::Mode, f64::from(mode));
+        for (mode, page) in Page::ALL.into_iter().enumerate() {
+            let mode = u8::try_from(mode).unwrap_or(0);
+            st.set_page(page);
+            {
+                let mut v = params.values.borrow_mut();
+                v.set(ParamId::Mode, f64::from(mode % 2));
+                if let Some(id) = page.switch() {
+                    v.set(id, 1.0);
+                }
+            }
             let view = View {
                 held_notes: (1 << 60) | (1 << 76),
                 latency_samples: 591,

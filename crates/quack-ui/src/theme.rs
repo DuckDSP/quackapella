@@ -54,6 +54,8 @@ pub mod color {
     pub const TUNE: Color32 = Color32::from_rgb(0x6C, 0xB8, 0xFA);
     pub const CREATIVE: Color32 = Color32::from_rgb(0xC0, 0x9C, 0xF6);
     pub const SYNTH: Color32 = Color32::from_rgb(0xF2, 0x9A, 0x62);
+    /// The vocoder layer, apart from the harmonies.
+    pub const VOCODER: Color32 = Color32::from_rgb(0xEE, 0x7E, 0xA6);
 
     /// Meters: under −6 dBFS, up to the ceiling, over it.
     pub const METER_OK: Color32 = Color32::from_rgb(0x4F, 0xC2, 0xB4);

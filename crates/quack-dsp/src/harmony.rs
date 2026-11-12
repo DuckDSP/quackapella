@@ -12,14 +12,17 @@
 //! - **MIDI**: every held note is a voice, at that pitch (polyphonic,
 //!   up to 8). The singer's vibrato and inflections are carried over
 //!   (*Expression*), so the stack moves with the voice.
-//! - **Scale**: up to four voices at fixed intervals counted in the
-//!   notes of the autotune's scale (a third above, a sixth below...),
-//!   from the note the lead is on: the intervals follow the key (major
-//!   or minor thirds where they belong). Chromatic counts in the major
-//!   scale of the key.
-//! - **Chord**: the same intervals, each moved to the nearest note of
-//!   the chord held on the MIDI input (any octave), never onto the
-//!   lead's own note; without a chord, the Scale behaviour.
+//! - **Fixed**: up to four voices at exact intervals in semitones from
+//!   the lead (parallel harmony: +4 is always a major third).
+//! - **Scale**: the same intervals, kept in the autotune's scale: each
+//!   voice goes to the scale note of that size of interval, so +3 and
+//!   +4 both give the third of the scale (major or minor where it
+//!   belongs). Chromatic counts in the major scale of the key.
+//! - **Chord**: the Scale notes, each moved to the nearest note of the
+//!   chord held on the MIDI input (any octave), never onto the lead's
+//!   own note; without a chord, the Scale behaviour.
+//!
+//! The intervals are in semitones, -24 to +24 (two octaves either way).
 //!
 //! What makes the stack sound like several singers rather than clones
 //! of one: each voice lags the lead by a few slowly wandering
@@ -41,10 +44,10 @@ pub const DOUBLE_VOICES: usize = 2;
 pub const MAX_VOICES: usize = MIDI_VOICES + DOUBLE_VOICES;
 /// Interval voices in the Scale and Chord modes.
 pub const INTERVAL_VOICES: usize = 4;
-/// Interval range, in scale steps either way (±9 = a tenth).
-pub const MAX_STEPS: i32 = 9;
-/// Interval choices: `-MAX_STEPS..=MAX_STEPS`, 0 = off.
-pub const INTERVAL_COUNT: u32 = 2 * MAX_STEPS as u32 + 1;
+/// Interval range, in semitones either way (two octaves).
+pub const MAX_SEMIS: i32 = 24;
+/// Interval choices: `-MAX_SEMIS..=MAX_SEMIS`, 0 = off.
+pub const INTERVAL_COUNT: u32 = 2 * MAX_SEMIS as u32 + 1;
 
 /// Voice fade in and out.
 const ATTACK_S: f64 = 0.015;
@@ -89,18 +92,22 @@ const MIN_VELOCITY_GAIN: f32 = 0.3;
 /// A pause this long ends a phrase.
 const PHRASE_GAP_S: f64 = 0.1;
 
+/// Where the harmony notes come from. `Off` is the layer switched off
+/// (the `harmony_on` parameter), not a choice of the `harmony` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum HarmonyMode {
     #[default]
     Off,
     Midi,
+    Fixed,
     Scale,
     Chord,
 }
 
 impl HarmonyMode {
-    pub const ALL: [Self; 4] = [Self::Off, Self::Midi, Self::Scale, Self::Chord];
+    /// The choices of the parameter, in its order.
+    pub const ALL: [Self; 4] = [Self::Midi, Self::Fixed, Self::Scale, Self::Chord];
 
     #[must_use]
     pub fn from_index(i: f64) -> Self {
@@ -114,70 +121,101 @@ impl HarmonyMode {
         match self {
             Self::Off => "Off",
             Self::Midi => "MIDI",
+            Self::Fixed => "Fixed",
             Self::Scale => "Scale",
             Self::Chord => "Chord",
         }
     }
 }
 
-/// Interval in scale steps from a parameter's plain value (index).
+/// Interval in semitones from a parameter's plain value (index).
 #[must_use]
-pub fn interval_steps(index: f64) -> i32 {
+pub fn interval_semitones(index: f64) -> i32 {
     #[allow(clippy::cast_possible_truncation)]
     let i = index.round() as i32;
-    i.clamp(0, 2 * MAX_STEPS) - MAX_STEPS
+    i.clamp(0, 2 * MAX_SEMIS) - MAX_SEMIS
 }
 
-/// Name of an interval of `steps` scale steps: "3rd up", "6th down",
-/// "Octave up", "Off".
+/// Parameter index (plain value) of an interval in semitones.
 #[must_use]
-pub fn interval_name(steps: i32) -> String {
-    if steps == 0 {
+pub fn interval_index(semis: i32) -> f64 {
+    f64::from(semis.clamp(-MAX_SEMIS, MAX_SEMIS) + MAX_SEMIS)
+}
+
+/// Exact name of an interval of `semis` semitones: "Maj 3rd",
+/// "5th", "Octave", "Min 6th + 8ve"; "Off" for 0.
+#[must_use]
+pub fn interval_quality(semis: i32) -> String {
+    const NAMES: [&str; 12] = [
+        "Octave", "Min 2nd", "Maj 2nd", "Min 3rd", "Maj 3rd", "4th", "Tritone", "5th", "Min 6th",
+        "Maj 6th", "Min 7th", "Maj 7th",
+    ];
+    let a = semis.unsigned_abs();
+    match a {
+        0 => "Off".to_owned(),
+        12 => "Octave".to_owned(),
+        24 => "2 Octaves".to_owned(),
+        _ if a < 12 => NAMES[a as usize].to_owned(),
+        _ => format!("{} + 8ve", NAMES[(a % 12) as usize]),
+    }
+}
+
+/// Degree name of an interval in a scale: "3rd", "6th", "Octave",
+/// "10th"; "Off" for 0. +3 and +4 semitones are both a third.
+#[must_use]
+pub fn interval_degree(semis: i32) -> String {
+    /// Scale degree (0 = unison) of each interval size within an octave.
+    const DEGREE: [u32; 12] = [0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6];
+    let a = semis.unsigned_abs();
+    if a == 0 {
         return "Off".to_owned();
     }
-    let dir = if steps > 0 { "up" } else { "down" };
-    let n = steps.unsigned_abs() + 1;
-    let name = match n {
+    let n = (a / 12) * 7 + DEGREE[(a % 12) as usize] + 1;
+    match n {
         8 => "Octave".to_owned(),
+        15 => "2 Octaves".to_owned(),
         2 => "2nd".to_owned(),
         3 => "3rd".to_owned(),
         _ => format!("{n}th"),
-    };
-    format!("{name} {dir}")
-}
-
-/// Short form for the knobs: "+3rd", "-6th", "+8ve".
-#[must_use]
-pub fn interval_short(steps: i32) -> String {
-    if steps == 0 {
-        return "Off".to_owned();
     }
-    let sign = if steps > 0 { '+' } else { '-' };
-    let n = steps.unsigned_abs() + 1;
-    let name = match n {
-        8 => "8ve".to_owned(),
-        2 => "2nd".to_owned(),
-        3 => "3rd".to_owned(),
-        _ => format!("{n}th"),
-    };
-    format!("{sign}{name}")
 }
 
-/// The note `steps` notes of `mask` (pitch classes, bit 0 = C) away from
-/// `from`, which is taken as a note of the scale.
+/// Signed short form for the knobs: "+4", "-12", "Off".
 #[must_use]
-pub fn scale_step(from: i32, steps: i32, mask: u16) -> i32 {
+pub fn interval_short(semis: i32) -> String {
+    if semis == 0 {
+        "Off".to_owned()
+    } else {
+        format!("{semis:+}")
+    }
+}
+
+/// The note of `mask` (pitch classes, bit 0 = C) `semis` semitones from
+/// `from`, kept in the scale: the exact note when it is in the scale,
+/// else the nearer scale note. On a tie the interval keeps its kind
+/// (a minor third asked from a note without one gives the major third,
+/// a major third the minor one: both stay thirds).
+#[must_use]
+pub fn scale_interval(from: i32, semis: i32, mask: u16) -> i32 {
     let mask = if mask & 0xFFF == 0 { 0xFFF } else { mask };
+    if semis == 0 {
+        return from;
+    }
     let in_mask = |n: i32| mask & (1 << n.rem_euclid(12)) != 0;
-    let mut n = from;
-    let dir = steps.signum();
-    for _ in 0..steps.abs() {
-        n += dir;
-        while !in_mask(n) {
-            n += dir;
+    let dir = semis.signum();
+    let target = from + semis;
+    // Minor seconds, thirds, sixths, sevenths and the fourth widen on a
+    // tie; the others narrow.
+    let widen = matches!(semis.unsigned_abs() % 12, 1 | 3 | 5 | 8 | 10);
+    let first = if widen { dir } else { -dir };
+    for d in 0..=6 {
+        for cand in [target + d * first, target - d * first] {
+            if (cand - from) * dir > 0 && in_mask(cand) {
+                return cand;
+            }
         }
     }
-    n
+    target
 }
 
 /// Nearest note of `chord` (pitch classes) to `note` on the side `dir`
@@ -209,8 +247,10 @@ pub fn nearest_chord_note(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HarmonySettings {
     pub mode: HarmonyMode,
-    /// Scale steps of the interval voices (0 = off).
+    /// Intervals of the interval voices, semitones (0 = off).
     pub intervals: [i32; INTERVAL_VOICES],
+    /// Level of each interval voice, 0 to 1.
+    pub voice_gain: [f32; INTERVAL_VOICES],
     /// Pitch classes the intervals count in (the engine passes the
     /// major scale of the key when the autotune is chromatic: thirds
     /// must be thirds).
@@ -238,6 +278,7 @@ impl Default for HarmonySettings {
         Self {
             mode: HarmonyMode::Off,
             intervals: [0; INTERVAL_VOICES],
+            voice_gain: [1.0; INTERVAL_VOICES],
             scale: 0xFFF,
             chord: 0,
             expression: 1.0,
@@ -492,7 +533,10 @@ impl Harmonizer {
             s.gate = self.settings.double;
             s.velocity = 1.0;
         }
-        if matches!(mode, HarmonyMode::Scale | HarmonyMode::Chord) {
+        if matches!(
+            mode,
+            HarmonyMode::Fixed | HarmonyMode::Scale | HarmonyMode::Chord
+        ) {
             for (i, s) in self.slots[..MIDI_VOICES].iter_mut().enumerate() {
                 s.gate = i < INTERVAL_VOICES && self.settings.intervals[i] != 0;
                 s.velocity = 1.0;
@@ -564,6 +608,10 @@ impl Harmonizer {
 
     /// Pitch classes the intervals count in.
     fn scale_mask(&self) -> u16 {
+        if self.settings.mode == HarmonyMode::Fixed {
+            // Parallel: the lead's own semitone is the reference.
+            return 0xFFF;
+        }
         self.settings.scale & 0xFFF
     }
 
@@ -579,7 +627,11 @@ impl Harmonizer {
             if k == 0 {
                 continue;
             }
-            let mut n = scale_step(lead, k, self.scale_mask());
+            let mut n = if st.mode == HarmonyMode::Fixed {
+                lead + k
+            } else {
+                scale_interval(lead, k, self.scale_mask())
+            };
             if st.mode == HarmonyMode::Chord
                 && st.chord & 0xFFF != 0
                 && let Some(c) =
@@ -626,7 +678,7 @@ impl Harmonizer {
                 base + 12.0 * f64::from(s.fold)
             }
             HarmonyMode::Midi => self.slots[v].note?,
-            HarmonyMode::Scale | HarmonyMode::Chord => {
+            HarmonyMode::Fixed | HarmonyMode::Scale | HarmonyMode::Chord => {
                 if v >= INTERVAL_VOICES {
                     return None;
                 }
@@ -670,6 +722,17 @@ impl Harmonizer {
         #[allow(clippy::cast_precision_loss)]
         let dt = f64::from(WANDER_EVERY) / self.sample_rate;
         let mut power = 0.0f32;
+        let intervals = matches!(
+            st.mode,
+            HarmonyMode::Fixed | HarmonyMode::Scale | HarmonyMode::Chord
+        );
+        let own = |i: usize| {
+            if intervals && i < INTERVAL_VOICES {
+                st.voice_gain[i]
+            } else {
+                1.0
+            }
+        };
         for (i, s) in self.slots.iter_mut().enumerate() {
             let doubler = i >= MIDI_VOICES;
             let on = s.gate && (doubler || st.mode != HarmonyMode::Off);
@@ -690,7 +753,7 @@ impl Harmonizer {
                 s.drift.tick(&mut self.rng, dt);
             }
             if !doubler {
-                let g = s.env * s.velocity;
+                let g = s.env * s.velocity * own(i);
                 power += g * g;
             }
         }
@@ -711,7 +774,7 @@ impl Harmonizer {
                 // Two takes, each a little under the lead.
                 s.env * double * std::f32::consts::FRAC_1_SQRT_2
             } else {
-                s.env * s.velocity * norm * level
+                s.env * s.velocity * own(i) * norm * level
             };
             let (pan, cached) = &mut self.pan_cache[i];
             if *pan != s.pan {
@@ -786,18 +849,48 @@ mod tests {
     const C_MAJOR: u16 = 0b1010_1011_0101;
 
     #[test]
-    fn intervals_count_scale_notes() {
-        // C major: a third above C is E, above E is G, a sixth below C is E.
-        assert_eq!(scale_step(60, 2, C_MAJOR), 64);
-        assert_eq!(scale_step(64, 2, C_MAJOR), 67);
-        assert_eq!(scale_step(60, -5, C_MAJOR), 52);
-        assert_eq!(scale_step(62, 7, C_MAJOR), 74);
-        // Chromatic mask: semitones.
-        assert_eq!(scale_step(60, 2, 0xFFF), 62);
-        assert_eq!(interval_name(2), "3rd up");
-        assert_eq!(interval_name(-5), "6th down");
-        assert_eq!(interval_short(7), "+8ve");
-        assert_eq!(interval_steps(f64::from(MAX_STEPS) + 2.0), 2);
+    fn intervals_stay_in_the_scale() {
+        // C major. Thirds: +3 and +4 both give the third of the scale.
+        for semis in [3, 4] {
+            assert_eq!(scale_interval(60, semis, C_MAJOR), 64); // C -> E
+            assert_eq!(scale_interval(62, semis, C_MAJOR), 65); // D -> F
+            assert_eq!(scale_interval(64, semis, C_MAJOR), 67); // E -> G
+        }
+        // Sixths below, fifths, seconds, sevenths, octaves.
+        assert_eq!(scale_interval(60, -9, C_MAJOR), 52); // C -> E
+        assert_eq!(scale_interval(60, -8, C_MAJOR), 52);
+        assert_eq!(scale_interval(71, 7, C_MAJOR), 77); // B -> F
+        assert_eq!(scale_interval(64, 2, C_MAJOR), 65); // E -> F
+        assert_eq!(scale_interval(60, 1, C_MAJOR), 62); // C -> D
+        assert_eq!(scale_interval(60, 10, C_MAJOR), 71); // C -> B
+        assert_eq!(scale_interval(62, 16, C_MAJOR), 77); // D -> F, a 10th
+        assert_eq!(scale_interval(62, -24, C_MAJOR), 38);
+        // Chromatic mask: exact semitones.
+        assert_eq!(scale_interval(60, 3, 0xFFF), 63);
+        // Names.
+        assert_eq!(interval_degree(3), "3rd");
+        assert_eq!(interval_degree(-4), "3rd");
+        assert_eq!(interval_degree(16), "10th");
+        assert_eq!(interval_degree(-12), "Octave");
+        assert_eq!(interval_quality(4), "Maj 3rd");
+        assert_eq!(interval_quality(-19), "5th + 8ve");
+        assert_eq!(interval_short(-7), "-7");
+        assert_eq!(interval_semitones(interval_index(-7)), -7);
+        assert_eq!(interval_semitones(f64::from(MAX_SEMIS)), 0);
+    }
+
+    #[test]
+    fn fixed_voices_are_parallel() {
+        let mut h = harm(HarmonyMode::Fixed);
+        h.settings.intervals = [4, -5, 0, 0];
+        h.settings.expression = 1.0;
+        h.apply_settings();
+        // Lead on D#, out of C major: the voices keep the exact intervals.
+        h.lead(63.1, 0.005);
+        let a = h.voice_note(0, 0.005).unwrap();
+        let b = h.voice_note(1, 0.005).unwrap();
+        assert!((a - 67.1).abs() < 1e-9, "{a}");
+        assert!((b - 58.1).abs() < 1e-9, "{b}");
     }
 
     #[test]
@@ -823,7 +916,7 @@ mod tests {
     #[test]
     fn scale_voices_follow_the_key() {
         let mut h = harm(HarmonyMode::Scale);
-        h.settings.intervals = [2, -3, 0, 0];
+        h.settings.intervals = [4, -5, 0, 0];
         h.apply_settings();
         h.lead(64.2, 0.005);
         for _ in 0..2000 {
@@ -910,7 +1003,7 @@ mod tests {
     #[test]
     fn chord_mode_snaps_intervals_to_the_chord() {
         let mut h = harm(HarmonyMode::Chord);
-        h.settings.intervals = [2, 4, 0, 0];
+        h.settings.intervals = [4, 7, 0, 0];
         h.settings.chord = (1 << 2) | (1 << 5) | (1 << 9); // D minor
         h.apply_settings();
         // Lead on D: a third above is F, a fifth above A.
@@ -927,7 +1020,7 @@ mod tests {
     #[test]
     fn spread_pans_and_levels_stay_bounded() {
         let mut h = harm(HarmonyMode::Scale);
-        h.settings.intervals = [2, -3, 4, 7];
+        h.settings.intervals = [4, -5, 7, 12];
         h.settings.spread = 1.0;
         h.apply_settings();
         for _ in 0..48_000 {

@@ -1,4 +1,4 @@
-//! CPU load of the engine, per mode and module, at live block sizes.
+//! CPU load of the engine, per layer and module, at live block sizes.
 //!
 //! ```text
 //! cargo run --release -p quack-dsp --example bench [-- --secs 10] [-- --sr 96000]
@@ -48,7 +48,7 @@ const CASES: &[Case] = &[
     Case {
         name: "creative octaves+robot+glitch",
         params: &[
-            ("mode", 2.0),
+            ("creative_on", 1.0),
             ("octave_down", 60.0),
             ("sub", 40.0),
             ("octave_up", 40.0),
@@ -61,25 +61,24 @@ const CASES: &[Case] = &[
     Case {
         name: "synth harmony 4 voices",
         params: &[
-            ("mode", 3.0),
+            ("harmony_on", 1.0),
             ("harmony", 2.0),
-            ("harmony_3", 11.0),
-            ("harmony_4", 5.0),
+            ("harmony_3", 31.0),
+            ("harmony_4", 16.0),
             ("double", 50.0),
         ],
         notes: &[],
     },
     Case {
         name: "synth harmony midi chord",
-        params: &[("mode", 3.0), ("harmony", 1.0)],
+        params: &[("harmony_on", 1.0), ("harmony", 0.0)],
         notes: &[55, 59, 62, 66],
     },
     Case {
         name: "synth vocoder 32 bands",
         params: &[
-            ("mode", 3.0),
-            ("harmony", 0.0),
-            ("vocoder", 1.0),
+            ("vocoder_on", 1.0),
+            ("vocoder", 0.0),
             ("bands", 3.0),
             ("vocoder_level", 100.0),
             ("carrier", 2.0),
@@ -90,23 +89,26 @@ const CASES: &[Case] = &[
     Case {
         name: "synth talkbox",
         params: &[
-            ("mode", 3.0),
-            ("harmony", 0.0),
-            ("vocoder", 2.0),
+            ("vocoder_on", 1.0),
+            ("vocoder", 1.0),
             ("vocoder_level", 100.0),
             ("carrier", 2.0),
         ],
         notes: &[48, 55, 60, 64, 67, 71, 74, 79],
     },
     Case {
-        name: "synth everything",
+        name: "every layer",
         params: &[
-            ("mode", 3.0),
+            ("creative_on", 1.0),
+            ("octave_down", 60.0),
+            ("robot", 30.0),
+            ("harmony_on", 1.0),
             ("harmony", 2.0),
-            ("harmony_3", 11.0),
-            ("harmony_4", 5.0),
+            ("harmony_3", 31.0),
+            ("harmony_4", 16.0),
             ("double", 50.0),
-            ("vocoder", 1.0),
+            ("vocoder_on", 1.0),
+            ("vocoder", 0.0),
             ("bands", 3.0),
             ("vocoder_level", 80.0),
             ("carrier", 2.0),
