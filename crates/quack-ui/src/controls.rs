@@ -270,7 +270,7 @@ pub(crate) fn fader(
         p,
         vpos,
         valign,
-        &format!("{:.0} %", params.get_plain(id)),
+        &format!("{:.0} {}", params.get_plain(id), id.spec().unit),
         size::CAPTION + 1.0,
         color::TEXT,
     );
@@ -324,6 +324,52 @@ pub(crate) fn segmented(
             );
         }
         let c = if i == lit { accent } else { color::TEXT_DIM };
+        text(p, seg.center(), Align2::CENTER_CENTER, label, size::BODY, c);
+    }
+}
+
+/// Tabs of the editor (not a parameter): `selected` is the tab shown.
+pub(crate) fn tabs(
+    ui: &egui::Ui,
+    salt: &str,
+    r: Rect,
+    labels: &[&str],
+    selected: &mut usize,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    #[allow(clippy::cast_precision_loss)]
+    let w = r.width() / labels.len() as f32;
+    for (i, label) in labels.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let seg = Rect::from_min_size(pos2(r.left() + w * i as f32, r.top()), vec2(w, r.height()));
+        let resp = ui.interact(seg, ui.id().with(("quack-tab", salt, i)), Sense::click());
+        if resp.clicked() {
+            *selected = i;
+        }
+        if i == *selected {
+            rounded(
+                p,
+                seg.shrink(2.0),
+                radius::CONTROL - 1,
+                accent.gamma_multiply(0.22),
+                accent.gamma_multiply(0.8),
+            );
+        } else if resp.hovered() {
+            rounded(
+                p,
+                seg.shrink(2.0),
+                radius::CONTROL - 1,
+                color::RAISED,
+                color::RAISED,
+            );
+        }
+        let c = if i == *selected {
+            accent
+        } else {
+            color::TEXT_DIM
+        };
         text(p, seg.center(), Align2::CENTER_CENTER, label, size::BODY, c);
     }
 }

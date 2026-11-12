@@ -114,8 +114,28 @@ const CASES: &[Case] = &[
             ("carrier", 2.0),
             ("vocoder_width", 60.0),
             ("vocoder_lofi", 30.0),
+            ("consonants", 50.0),
+            ("vocoder_resonance", 60.0),
+            ("vocoder_tilt", 4.0),
+            ("vocoder_gate", -70.0),
+            ("ensemble", 60.0),
+            ("carrier_sub", 40.0),
         ],
         notes: &[48, 55, 60, 64, 67, 71, 74, 79],
+    },
+    Case {
+        name: "natural + every effect",
+        params: &[
+            ("fx_on", 1.0),
+            ("gate", -50.0),
+            ("deess", 50.0),
+            ("comp_ratio", 4.0),
+            ("delay_level", 40.0),
+            ("delay_ping_pong", 1.0),
+            ("reverb_level", 60.0),
+            ("duck", 40.0),
+        ],
+        notes: &[],
     },
 ];
 

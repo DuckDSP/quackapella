@@ -42,6 +42,7 @@ fn editor_captures() {
         (2.0, "creative"),
         (3.0, "harmony"),
         (4.0, "vocoder"),
+        (5.0, "fx"),
     ] {
         let mut v = ParamValues::default();
         v.set(ParamId::Mode, if mode == 0.0 { 0.0 } else { 1.0 });
@@ -93,6 +94,7 @@ fn editor_captures() {
             "Monster",
             "Four-Part Choir",
             "Voice + Vocoder",
+            "Live Vocal FX",
         ][mode as usize];
         let fi = FACTORY
             .iter()
@@ -113,6 +115,19 @@ fn editor_captures() {
         v.set(ParamId::Macro1, 40.0);
         v.set(ParamId::Macro2, if mode == 2.0 { 30.0 } else { 0.0 });
         ctl.bind(1, ParamId::Macro1);
+        // Tune page: two snapshots, the morph a third of the way, the
+        // MIDI output on with the snapshot keys.
+        if mode == 1.0 {
+            ctl.store_snapshot(0, &v);
+            let mut b = v;
+            b.set(ParamId::Pitch, 12.0);
+            ctl.store_snapshot(1, &b);
+            v.set(ParamId::MorphOn, 1.0);
+            v.set(ParamId::Morph, 35.0);
+            v.set(ParamId::SnapshotKeys, 2.0);
+            v.set(ParamId::MidiOut, 1.0);
+            v.set(ParamId::MidiOutSource, 1.0);
+        }
         let params = Values(RefCell::new(v), ctl);
         let view = View {
             held_notes: if mode >= 3.0 {
@@ -129,6 +144,8 @@ fn editor_captures() {
             tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
             tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
             frozen: mode == 2.0,
+            comp_db: if mode == 5.0 { -4.2 } else { 0.0 },
+            deess_db: if mode == 5.0 { -1.5 } else { 0.0 },
             vocoder_notes: if mode == 4.0 {
                 (1 << 45) | (1 << 48) | (1 << 52)
             } else {
@@ -139,6 +156,7 @@ fn editor_captures() {
             } else {
                 0
             },
+            midi_out_notes: if mode == 1.0 { 1 << 57 } else { 0 },
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);
@@ -147,6 +165,7 @@ fn editor_captures() {
             2 => Page::Creative,
             3 => Page::Harmony,
             4 => Page::Vocoder,
+            5 => Page::Fx,
             _ => Page::Voice,
         });
         // Four seconds of a phrase in the graph.

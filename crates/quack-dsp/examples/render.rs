@@ -9,11 +9,12 @@
 //! `retune=0`, `scale=2`, `key=9`, `pitch=-5`...); `midi=60,64@1.5`
 //! holds notes 60 and 64 from 1.5 s (repeat for a sequence, `midi=@4`
 //! releases everything at 4 s); `key=value@t` changes a parameter at
-//! `t` seconds (`freeze=1@2.1 freeze=0@4`). `--demo` writes a synthetic singer
+//! `t` seconds (`freeze=1@2.1 freeze=0@4`); `sc=FILE.wav` feeds the
+//! side-chain input (mono or stereo, cut or padded to the input). `--demo` writes a synthetic singer
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
 //! 32-bit float, mono or stereo; out: 32-bit float, same channels
-//! (always stereo with the harmonies or the vocoder on, for the harmonies' spread).
+//! (always stereo with the harmonies, the vocoder or the effects on).
 
 use std::f64::consts::{PI, TAU};
 use std::fs;
@@ -52,8 +53,13 @@ fn main() {
     let mut values = ParamValues::default();
     let mut midi: Vec<(f64, Vec<u8>)> = Vec::new();
     let mut autos: Vec<(f64, ParamId, f64)> = Vec::new();
+    let mut side: Option<Vec<Vec<f32>>> = None;
     for kv in &args[2..] {
         let (k, v) = kv.split_once('=').expect("key=value");
+        if k == "sc" {
+            side = Some(read_wav(v).1);
+            continue;
+        }
         if k == "midi" {
             let (notes, at) = v.split_once('@').unwrap_or((v, "0"));
             let notes = notes
@@ -77,7 +83,14 @@ fn main() {
     }
     midi.sort_by(|a, b| a.0.total_cmp(&b.0));
     autos.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let out = process(f64::from(sr), &chans, &values, &midi, &autos);
+    let out = process(
+        f64::from(sr),
+        &chans,
+        &values,
+        &midi,
+        &autos,
+        side.as_deref(),
+    );
     write_wav(&args[1], sr, &out);
 }
 
@@ -87,6 +100,7 @@ fn process(
     values: &ParamValues,
     midi: &[(f64, Vec<u8>)],
     autos: &[(f64, ParamId, f64)],
+    side: Option<&[Vec<f32>]>,
 ) -> Vec<Vec<f32>> {
     let mut e = Engine::new();
     e.prepare(sr, 512);
@@ -105,6 +119,14 @@ fn process(
         .copied()
         .chain(std::iter::repeat_n(0.0, lat))
         .collect();
+    let side: Option<[Vec<f32>; 2]> = side.map(|c| {
+        let fit = |x: &Vec<f32>| {
+            let mut x = x.clone();
+            x.resize(l.len(), 0.0);
+            x
+        };
+        [fit(&c[0]), fit(c.get(1).unwrap_or(&c[0]))]
+    });
     let mut held: Vec<u8> = Vec::new();
     let mut next = 0;
     let mut next_auto = 0;
@@ -136,7 +158,11 @@ fn process(
             .min(l.len())
             .min(due.max(pos + 1))
             .min(due_auto.max(pos + 1));
-        e.process(&mut l[pos..end], &mut r[pos..end]);
+        e.process_with_sidechain(
+            &mut l[pos..end],
+            &mut r[pos..end],
+            side.as_ref().map(|s| (&s[0][pos..end], &s[1][pos..end])),
+        );
         pos = end;
     }
     // Latency compensation, as the host does.
@@ -145,6 +171,7 @@ fn process(
     if chans.len() > 1
         || values.get(ParamId::HarmonyOn) >= 0.5
         || values.get(ParamId::VocoderOn) >= 0.5
+        || values.get(ParamId::FxOn) >= 0.5
     {
         out.push(r[lat..lat + n].to_vec());
     }

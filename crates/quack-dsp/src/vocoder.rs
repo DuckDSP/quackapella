@@ -33,6 +33,16 @@
 //! (*Follow Chord*), so the vocoder works without a keyboard. MIDI
 //! notes glide (*Carrier Glide*) and follow the pitch bend.
 //!
+//! Enrichments (ids 1000+): *Consonants* swaps the carrier for noise
+//! where the voice is unvoiced, so s, f, t, ch come out of the vocoder
+//! itself (EVOC's U/V detection); *Resonance* narrows the bands (or the
+//! talkbox's formant peaks); *Brightness* tilts the result around 1 kHz;
+//! *Gate* mutes the modulator under a threshold (stage bleed);
+//! *Ensemble* is a three-tap modulated delay, the string-machine
+//! chorus of the classic vocoders; *Sub* adds a square an octave down
+//! to the internal carrier, and *Pulse* is a slowly modulated pulse
+//! wave (PWM). None of them adds latency.
+//!
 //! Latency: none added. The filters are causal; the output is delayed
 //! to line up with the rest of the engine, by the engine's latency minus
 //! the analysis lag (the talkbox's frame is centred in the past), so the
@@ -93,6 +103,31 @@ const SOFT_KNEE: f64 = 0.5;
 /// Level calibration: a voice at some level comes out about as loud.
 const VOCODER_MAKEUP: f64 = 2.25;
 const TALKBOX_MAKEUP: f64 = 5.5;
+/// Gate threshold at or below which the gate is off.
+pub const GATE_OFF_DB: f64 = -90.0;
+/// Gate: hysteresis (dB), opening and closing times.
+const GATE_HYST_DB: f64 = 6.0;
+const GATE_OPEN_S: f64 = 0.001;
+const GATE_CLOSE_S: f64 = 0.04;
+/// Consonants: level of the noise against a unit carrier.
+const CONSONANT_NOISE: f64 = 0.6;
+/// Brightness pivot (Hz).
+const TILT_HZ: f64 = 1_000.0;
+/// Ensemble: base delay, slow and fast modulation depths (s), rates (Hz).
+const ENS_BASE_S: f64 = 0.007;
+const ENS_SLOW_S: f64 = 0.0025;
+const ENS_FAST_S: f64 = 0.0003;
+const ENS_SLOW_HZ: f64 = 0.55;
+const ENS_FAST_HZ: f64 = 6.0;
+/// PWM: width swing around a square and its rate (Hz).
+const PWM_DEPTH: f64 = 0.38;
+const PWM_HZ: f64 = 0.45;
+
+/// Bandwidth factor of the bands (or the LPC poles) from the Resonance:
+/// 1 at 0.25 (the original voicing), up to 8 times narrower.
+fn resonance_factor(r: f64) -> f64 {
+    (4.0 * (r.clamp(0.0, 1.0) - 0.25)).exp2()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VocoderMode {
@@ -132,18 +167,22 @@ pub enum Carrier {
     Supersaw,
     /// White noise: a whisper (no pitch, MIDI only opens it).
     Noise,
-    /// The side-chain input (another track, an external synth).
+    /// The side-chain input (another track, an external synth), or the
+    /// track itself when the inputs are swapped.
     Sidechain,
+    /// Pulse wave, its width slowly modulated (PWM): hollow, choral.
+    Pulse,
 }
 
 impl Carrier {
-    pub const COUNT: u32 = 5;
-    pub const ALL: [Self; 5] = [
+    pub const COUNT: u32 = 6;
+    pub const ALL: [Self; 6] = [
         Self::Saw,
         Self::Square,
         Self::Supersaw,
         Self::Noise,
         Self::Sidechain,
+        Self::Pulse,
     ];
 
     #[must_use]
@@ -159,6 +198,7 @@ impl Carrier {
             Self::Supersaw => "Supersaw",
             Self::Noise => "Noise",
             Self::Sidechain => "Sidechain",
+            Self::Pulse => "PWM",
         }
     }
 }
@@ -292,6 +332,18 @@ pub struct VocoderSettings {
     /// Lo-fi: sample rate and bit depth come down together, 0..1
     /// (talking-toy voice at the top).
     pub lofi: f64,
+    /// Noise carrier on unvoiced sounds, 0..1.
+    pub consonants: f64,
+    /// Band (or formant) sharpness, 0..1 (0.25 = the original width).
+    pub resonance: f64,
+    /// Tilt around 1 kHz, dB (+ = brighter).
+    pub tilt_db: f64,
+    /// Modulator gate threshold, dBFS ([`GATE_OFF_DB`] and below = off).
+    pub gate_db: f64,
+    /// Ensemble chorus, 0..1.
+    pub ensemble: f64,
+    /// Square one octave below the carrier, 0..1.
+    pub sub: f64,
 }
 
 impl Default for VocoderSettings {
@@ -315,6 +367,12 @@ impl Default for VocoderSettings {
             bend_range: 2.0,
             width: 0.5,
             lofi: 0.0,
+            consonants: 0.3,
+            resonance: 0.25,
+            tilt_db: 0.0,
+            gate_db: GATE_OFF_DB,
+            ensemble: 0.0,
+            sub: 0.0,
         }
     }
 }
@@ -409,6 +467,8 @@ struct Voice {
     gain: f64,
     peak: f64,
     phase: [f64; OSCS],
+    /// Sub-octave square's phase.
+    sub_phase: f64,
     /// Press order, to steal the oldest.
     age: u64,
 }
@@ -502,6 +562,28 @@ pub struct Vocoder {
     level: f64,
     /// Extra carrier notes (see [`Vocoder::set_extra_notes`]).
     extra: [Option<f64>; EXTRA_NOTES],
+    /// Band output gains (level makeup of the Resonance).
+    band_gain: f64,
+    /// Talkbox pole bandwidth (Hz), from the Resonance.
+    lag_hz: f64,
+    /// Gate: modulator envelope, open state and gain.
+    gate_env: f64,
+    gate_open: bool,
+    gate_gain: f64,
+    gate_env_coef: f64,
+    gate_open_coef: f64,
+    gate_close_coef: f64,
+    /// Brightness: low part (one pole), its coefficient, and the gains.
+    tilt_lo: f64,
+    tilt_coef: f64,
+    tilt_gains: (f64, f64),
+    /// Ensemble: delay ring, write position, LFO phases (cycles).
+    ens: Vec<f32>,
+    ens_pos: usize,
+    ens_slow: f64,
+    ens_fast: f64,
+    /// PWM LFO phase (cycles).
+    pwm_phase: f64,
 }
 
 impl Default for Vocoder {
@@ -558,6 +640,22 @@ impl Default for Vocoder {
             out_delay: DelayLine::default(),
             latency: 0,
             level: 0.0,
+            band_gain: 1.0,
+            lag_hz: LAG_WINDOW_HZ,
+            gate_env: 0.0,
+            gate_open: true,
+            gate_gain: 1.0,
+            gate_env_coef: 0.0,
+            gate_open_coef: 0.0,
+            gate_close_coef: 0.0,
+            tilt_lo: 0.0,
+            tilt_coef: 0.0,
+            tilt_gains: (1.0, 1.0),
+            ens: Vec::new(),
+            ens_pos: 0,
+            ens_slow: 0.0,
+            ens_fast: 0.0,
+            pwm_phase: 0.0,
         };
         v.prepare(48_000.0, 4096);
         v
@@ -607,6 +705,13 @@ impl Vocoder {
         for f in &mut self.sib_hp {
             f.high_pass(sample_rate, SIBILANCE_HZ);
         }
+        self.gate_env_coef = coef(sample_rate, 0.005);
+        self.gate_open_coef = coef(sample_rate, GATE_OPEN_S);
+        self.gate_close_coef = coef(sample_rate, GATE_CLOSE_S);
+        self.tilt_coef = 1.0 - (-std::f64::consts::TAU * TILT_HZ / sample_rate).exp();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ens = ((ENS_BASE_S + ENS_SLOW_S + ENS_FAST_S) * sample_rate) as usize + 4;
+        self.ens = vec![0.0; ens];
         self.applied = None;
         self.apply_settings();
         self.set_latency(self.latency.min(max_latency));
@@ -666,6 +771,12 @@ impl Vocoder {
         self.crush_held = 0.0;
         self.out_delay.reset();
         self.level = 0.0;
+        self.gate_env = 0.0;
+        self.gate_open = true;
+        self.gate_gain = 1.0;
+        self.tilt_lo = 0.0;
+        self.ens.iter_mut().for_each(|x| *x = 0.0);
+        self.ens_pos = 0;
     }
 
     /// Recompute what depends on the settings (filters, envelopes).
@@ -680,14 +791,20 @@ impl Vocoder {
         let old = self.applied;
         self.applied = Some(s);
         let bands = s.bands.clamp(2, MAX_BANDS);
-        let rebuild = old.is_none_or(|o| o.bands != s.bands || o.shift_st != s.shift_st);
+        let rebuild = old.is_none_or(|o| {
+            o.bands != s.bands || o.shift_st != s.shift_st || o.resonance != s.resonance
+        });
         if rebuild {
             let hi = BAND_HI.min(0.42 * sr);
             #[allow(clippy::cast_precision_loss)]
             let span = (hi / BAND_LO).log2() / (bands - 1) as f64;
             // Bandwidth of one band = the spacing; two stages narrow it,
             // so each is a little wider.
-            let q = 2f64.powf(span / 2.0) / (2f64.powf(span) - 1.0) * 0.75;
+            let sharp = resonance_factor(s.resonance);
+            let q = 2f64.powf(span / 2.0) / (2f64.powf(span) - 1.0) * 0.75 * sharp;
+            // Measured on a real voice: narrower bands keep about the
+            // same level (each band is whitened), no makeup needed.
+            self.band_gain = 1.0;
             let shift = (s.shift_st / 12.0).exp2();
             for i in 0..bands {
                 #[allow(clippy::cast_precision_loss)]
@@ -705,6 +822,9 @@ impl Vocoder {
                 }
             }
         }
+        self.lag_hz = LAG_WINDOW_HZ / resonance_factor(s.resonance);
+        let half = 10f64.powf(s.tilt_db.clamp(-24.0, 24.0) / 40.0);
+        self.tilt_gains = (1.0 / half, half);
         self.band_rel = coef(sr, s.response_s);
         self.band_att = coef(sr, 0.25 * s.response_s);
         self.release_coef = coef(sr, s.release_s / 4.0);
@@ -767,6 +887,7 @@ impl Vocoder {
                 gain: if restart { 0.0 } else { v.gain },
                 peak: 0.55 + 0.45 * f64::from(h.velocity) / 127.0,
                 phase: v.phase,
+                sub_phase: v.sub_phase,
                 age: self.clock,
             };
         }
@@ -822,6 +943,7 @@ impl Vocoder {
                         gain: 0.0,
                         peak: 0.6,
                         phase: self.voices[i].phase,
+                        sub_phase: self.voices[i].sub_phase,
                         age: self.clock,
                     };
                 }
@@ -852,6 +974,50 @@ impl Vocoder {
     /// Spread the vocoded voice in stereo: left and right differ in
     /// phase only, their sum is the mono voice.
     pub fn widen(&mut self, y: f32) -> (f32, f32) {
+        let (l, r) = self.widen_phase(y);
+        let e = self.settings.ensemble;
+        if e <= 0.0 && self.ens_pos == 0 {
+            return (l, r);
+        }
+        let (cl, cr) = self.ensemble(y);
+        #[allow(clippy::cast_possible_truncation)]
+        let (dry, wet) = ((1.0 - 0.5 * e) as f32, (0.75 * e) as f32);
+        (l * dry + cl * wet, r * dry + cr * wet)
+    }
+
+    /// Ensemble: three taps of a delay swept by a slow and a fast LFO,
+    /// a third of a cycle apart; left and right take different pairs.
+    fn ensemble(&mut self, y: f32) -> (f32, f32) {
+        let n = self.ens.len();
+        self.ens[self.ens_pos] = y;
+        let sr = self.sample_rate;
+        self.ens_slow = wrap(self.ens_slow + ENS_SLOW_HZ / sr);
+        self.ens_fast = wrap(self.ens_fast + ENS_FAST_HZ / sr);
+        let mut taps = [0.0f32; 3];
+        for (k, t) in taps.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let off = k as f64 / 3.0;
+            let slow = (std::f64::consts::TAU * (self.ens_slow + off)).sin();
+            let fast = (std::f64::consts::TAU * (self.ens_fast + off)).sin();
+            let d = (ENS_BASE_S + ENS_SLOW_S * slow + ENS_FAST_S * fast) * sr;
+            #[allow(clippy::cast_precision_loss)]
+            let pos = self.ens_pos as f64 - d;
+            #[allow(clippy::cast_precision_loss)]
+            let pos = if pos < 0.0 { pos + n as f64 } else { pos };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let a = pos.floor() as usize % n;
+            #[allow(clippy::cast_possible_truncation)]
+            let f = (pos - pos.floor()) as f32;
+            *t = self.ens[a] + (self.ens[(a + 1) % n] - self.ens[a]) * f;
+        }
+        self.ens_pos = (self.ens_pos + 1) % n;
+        (
+            (taps[0] + 0.5 * taps[1]) / 1.5,
+            (taps[2] + 0.5 * taps[1]) / 1.5,
+        )
+    }
+
+    fn widen_phase(&mut self, y: f32) -> (f32, f32) {
         let x = f64::from(y);
         let mut a = x;
         for (z, c) in self.wide.iter_mut().zip(WIDE_COEFS) {
@@ -961,6 +1127,7 @@ impl Vocoder {
                             gain: 0.0,
                             peak: if slot == 0 { 0.8 } else { 0.6 },
                             phase: self.voices[i].phase,
+                            sub_phase: self.voices[i].sub_phase,
                             age: self.clock,
                         };
                     }
@@ -995,6 +1162,9 @@ impl Vocoder {
             }
         }
         let ratios = self.detune_ratio;
+        self.pwm_phase = wrap(self.pwm_phase + PWM_HZ / sr);
+        let pwm = (std::f64::consts::TAU * self.pwm_phase).sin();
+        let sub = s.sub;
         let mut out = 0.0;
         let mut level = 0.0;
         for v in &mut self.voices {
@@ -1029,11 +1199,29 @@ impl Vocoder {
                         let sq = if t < 0.5 { 1.0 } else { -1.0 };
                         sq + blep(t, dt) - blep(wrap(t + 0.5), dt)
                     }
+                    Carrier::Pulse => {
+                        // Two saws a width apart: a pulse of that width.
+                        // Each oscillator swings the other way.
+                        let sign = if o % 2 == 0 { 1.0 } else { -1.0 };
+                        let width = 0.5 + PWM_DEPTH * pwm * sign;
+                        let t2 = wrap(t + 1.0 - width);
+                        let a = 2.0 * t - 1.0 - blep(t, dt);
+                        let b = 2.0 * t2 - 1.0 - blep(t2, dt);
+                        0.5 * (a - b)
+                    }
                     _ => 2.0 * t - 1.0 - blep(t, dt),
                 };
                 v.phase[o] = wrap(t + dt);
             }
-            out += x * norm * v.gain;
+            x *= norm;
+            if sub > 0.0 {
+                let dt = (0.5 * hz_bent / sr).min(0.5);
+                let t = v.sub_phase;
+                let sq = if t < 0.5 { 1.0 } else { -1.0 };
+                x += 0.8 * sub * (sq + blep(t, dt) - blep(wrap(t + 0.5), dt));
+                v.sub_phase = wrap(t + dt);
+            }
+            out += x * v.gain;
         }
         let level = level.min(1.0);
         let n = self.noise();
@@ -1059,23 +1247,33 @@ impl Vocoder {
             return 0.0;
         }
         self.level += (goal - self.level) * self.attack_coef;
-        let x = f64::from(input);
-        let (mut carrier, amp) = self.synth(follow);
-        if s.carrier == Carrier::Sidechain {
-            carrier = f64::from(sidechain);
-        }
-        let wet = match s.mode {
-            VocoderMode::Talkbox => self.talkbox(x, carrier, amp),
-            _ => self.vocode(x, carrier, amp),
-        };
-        // Sibilance: the voice's top, where the voice is unvoiced.
+        let gate = self.gate(f64::from(input));
+        let x = f64::from(input) * gate;
         let voiced = follow.is_some();
         let u = if voiced { 0.15 } else { 1.0 };
         self.unvoiced += (u - self.unvoiced) * self.voicing_coef;
+        let (mut carrier, mut amp) = self.synth(follow);
+        if s.carrier == Carrier::Sidechain {
+            carrier = f64::from(sidechain);
+        }
+        // Consonants: noise takes over the carrier where the voice is
+        // unvoiced, and opens it even with no note playing.
+        let k = s.consonants * ((self.unvoiced - 0.15) / 0.85).clamp(0.0, 1.0);
+        if k > 0.0 {
+            let n = self.noise();
+            carrier = carrier * (1.0 - 0.5 * k) + n * k * CONSONANT_NOISE;
+            amp = amp.max(k);
+        }
+        let wet = match s.mode {
+            VocoderMode::Talkbox => self.talkbox(x, carrier, amp, k),
+            _ => self.vocode(x, carrier, amp, k),
+        };
+        // Sibilance: the voice's top, where the voice is unvoiced.
         let d = f64::from(dry);
         let h0 = self.sib_hp[0].tick(d);
         let hp = self.sib_hp[1].tick(h0);
-        let sib = hp * s.sibilance * self.unvoiced;
+        let sib = hp * s.sibilance * self.unvoiced * gate;
+        let wet = self.tilt(wet);
         let wet = self.crush(wet);
         let y = self.out_delay.tick(soft_limit(wet * self.level) as f32);
         #[allow(clippy::cast_possible_truncation)]
@@ -1083,7 +1281,42 @@ impl Vocoder {
         out
     }
 
-    fn vocode(&mut self, x: f64, carrier: f64, amp: f64) -> f64 {
+    /// Modulator gate: 1 open, 0 closed (smoothed), with hysteresis.
+    fn gate(&mut self, x: f64) -> f64 {
+        let t = self.settings.gate_db;
+        if t <= GATE_OFF_DB {
+            self.gate_gain = 1.0;
+            self.gate_open = true;
+            return 1.0;
+        }
+        let a = x * x;
+        self.gate_env += (a - self.gate_env) * self.gate_env_coef;
+        let db = 10.0 * self.gate_env.max(1e-12).log10();
+        if self.gate_open && db < t - GATE_HYST_DB {
+            self.gate_open = false;
+        } else if !self.gate_open && db > t {
+            self.gate_open = true;
+        }
+        let (goal, c) = if self.gate_open {
+            (1.0, self.gate_open_coef)
+        } else {
+            (0.0, self.gate_close_coef)
+        };
+        self.gate_gain += (goal - self.gate_gain) * c;
+        self.gate_gain
+    }
+
+    /// Brightness: the result tilted around [`TILT_HZ`].
+    fn tilt(&mut self, y: f64) -> f64 {
+        if self.settings.tilt_db == 0.0 {
+            return y;
+        }
+        self.tilt_lo += (y - self.tilt_lo) * self.tilt_coef;
+        let (lo, hi) = self.tilt_gains;
+        self.tilt_lo * lo + (y - self.tilt_lo) * hi
+    }
+
+    fn vocode(&mut self, x: f64, carrier: f64, amp: f64, k: f64) -> f64 {
         let n = self.settings.bands.clamp(2, MAX_BANDS);
         let (att, rel) = (self.band_att, self.band_rel);
         let hold = self.settings.hold;
@@ -1109,14 +1342,14 @@ impl Vocoder {
             let a = carrier.abs();
             self.carrier_env +=
                 (a - self.carrier_env) * if a > self.carrier_env { c_att } else { c_coef };
-            (self.carrier_env / CARRIER_FLOOR).min(1.0)
+            (self.carrier_env / CARRIER_FLOOR).min(1.0).max(k)
         } else {
             amp
         };
-        y * gate * VOCODER_MAKEUP
+        y * gate * self.band_gain * VOCODER_MAKEUP
     }
 
-    fn talkbox(&mut self, x: f64, carrier: f64, amp: f64) -> f64 {
+    fn talkbox(&mut self, x: f64, carrier: f64, amp: f64, k: f64) -> f64 {
         // Analysis: pre-emphasised voice into the ring, a frame per hop.
         let pre = x - PRE_EMPHASIS * self.prev_in;
         self.prev_in = x;
@@ -1141,15 +1374,15 @@ impl Vocoder {
         self.lpc_gain += self.lpc_gain_step;
         // Carrier at unit level, times the voice's residual level.
         let c2 = carrier * carrier;
-        let k = if c2 > self.carrier_rms {
+        let c = if c2 > self.carrier_rms {
             self.carrier_att
         } else {
             self.rms_coef
         };
-        self.carrier_rms += (c2 - self.carrier_rms) * k;
+        self.carrier_rms += (c2 - self.carrier_rms) * c;
         let rms = self.carrier_rms.sqrt();
         let gate = if self.settings.carrier == Carrier::Sidechain {
-            (rms / CARRIER_FLOOR).min(1.0)
+            (rms / CARRIER_FLOOR).min(1.0).max(k)
         } else {
             amp
         };
@@ -1204,7 +1437,7 @@ impl Vocoder {
             r[0] *= 1.0 + 1e-5;
             #[allow(clippy::cast_precision_loss)]
             for (lag, r) in r.iter_mut().enumerate().skip(1).take(p) {
-                let a = std::f64::consts::TAU * LAG_WINDOW_HZ * lag as f64 / self.sample_rate;
+                let a = std::f64::consts::TAU * self.lag_hz * lag as f64 / self.sample_rate;
                 *r *= (-0.5 * a * a).exp();
             }
             let mut a = [0.0; MAX_ORDER + 1];
@@ -1468,6 +1701,94 @@ mod tests {
             // The singer stops: the held note still speaks the vowel.
             let y = run(&mut v, &vec![0.0; 24_000], None);
             assert!(rms(&y[12_000..]) > 1e-3, "{mode:?}");
+        }
+    }
+
+    /// Noise-like "s": white noise high-passed.
+    fn hiss(n: usize) -> Vec<f32> {
+        let mut hp = Biquad::default();
+        hp.high_pass(SR, 4_000.0);
+        let mut st = 0x9e37_79b9u32;
+        (0..n)
+            .map(|_| {
+                st ^= st << 13;
+                st ^= st >> 17;
+                st ^= st << 5;
+                (0.3 * hp.tick(f64::from(st) / f64::from(u32::MAX) * 2.0 - 1.0)) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn consonants_speak_without_a_note() {
+        for mode in [VocoderMode::Vocoder, VocoderMode::Talkbox] {
+            let mut v = played(mode);
+            v.set_notes(&NoteStack::default());
+            v.settings.consonants = 0.0;
+            v.apply_settings();
+            let x = hiss(24_000);
+            // Unvoiced (no tuned note): without Consonants, nothing.
+            let quiet = rms(&run(&mut v, &x, None)[12_000..]);
+            v.settings.consonants = 1.0;
+            v.apply_settings();
+            let loud = rms(&run(&mut v, &x, None)[12_000..]);
+            eprintln!("CONSONANTS {mode:?}: {quiet:.5} -> {loud:.5}");
+            assert!(loud > 0.02 && loud > 10.0 * quiet, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn resonance_keeps_the_level() {
+        for r in [0.0, 1.0] {
+            let mut v = played(VocoderMode::Vocoder);
+            v.settings.resonance = r;
+            v.apply_settings();
+            let x = vowel(48_000, 700.0, 1200.0);
+            let y = run(&mut v, &x, Some(60.0));
+            let db = 20.0 * (rms(&y[24_000..]) / rms(&x[24_000..])).log10();
+            eprintln!("RESONANCE {r}: {db:.1} dB");
+            assert!(db.abs() < 9.0, "{r}: {db:.1}");
+        }
+    }
+
+    #[test]
+    fn gate_mutes_bleed() {
+        let mut v = played(VocoderMode::Vocoder);
+        v.settings.gate_db = -65.0;
+        v.apply_settings();
+        // The test vowel is at -49 dBFS; its bleed 40 dB down: gated.
+        let x: Vec<f32> = vowel(24_000, 700.0, 1200.0)
+            .iter()
+            .map(|s| s * 0.01)
+            .collect();
+        let y = run(&mut v, &x, Some(60.0));
+        assert!(rms(&y[12_000..]) < 1e-5);
+        // The singer: through.
+        let x = vowel(24_000, 700.0, 1200.0);
+        let y = run(&mut v, &x, Some(60.0));
+        assert!(rms(&y[12_000..]) > 1e-3);
+    }
+
+    #[test]
+    fn carriers_tilt_and_ensemble_stay_sane() {
+        for carrier in [Carrier::Pulse, Carrier::Saw] {
+            let mut v = played(VocoderMode::Vocoder);
+            v.settings.carrier = carrier;
+            v.settings.sub = 1.0;
+            v.settings.tilt_db = 9.0;
+            v.settings.ensemble = 1.0;
+            v.apply_settings();
+            let x = vowel(24_000, 700.0, 1200.0);
+            let mut side = 0.0f32;
+            let mut peak = 0.0f32;
+            for s in x {
+                let y = v.tick(s, s, 0.0, Some(60.0));
+                let (l, r) = v.widen(y);
+                assert!(l.is_finite() && r.is_finite());
+                side = side.max((l - r).abs());
+                peak = peak.max(l.abs());
+            }
+            assert!(side > 1e-3 && peak < 2.0, "{carrier:?} {side} {peak}");
         }
     }
 

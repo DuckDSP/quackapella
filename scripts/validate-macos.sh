@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Validation on the target Mac (Apple Silicon), as for Sonder: tests,
 # AU v2 build and install for the current user, auval, then VST3 with
-# pluginval when installed. Logs go to validation-logs/<timestamp>/.
+# pluginval and CLAP with clap-validator (both installed on first run by
+# scripts/install-validators.sh). Logs go to validation-logs/<timestamp>/.
+#   --package   also build the .pkg installer (scripts/package-macos.sh)
 # Logic Pro checks stay manual (see docs/architecture.md, step 1).
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+package=0
+[[ "${1:-}" == "--package" ]] && package=1
 LOG="validation-logs/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG"
 status=0
@@ -37,15 +41,27 @@ killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
 step auval auval -strict -v aumf Qkpl DKDS
 step auval-repeat bash -c 'for i in 1 2; do auval -q -v aumf Qkpl DKDS || exit 1; done'
 
+step install-validators scripts/install-validators.sh
+PLUGINVAL="$HOME/Applications/pluginval.app/Contents/MacOS/pluginval"
+CLAP_VALIDATOR="$HOME/.cargo/bin/clap-validator"
+
 step build-vst3 cargo truce install --vst3 --user -p quack-plugin
-PLUGINVAL="/Applications/pluginval.app/Contents/MacOS/pluginval"
-if [ -x "$PLUGINVAL" ]; then
-    step pluginval "$PLUGINVAL" --strictness-level 10 --skip-gui-tests \
-        --validate "$HOME/Library/Audio/Plug-Ins/VST3/Quackapella.vst3"
-else
-    echo "== pluginval not installed, VST3 validation skipped"
+VST3="$HOME/Library/Audio/Plug-Ins/VST3/Quackapella.vst3"
+step vst3-arch-check bash -c "lipo -archs \"$VST3\"/Contents/MacOS/*"
+# GUI tests included: the editor must open and close cleanly too.
+step pluginval "$PLUGINVAL" --strictness-level 10 --timeout-ms 120000 --validate "$VST3"
+
+step build-clap cargo truce install --clap --user -p quack-plugin
+CLAP="$HOME/Library/Audio/Plug-Ins/CLAP/Quackapella.clap"
+step clap-arch-check bash -c "lipo -archs \"$CLAP\"/Contents/MacOS/*"
+step clap-validator "$CLAP_VALIDATOR" validate "$CLAP"
+
+if [[ $package -eq 1 ]]; then
+    step package scripts/package-macos.sh
 fi
 
 grep -E "AU VALIDATION SUCCEEDED|FAILED" "$LOG/auval.log" || true
+grep -E "SUCCESS|FAILED" "$LOG/pluginval.log" | tail -3 || true
+grep -E "tests run|passed|failed" "$LOG/clap-validator.log" | tail -3 || true
 echo "Logs: $LOG"
 exit $status

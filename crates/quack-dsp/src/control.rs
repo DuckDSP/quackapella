@@ -19,7 +19,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use crate::params::{MACRO_PARAMS, PARAM_COUNT, ParamId, ParamValues};
 
@@ -48,6 +48,11 @@ pub fn can_modulate(id: ParamId) -> bool {
             | ParamId::Macro2
             | ParamId::Macro3
             | ParamId::Macro4
+            | ParamId::MorphOn
+            | ParamId::SnapshotKeys
+            | ParamId::MidiOut
+            | ParamId::MidiOutChannel
+            | ParamId::MidiOutSource
     )
 }
 
@@ -110,6 +115,14 @@ pub struct ControlState {
     zoom: AtomicU16,
     /// User preset loaded last (editor only).
     user_preset: Mutex<String>,
+    /// Snapshots A and B (plain values as `f64` bits), see
+    /// [`crate::snapshot`].
+    snaps: [[AtomicU64; PARAM_COUNT]; 2],
+    snap_set: [AtomicBool; 2],
+    /// Bumped by every snapshot store or clear.
+    snap_gen: AtomicU32,
+    /// Snapshot the editor asked to go to (+1, 0 = none).
+    goto: AtomicU8,
 }
 
 impl Default for ControlState {
@@ -126,6 +139,10 @@ impl Default for ControlState {
             recall: AtomicU32::new(0),
             zoom: AtomicU16::new(100),
             user_preset: Mutex::new(String::new()),
+            snaps: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            snap_set: std::array::from_fn(|_| AtomicBool::new(false)),
+            snap_gen: AtomicU32::new(0),
+            goto: AtomicU8::new(0),
         }
     }
 }
@@ -438,6 +455,67 @@ impl ControlState {
 
     // ---- Saved state ------------------------------------------------
 
+    // ---- Snapshots ------------------------------------------------
+
+    /// Store `v` as snapshot `s` (0 = A, 1 = B).
+    pub fn store_snapshot(&self, s: usize, v: &ParamValues) {
+        let Some(slot) = self.snaps.get(s) else {
+            return;
+        };
+        for id in ParamId::ALL {
+            slot[id.index()].store(v.get(id).to_bits(), Ordering::Relaxed);
+        }
+        self.snap_set[s].store(true, Ordering::Release);
+        self.snap_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn clear_snapshot(&self, s: usize) {
+        if let Some(f) = self.snap_set.get(s) {
+            f.store(false, Ordering::Release);
+            self.snap_gen.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[must_use]
+    pub fn has_snapshot(&self, s: usize) -> bool {
+        self.snap_set
+            .get(s)
+            .is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
+    /// Snapshot `s`, if stored (real-time safe).
+    #[must_use]
+    pub fn snapshot(&self, s: usize) -> Option<ParamValues> {
+        if !self.has_snapshot(s) {
+            return None;
+        }
+        let mut v = ParamValues::default();
+        for id in ParamId::ALL {
+            v.0[id.index()] = f64::from_bits(self.snaps[s][id.index()].load(Ordering::Relaxed));
+        }
+        Some(v)
+    }
+
+    /// Changes with every store or clear.
+    #[must_use]
+    pub fn snapshot_gen(&self) -> u32 {
+        self.snap_gen.load(Ordering::Relaxed)
+    }
+
+    /// Editor: go to snapshot `s` (the audio thread glides or recalls).
+    pub fn request_snapshot(&self, s: usize) {
+        #[allow(clippy::cast_possible_truncation)]
+        if s < 2 {
+            self.goto.store(s as u8 + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Audio thread: the snapshot the editor asked for, once.
+    #[must_use]
+    pub fn take_snapshot_request(&self) -> Option<usize> {
+        usize::from(self.goto.swap(0, Ordering::Relaxed)).checked_sub(1)
+    }
+
     /// The state the host saves with the session, as text keyed by
     /// parameter key (stable across versions).
     #[must_use]
@@ -459,6 +537,16 @@ impl ControlState {
         if !user.is_empty() {
             let _ = writeln!(s, "user_preset = {user}");
         }
+        for (i, key) in SNAPSHOT_KEYS.iter().enumerate() {
+            if let Some(v) = self.snapshot(i) {
+                let items: Vec<String> = ParamId::ALL
+                    .into_iter()
+                    .filter(|&id| crate::snapshot::in_snapshot(id))
+                    .map(|id| format!("{}:{}", id.spec().key, v.get(id)))
+                    .collect();
+                let _ = writeln!(s, "{key} = {}", items.join(", "));
+            }
+        }
         s
     }
 
@@ -470,7 +558,21 @@ impl ControlState {
         let mut names = DEFAULT_MACRO_NAMES.map(str::to_owned);
         let mut factory = None;
         let mut user = String::new();
+        self.clear_snapshot(0);
+        self.clear_snapshot(1);
         for (k, v) in lines(text) {
+            if let Some(i) = SNAPSHOT_KEYS.iter().position(|&s| s == k) {
+                let mut snap = ParamValues::default();
+                for item in v.split(',') {
+                    if let Some((key, val)) = item.trim().split_once(':')
+                        && let (Some(id), Ok(val)) = (by_key(key.trim()), val.trim().parse::<f64>())
+                    {
+                        snap.set(id, val);
+                    }
+                }
+                self.store_snapshot(i, &snap);
+                continue;
+            }
             match k {
                 "learn" => {
                     for item in v.split(',') {
@@ -509,6 +611,9 @@ impl ControlState {
         self.set_loaded(factory, &user);
     }
 }
+
+/// State keys of snapshots A and B.
+const SNAPSHOT_KEYS: [&str; 2] = ["snapshot_a", "snapshot_b"];
 
 /// `key = value` lines, comments (`#`) and blanks skipped.
 pub(crate) fn lines(text: &str) -> impl Iterator<Item = (&str, &str)> {
@@ -649,5 +754,30 @@ mod tests {
         assert_eq!(d.names()[2], "Robot it");
         assert!(d.program_change());
         assert_eq!(d.factory(), Some(3));
+    }
+
+    #[test]
+    fn snapshots_store_save_and_restore() {
+        let c = ControlState::default();
+        assert!(c.snapshot(0).is_none());
+        let mut v = ParamValues::default();
+        v.set(ParamId::Pitch, -7.25);
+        v.set(ParamId::Robot, 33.3);
+        let g = c.snapshot_gen();
+        c.store_snapshot(1, &v);
+        assert_ne!(c.snapshot_gen(), g);
+        assert!(!c.has_snapshot(0));
+        assert_eq!(c.snapshot(1).unwrap().get(ParamId::Pitch), -7.25);
+        let d = ControlState::default();
+        d.load_text(&c.to_text());
+        assert!(!d.has_snapshot(0));
+        let b = d.snapshot(1).unwrap();
+        assert_eq!(b.get(ParamId::Pitch), -7.25);
+        assert_eq!(b.get(ParamId::Robot), 33.3);
+        assert_eq!(d.to_text(), c.to_text());
+
+        c.request_snapshot(1);
+        assert_eq!(c.take_snapshot_request(), Some(1));
+        assert_eq!(c.take_snapshot_request(), None);
     }
 }

@@ -122,6 +122,8 @@ pub enum CarrierParam {
     Noise,
     #[name = "Sidechain"]
     Sidechain,
+    #[name = "PWM"]
+    Pulse,
 }
 
 /// Band counts, in `quack_dsp::vocoder::BAND_CHOICES` order.
@@ -334,6 +336,97 @@ pub enum ChainParam {
     VocoderHarmonyCreative,
 }
 
+#[derive(ParamEnum)]
+pub enum DivisionParam {
+    #[name = "1/16"]
+    Sixteenth,
+    #[name = "1/8T"]
+    EighthTriplet,
+    #[name = "1/8"]
+    Eighth,
+    #[name = "1/4T"]
+    QuarterTriplet,
+    #[name = "1/8D"]
+    DottedEighth,
+    #[name = "1/4"]
+    Quarter,
+    #[name = "1/2T"]
+    HalfTriplet,
+    #[name = "1/4D"]
+    DottedQuarter,
+    #[name = "1/2"]
+    Half,
+    #[name = "1 Bar"]
+    Bar,
+}
+
+/// Notes that recall the snapshots, in `quack_dsp::snapshot::SnapshotKeys` order.
+#[derive(ParamEnum)]
+pub enum SnapshotKeysParam {
+    #[name = "Off"]
+    Off,
+    #[name = "C-1 / C#-1"]
+    Cm1,
+    #[name = "C0 / C#0"]
+    C0,
+    #[name = "C1 / C#1"]
+    C1,
+    #[name = "C7 / C#7"]
+    C7,
+    #[name = "C8 / C#8"]
+    C8,
+}
+
+/// MIDI output channel.
+#[derive(ParamEnum)]
+pub enum ChannelParam {
+    #[name = "1"]
+    Ch1,
+    #[name = "2"]
+    Ch2,
+    #[name = "3"]
+    Ch3,
+    #[name = "4"]
+    Ch4,
+    #[name = "5"]
+    Ch5,
+    #[name = "6"]
+    Ch6,
+    #[name = "7"]
+    Ch7,
+    #[name = "8"]
+    Ch8,
+    #[name = "9"]
+    Ch9,
+    #[name = "10"]
+    Ch10,
+    #[name = "11"]
+    Ch11,
+    #[name = "12"]
+    Ch12,
+    #[name = "13"]
+    Ch13,
+    #[name = "14"]
+    Ch14,
+    #[name = "15"]
+    Ch15,
+    #[name = "16"]
+    Ch16,
+}
+
+/// What the MIDI output plays, in `quack_dsp::midiout::OutSource` order.
+#[derive(ParamEnum)]
+pub enum OutSourceParam {
+    #[name = "Sung"]
+    Sung,
+    #[name = "Sung + Bend"]
+    SungBend,
+    #[name = "Heard"]
+    Heard,
+    #[name = "Heard + Harmony"]
+    HeardHarmony,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -362,6 +455,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub mix: FloatParam,
@@ -408,6 +502,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub correction: FloatParam,
@@ -428,6 +523,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 20.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub humanize: FloatParam,
@@ -438,6 +534,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 80.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vibrato: FloatParam,
@@ -506,6 +603,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub formant_follow: FloatParam,
@@ -516,6 +614,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub octave_down: FloatParam,
@@ -526,6 +625,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub sub: FloatParam,
@@ -536,6 +636,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub octave_up: FloatParam,
@@ -549,6 +650,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub robot: FloatParam,
@@ -559,6 +661,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub glitch: FloatParam,
@@ -602,6 +705,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub lead: FloatParam,
@@ -612,6 +716,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 80.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_level: FloatParam,
@@ -622,6 +727,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 60.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub spread: FloatParam,
@@ -632,6 +738,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 30.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_humanize: FloatParam,
@@ -642,6 +749,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 25.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub character: FloatParam,
@@ -652,6 +760,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub expression: FloatParam,
@@ -672,6 +781,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub double: FloatParam,
@@ -698,6 +808,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 80.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vocoder_level: FloatParam,
@@ -728,6 +839,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 50.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub sibilance: FloatParam,
@@ -751,6 +863,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 5.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub carrier_noise: FloatParam,
@@ -802,6 +915,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 50.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vocoder_width: FloatParam,
@@ -812,6 +926,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vocoder_lofi: FloatParam,
@@ -826,6 +941,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub creative_level: FloatParam,
@@ -842,6 +958,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_1_level: FloatParam,
@@ -852,6 +969,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_2_level: FloatParam,
@@ -862,6 +980,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_3_level: FloatParam,
@@ -872,6 +991,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_4_level: FloatParam,
@@ -882,6 +1002,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_1: FloatParam,
@@ -892,6 +1013,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_2: FloatParam,
@@ -902,6 +1024,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_3: FloatParam,
@@ -912,6 +1035,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_4: FloatParam,
@@ -921,6 +1045,444 @@ pub struct QuackParams {
 
     #[param(id = 801, name = "Chain Order", default = 0)]
     pub chain: EnumParam<ChainParam>,
+
+    #[param(
+        id = 1100,
+        name = "Throat",
+        range = "linear(-100, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub throat: FloatParam,
+
+    #[param(
+        id = 1101,
+        name = "Throat Pitch",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub throat_pitch: FloatParam,
+
+    #[param(
+        id = 1110,
+        name = "Harmony Vibrato",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_vibrato: FloatParam,
+
+    #[param(
+        id = 1111,
+        name = "Harmony Timing",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_timing: FloatParam,
+
+    #[param(
+        id = 1120,
+        name = "Harmony 1 Pan",
+        range = "linear(-100, 100)",
+        default = -100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_1_pan: FloatParam,
+
+    #[param(
+        id = 1121,
+        name = "Harmony 2 Pan",
+        range = "linear(-100, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_2_pan: FloatParam,
+
+    #[param(
+        id = 1122,
+        name = "Harmony 3 Pan",
+        range = "linear(-100, 100)",
+        default = -50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_3_pan: FloatParam,
+
+    #[param(
+        id = 1123,
+        name = "Harmony 4 Pan",
+        range = "linear(-100, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_4_pan: FloatParam,
+
+    /// Vocoder enrichments: inputs swapped (the voice by the side-chain),
+    /// consonants, resonance, brightness, gate, ensemble, sub.
+    #[param(id = 1000, name = "Voice from Sidechain")]
+    pub vocoder_swap: BoolParam,
+
+    #[param(
+        id = 1001,
+        name = "Consonants",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub consonants: FloatParam,
+
+    #[param(
+        id = 1002,
+        name = "Vocoder Resonance",
+        range = "linear(0, 100)",
+        default = 25.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub vocoder_resonance: FloatParam,
+
+    #[param(
+        id = 1003,
+        name = "Vocoder Brightness",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub vocoder_tilt: FloatParam,
+
+    #[param(
+        id = 1004,
+        name = "Vocoder Gate",
+        range = "linear(-90, -20)",
+        default = -90.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub vocoder_gate: FloatParam,
+
+    #[param(
+        id = 1005,
+        name = "Ensemble",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub ensemble: FloatParam,
+
+    #[param(
+        id = 1006,
+        name = "Carrier Sub",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub carrier_sub: FloatParam,
+
+    // Voice effects: input dynamics, delay and reverb on sends.
+    #[param(id = 900, name = "FX On")]
+    pub fx_on: BoolParam,
+
+    #[param(
+        id = 901,
+        name = "FX Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub fx_level: FloatParam,
+
+    #[param(
+        id = 910,
+        name = "Gate",
+        range = "linear(-80, -20)",
+        default = -80.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub gate: FloatParam,
+
+    #[param(
+        id = 911,
+        name = "De-Ess",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub deess: FloatParam,
+
+    #[param(
+        id = 912,
+        name = "De-Ess Freq",
+        range = "linear(3000, 12000)",
+        default = 6500.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub deess_freq: FloatParam,
+
+    #[param(
+        id = 913,
+        name = "Comp Threshold",
+        range = "linear(-48, 0)",
+        default = -18.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub comp_threshold: FloatParam,
+
+    #[param(
+        id = 914,
+        name = "Comp Ratio",
+        range = "linear(1, 20)",
+        default = 1.0,
+        unit = "none",
+        smooth = "none"
+    )]
+    pub comp_ratio: FloatParam,
+
+    #[param(
+        id = 915,
+        name = "Comp Attack",
+        range = "linear(0.1, 50)",
+        default = 5.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub comp_attack: FloatParam,
+
+    #[param(
+        id = 916,
+        name = "Comp Release",
+        range = "linear(10, 800)",
+        default = 120.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub comp_release: FloatParam,
+
+    #[param(
+        id = 917,
+        name = "Comp Makeup",
+        range = "linear(0, 24)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub comp_makeup: FloatParam,
+
+    #[param(id = 920, name = "Delay Sync", default = true)]
+    pub delay_sync: BoolParam,
+
+    #[param(id = 921, name = "Delay Division", default = 4)]
+    pub delay_division: EnumParam<DivisionParam>,
+
+    #[param(
+        id = 922,
+        name = "Delay Time",
+        range = "linear(10, 2000)",
+        default = 375.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub delay_time: FloatParam,
+
+    #[param(
+        id = 923,
+        name = "Delay Feedback",
+        range = "linear(0, 95)",
+        default = 35.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_feedback: FloatParam,
+
+    #[param(id = 924, name = "Delay Ping-Pong")]
+    pub delay_ping_pong: BoolParam,
+
+    #[param(
+        id = 925,
+        name = "Delay Tone",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_tone: FloatParam,
+
+    #[param(
+        id = 926,
+        name = "Delay Level",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_level: FloatParam,
+
+    #[param(
+        id = 930,
+        name = "Reverb Decay",
+        range = "linear(0.2, 10)",
+        default = 2.0,
+        unit = "s",
+        smooth = "none"
+    )]
+    pub reverb_decay: FloatParam,
+
+    #[param(
+        id = 931,
+        name = "Reverb Damping",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub reverb_damping: FloatParam,
+
+    #[param(
+        id = 932,
+        name = "Reverb Pre-Delay",
+        range = "linear(0, 200)",
+        default = 20.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub reverb_predelay: FloatParam,
+
+    #[param(
+        id = 933,
+        name = "Reverb Level",
+        range = "linear(0, 100)",
+        default = 60.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub reverb_level: FloatParam,
+
+    #[param(
+        id = 940,
+        name = "Duck",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub duck: FloatParam,
+
+    #[param(
+        id = 950,
+        name = "Send Voice",
+        range = "linear(0, 100)",
+        default = 15.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub send_voice: FloatParam,
+
+    #[param(
+        id = 951,
+        name = "Send Creative",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub send_creative: FloatParam,
+
+    #[param(
+        id = 952,
+        name = "Send Harmony",
+        range = "linear(0, 100)",
+        default = 40.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub send_harmony: FloatParam,
+
+    #[param(
+        id = 953,
+        name = "Send Vocoder",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub send_vocoder: FloatParam,
+
+    #[param(
+        id = 1200,
+        name = "Morph",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub morph: FloatParam,
+
+    #[param(id = 1201, name = "Morph On")]
+    pub morph_on: BoolParam,
+
+    #[param(
+        id = 1202,
+        name = "Morph Time",
+        range = "linear(0, 4000)",
+        default = 300.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub morph_time: FloatParam,
+
+    #[param(id = 1203, name = "Snapshot Keys", default = 0)]
+    pub snapshot_keys: EnumParam<SnapshotKeysParam>,
+
+    #[param(id = 1210, name = "MIDI Out")]
+    pub midi_out: BoolParam,
+
+    #[param(id = 1211, name = "MIDI Out Channel", default = 0)]
+    pub midi_out_channel: EnumParam<ChannelParam>,
+
+    #[param(id = 1212, name = "MIDI Out Source", default = 0)]
+    pub midi_out_source: EnumParam<OutSourceParam>,
 
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
@@ -932,6 +1494,14 @@ pub struct QuackParams {
 }
 
 impl QuackParams {
+    /// Display text of the 0-100 percent parameters. truce's built-in
+    /// `%` unit expects a 0-1 range and multiplies by 100, which made
+    /// hosts show "10000%" (CLAP, VST3).
+    #[allow(clippy::unused_self)]
+    fn fmt_percent(&self, value: f64) -> String {
+        format!("{value:.0}%")
+    }
+
     /// Current host values as the engine's plain values.
     #[must_use]
     pub fn to_values(&self) -> ParamValues {
@@ -1130,7 +1700,102 @@ impl QuackParams {
         {
             v.set(ParamId::Routing, self.routing.value().to_index() as f64);
             v.set(ParamId::Chain, self.chain.value().to_index() as f64);
+            v.set(ParamId::Morph, FloatParamReadF64::value(&self.morph));
+            v.set(ParamId::MorphOn, f64::from(u8::from(self.morph_on.value())));
+            v.set(
+                ParamId::MorphTime,
+                FloatParamReadF64::value(&self.morph_time),
+            );
+            v.set(
+                ParamId::SnapshotKeys,
+                self.snapshot_keys.value().to_index() as f64,
+            );
+            v.set(ParamId::MidiOut, f64::from(u8::from(self.midi_out.value())));
+            v.set(
+                ParamId::MidiOutChannel,
+                self.midi_out_channel.value().to_index() as f64,
+            );
+            v.set(
+                ParamId::MidiOutSource,
+                self.midi_out_source.value().to_index() as f64,
+            );
         }
+        // Voice effects.
+        for (id, p) in [
+            (ParamId::FxOn, &self.fx_on),
+            (ParamId::DelaySync, &self.delay_sync),
+            (ParamId::DelayPingPong, &self.delay_ping_pong),
+        ] {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::DelayDivision,
+            self.delay_division.value().to_index() as f64,
+        );
+        for (id, p) in [
+            (ParamId::FxLevel, &self.fx_level),
+            (ParamId::Gate, &self.gate),
+            (ParamId::DeEss, &self.deess),
+            (ParamId::DeEssFreq, &self.deess_freq),
+            (ParamId::CompThreshold, &self.comp_threshold),
+            (ParamId::CompRatio, &self.comp_ratio),
+            (ParamId::CompAttack, &self.comp_attack),
+            (ParamId::CompRelease, &self.comp_release),
+            (ParamId::CompMakeup, &self.comp_makeup),
+            (ParamId::DelayTime, &self.delay_time),
+            (ParamId::DelayFeedback, &self.delay_feedback),
+            (ParamId::DelayTone, &self.delay_tone),
+            (ParamId::DelayLevel, &self.delay_level),
+            (ParamId::ReverbDecay, &self.reverb_decay),
+            (ParamId::ReverbDamping, &self.reverb_damping),
+            (ParamId::ReverbPredelay, &self.reverb_predelay),
+            (ParamId::ReverbLevel, &self.reverb_level),
+            (ParamId::Duck, &self.duck),
+            (ParamId::SendVoice, &self.send_voice),
+            (ParamId::SendCreative, &self.send_creative),
+            (ParamId::SendHarmony, &self.send_harmony),
+            (ParamId::SendVocoder, &self.send_vocoder),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
+        for (id, p) in [
+            (ParamId::Throat, &self.throat),
+            (ParamId::ThroatPitch, &self.throat_pitch),
+            (ParamId::HarmonyVibrato, &self.harmony_vibrato),
+            (ParamId::HarmonyTiming, &self.harmony_timing),
+            (ParamId::HarmonyPan1, &self.harmony_1_pan),
+            (ParamId::HarmonyPan2, &self.harmony_2_pan),
+            (ParamId::HarmonyPan3, &self.harmony_3_pan),
+            (ParamId::HarmonyPan4, &self.harmony_4_pan),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
+        v.set(
+            ParamId::VocoderSwap,
+            f64::from(u8::from(self.vocoder_swap.value())),
+        );
+        v.set(
+            ParamId::Consonants,
+            FloatParamReadF64::value(&self.consonants),
+        );
+        v.set(
+            ParamId::VocoderResonance,
+            FloatParamReadF64::value(&self.vocoder_resonance),
+        );
+        v.set(
+            ParamId::VocoderTilt,
+            FloatParamReadF64::value(&self.vocoder_tilt),
+        );
+        v.set(
+            ParamId::VocoderGate,
+            FloatParamReadF64::value(&self.vocoder_gate),
+        );
+        v.set(ParamId::Ensemble, FloatParamReadF64::value(&self.ensemble));
+        v.set(
+            ParamId::CarrierSub,
+            FloatParamReadF64::value(&self.carrier_sub),
+        );
         v
     }
 

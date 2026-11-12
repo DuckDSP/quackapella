@@ -276,3 +276,214 @@ fn macros_reach_the_engine_values() {
     assert!((v.get(ParamId::Pitch) - 12.0).abs() < 1e-9);
     assert_eq!(params.to_values().get(ParamId::Pitch), 0.0);
 }
+
+/// Like `run`, returning the MIDI the plugin sent.
+fn run_out(
+    dsp: &mut QuackDsp,
+    params: &QuackParams,
+    input: &[f32],
+    events: &EventList,
+) -> Vec<EventBody> {
+    let n = input.len();
+    let inputs: Vec<&[f32]> = vec![input, input];
+    let mut out = vec![vec![0.0; n]; 2];
+    let mut outputs: Vec<&mut [f32]> = out.iter_mut().map(Vec::as_mut_slice).collect();
+    let mut buffer = AudioBuffer::from_slices_checked(&inputs, &mut outputs, n);
+    let transport = TransportInfo::default();
+    let mut out_events = EventList::with_capacity(256);
+    let mut ctx = ProcessContext::new(&transport, SR, n, &mut out_events);
+    Quackapella::process(dsp, params, &mut buffer, events, &mut ctx);
+    out_events.iter().map(|e| e.body).collect()
+}
+
+fn plain(params: &QuackParams, id: ParamId) -> f64 {
+    params.get_plain(id.spec().host_id).unwrap()
+}
+
+fn set(params: &QuackParams, id: ParamId, v: f64) {
+    params.set_plain(id.spec().host_id, v);
+}
+
+#[test]
+fn morph_writes_the_parameters_between_the_snapshots() {
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
+    set(&params, ParamId::Pitch, -12.0);
+    set(&params, ParamId::HarmonyOn, 0.0);
+    set(&params, ParamId::Retune, 80.0);
+    params.control.store_snapshot(0, &params.to_values());
+    set(&params, ParamId::Pitch, 12.0);
+    set(&params, ParamId::HarmonyOn, 1.0);
+    params.control.store_snapshot(1, &params.to_values());
+    set(&params, ParamId::MorphOn, 1.0);
+    set(&params, ParamId::Morph, 25.0);
+    // A hand tweak on a control A and B share holds.
+    set(&params, ParamId::Retune, 10.0);
+    run(&mut dsp, &params, &[0.0; 64], &EventList::default());
+    assert!((plain(&params, ParamId::Pitch) + 6.0).abs() < 1e-6);
+    assert_eq!(plain(&params, ParamId::HarmonyOn), 0.0);
+    assert_eq!(plain(&params, ParamId::Retune), 10.0);
+    // A macro on the morph moves it too.
+    params.control.set_depth(0, ParamId::Morph, 50);
+    set(&params, ParamId::Macro1, 100.0);
+    run(&mut dsp, &params, &[0.0; 64], &EventList::default());
+    assert!((plain(&params, ParamId::Pitch) - 6.0).abs() < 1e-6);
+    assert_eq!(plain(&params, ParamId::HarmonyOn), 1.0);
+}
+
+#[test]
+fn snapshot_keys_glide_and_go_no_further() {
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
+    set(&params, ParamId::Pitch, 0.0);
+    params.control.store_snapshot(0, &params.to_values());
+    set(&params, ParamId::Pitch, 10.0);
+    params.control.store_snapshot(1, &params.to_values());
+    set(&params, ParamId::SnapshotKeys, 2.0); // C0 / C#0
+    set(&params, ParamId::MorphOn, 1.0);
+    set(&params, ParamId::MorphTime, 100.0);
+    set(&params, ParamId::Morph, 0.0);
+    let mut ev = EventList::with_capacity(1);
+    ev.push(Event::new(
+        0,
+        EventBody::NoteOn {
+            group: 0,
+            channel: 0,
+            note: 13,
+            velocity: 100,
+        },
+    ));
+    run(&mut dsp, &params, &[0.0; 64], &ev);
+    assert_eq!(params.shared.view().held_notes, 0, "the key is not a note");
+    // 100 ms at 48 kHz: 75 blocks of 64.
+    for _ in 0..40 {
+        run(&mut dsp, &params, &[0.0; 64], &EventList::default());
+    }
+    let mid = plain(&params, ParamId::Morph);
+    assert!(mid > 30.0 && mid < 70.0, "{mid}");
+    for _ in 0..40 {
+        run(&mut dsp, &params, &[0.0; 64], &EventList::default());
+    }
+    assert_eq!(plain(&params, ParamId::Morph), 100.0);
+    assert!((plain(&params, ParamId::Pitch) - 10.0).abs() < 1e-6);
+
+    // Morph off: the A key recalls A at once.
+    set(&params, ParamId::MorphOn, 0.0);
+    let mut ev = EventList::with_capacity(1);
+    ev.push(Event::new(
+        0,
+        EventBody::NoteOn {
+            group: 0,
+            channel: 0,
+            note: 12,
+            velocity: 100,
+        },
+    ));
+    run(&mut dsp, &params, &[0.0; 64], &ev);
+    assert_eq!(plain(&params, ParamId::Pitch), 0.0);
+}
+
+#[test]
+fn midi_out_plays_the_sung_note() {
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
+    set(&params, ParamId::MidiOut, 1.0);
+    set(&params, ParamId::MidiOutChannel, 2.0);
+    // A3 (220 Hz), 0.5 s.
+    let hz = 220.0_f32;
+    let mut sent = Vec::new();
+    let mut first_on = None;
+    for b in 0..375 {
+        let x: Vec<f32> = (0..64)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = (b * 64 + i) as f32 / SR as f32;
+                0.4 * (std::f32::consts::TAU * hz * t).sin()
+            })
+            .collect();
+        let ev = run_out(&mut dsp, &params, &x, &EventList::default());
+        if first_on.is_none() && !ev.is_empty() {
+            first_on = Some(b);
+        }
+        sent.extend(ev);
+    }
+    let ons: Vec<_> = sent
+        .iter()
+        .filter_map(|e| match *e {
+            EventBody::NoteOn { channel, note, .. } => Some((channel, note)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ons, vec![(2, 57)], "{sent:?}");
+    // Detection time: well under 40 ms.
+    let ms = first_on.unwrap() as f64 * 64.0 / SR * 1000.0;
+    eprintln!("MIDI out note-on {ms:.1} ms after the onset");
+    assert!(ms < 40.0, "{ms} ms");
+    // Silence: the note ends.
+    let mut tail = Vec::new();
+    for _ in 0..60 {
+        tail.extend(run_out(
+            &mut dsp,
+            &params,
+            &[0.0; 64],
+            &EventList::default(),
+        ));
+    }
+    assert!(tail.iter().any(|e| matches!(
+        e,
+        EventBody::NoteOff {
+            note: 57,
+            channel: 2,
+            ..
+        }
+    )));
+    // Switched off with a note on: released.
+    set(&params, ParamId::MidiOut, 0.0);
+    assert!(run_out(&mut dsp, &params, &[0.0; 64], &EventList::default()).is_empty());
+}
+
+/// How long the MIDI output takes to start a note, per voice range
+/// (`cargo test -p quack-plugin --test adapter -- --nocapture`).
+#[test]
+fn midi_out_onset_per_voice_range() {
+    for (i, range) in VoiceRange::ALL.iter().enumerate() {
+        for low in [false, true] {
+            let params = QuackParams::default();
+            let mut dsp = QuackDsp::default();
+            params.voice.set_index(i as u32);
+            params.low_latency.set_value(low);
+            Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
+            set(&params, ParamId::MidiOut, 1.0);
+            // A singer starts after some silence.
+            for _ in 0..150 {
+                run_out(&mut dsp, &params, &[0.0; 64], &EventList::default());
+            }
+            let hz = match i {
+                0 => 440.0_f32,
+                1 => 220.0,
+                2 => 165.0,
+                _ => 110.0,
+            };
+            let mut at = None;
+            for b in 0..200 {
+                let x: Vec<f32> = (0..64)
+                    .map(|k| {
+                        #[allow(clippy::cast_precision_loss)]
+                        let t = (b * 64 + k) as f32 / SR as f32;
+                        0.4 * (std::f32::consts::TAU * hz * t).sin()
+                    })
+                    .collect();
+                if !run_out(&mut dsp, &params, &x, &EventList::default()).is_empty() {
+                    at = Some(b);
+                    break;
+                }
+            }
+            let ms = at.expect("a note") as f64 * 64.0 / SR * 1000.0;
+            eprintln!("{} {hz} Hz low latency {low}: {ms:.1} ms", range.name());
+            assert!(ms < 25.0);
+        }
+    }
+}

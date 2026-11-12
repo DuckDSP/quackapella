@@ -30,6 +30,7 @@ use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_m
 use crate::chain::{Chain, Routing, Stage, crossfade};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
+use crate::fx::{Division, Dynamics, DynamicsSettings, Space, SpaceSettings};
 use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
@@ -42,6 +43,7 @@ use crate::shift::{Buses, LAYERS, Psola, semitones_to_ratio};
 /// heard as an effect, which is the Tune mode's job.
 pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
+use crate::throat::{self, Throat};
 use crate::vocoder::{Carrier, FollowChord, Vocoder, VocoderMode, bands_from_index};
 
 /// Smoothing time for gains and mix.
@@ -69,7 +71,16 @@ pub struct Engine {
     /// Transposition and formant shift, in semitones.
     pitch: Ramp,
     formant: Ramp,
+    /// Throat size (-1 shortest to +1 longest), its pitch link (0 to
+    /// 1) and its body and top filters (see [`crate::throat`]).
+    throat: Ramp,
+    throat_pitch: Ramp,
+    throat_eq: Throat,
     dry: [DelayLine; CHANNELS],
+    /// Inputs swapped (the voice by the side-chain), and the track's
+    /// own signal delayed for the dry path and the bypass then.
+    swap: bool,
+    track: [DelayLine; CHANNELS],
     notes: NoteStack,
     detector: Yin,
     shifter: Psola,
@@ -101,6 +112,14 @@ pub struct Engine {
     /// Layer routing and, in series, the order of the modules.
     routing: Routing,
     chain: Chain,
+    /// Voice effects: dynamics at the input, delay and reverb on one
+    /// bus fed by a send per layer, its return level.
+    fx_on: bool,
+    dynamics: Dynamics,
+    space: Space,
+    space_on: bool,
+    fx_return: Ramp,
+    sends: [Ramp; 4],
 }
 
 impl Default for Engine {
@@ -125,7 +144,12 @@ impl Engine {
             bypass: Ramp::new(0.0),
             pitch: Ramp::new(0.0),
             formant: Ramp::new(0.0),
+            throat: Ramp::new(0.0),
+            throat_pitch: Ramp::new(0.0),
+            throat_eq: Throat::default(),
             dry: Default::default(),
+            swap: false,
+            track: Default::default(),
             notes: NoteStack::default(),
             detector: Yin::default(),
             shifter: Psola::default(),
@@ -147,6 +171,12 @@ impl Engine {
             double: Ramp::new(0.0),
             routing: Routing::Parallel,
             chain: Chain::default(),
+            fx_on: false,
+            dynamics: Dynamics::default(),
+            space: Space::default(),
+            space_on: false,
+            fx_return: Ramp::new(0.0),
+            sends: [Ramp::new(0.0); 4],
         };
         e.prepare(48_000.0, 512);
         e
@@ -157,7 +187,7 @@ impl Engine {
         self.sample_rate = sample_rate;
         // Allocated for the lowest range; the voice range picks the delay.
         let max = max_latency_samples(sample_rate);
-        for d in &mut self.dry {
+        for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
             d.prepare(max);
         }
         for r in [
@@ -166,14 +196,18 @@ impl Engine {
             &mut self.mix,
             &mut self.pitch,
             &mut self.formant,
+            &mut self.throat,
+            &mut self.throat_pitch,
             &mut self.follow,
             &mut self.lead,
             &mut self.harmony_level,
             &mut self.vocoder_level,
             &mut self.double,
+            &mut self.fx_return,
         ]
         .into_iter()
         .chain(self.layers.iter_mut())
+        .chain(self.sends.iter_mut())
         {
             r.prepare(sample_rate, SMOOTH_MS);
         }
@@ -183,10 +217,13 @@ impl Engine {
         self.detector.prepare(sample_rate, max_block);
         self.shifter.prepare(sample_rate, max);
         self.retuner.prepare(sample_rate);
+        self.throat_eq.prepare(sample_rate);
         self.robot.prepare(sample_rate);
         self.glitch.prepare(sample_rate);
         self.harmony.prepare(sample_rate);
         self.vocoder.prepare(sample_rate, max);
+        self.dynamics.prepare(sample_rate);
+        self.space.prepare(sample_rate);
         self.notes.clear();
         self.latency = max;
         self.range = VoiceRange::from_index(self.values.get(ParamId::Voice));
@@ -211,7 +248,7 @@ impl Engine {
     /// timeline moves: the host re-aligns). Real-time safe.
     fn set_latency(&mut self, latency: usize) {
         self.latency = latency;
-        for d in &mut self.dry {
+        for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
             d.set_delay(latency);
         }
         self.gate_delay.set_delay(latency);
@@ -233,16 +270,19 @@ impl Engine {
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
     pub fn reset(&mut self) {
-        for d in &mut self.dry {
+        for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
             d.reset();
         }
         self.detector.reset();
         self.shifter.reset();
         self.retuner.reset();
+        self.throat_eq.reset();
         self.robot.reset();
         self.glitch.reset();
         self.harmony.reset();
         self.vocoder.reset();
+        self.dynamics.reset();
+        self.space.reset();
         self.notes.clear();
         self.apply_all(true);
         self.prime_gate();
@@ -332,6 +372,8 @@ impl Engine {
                 (&mut self.pitch, st)
             }
             ParamId::Formant => (&mut self.formant, v),
+            ParamId::Throat => (&mut self.throat, v / 100.0),
+            ParamId::ThroatPitch => (&mut self.throat_pitch, v / 100.0),
             ParamId::Mode => {
                 self.mode = VoiceMode::from_index(f64::from(v));
                 self.update_tune();
@@ -371,7 +413,13 @@ impl Engine {
             | ParamId::HarmonyLevel1
             | ParamId::HarmonyLevel2
             | ParamId::HarmonyLevel3
-            | ParamId::HarmonyLevel4 => {
+            | ParamId::HarmonyLevel4
+            | ParamId::HarmonyVibrato
+            | ParamId::HarmonyTiming
+            | ParamId::HarmonyPan1
+            | ParamId::HarmonyPan2
+            | ParamId::HarmonyPan3
+            | ParamId::HarmonyPan4 => {
                 self.update_harmony(snap);
                 self.update_vocoder(snap);
                 return;
@@ -394,7 +442,14 @@ impl Engine {
             | ParamId::FollowChord
             | ParamId::BendRange
             | ParamId::VocoderWidth
-            | ParamId::VocoderLofi => {
+            | ParamId::VocoderLofi
+            | ParamId::VocoderSwap
+            | ParamId::Consonants
+            | ParamId::VocoderResonance
+            | ParamId::VocoderTilt
+            | ParamId::VocoderGate
+            | ParamId::Ensemble
+            | ParamId::CarrierSub => {
                 self.update_vocoder(snap);
                 return;
             }
@@ -417,6 +472,35 @@ impl Engine {
                 }
                 return;
             }
+            ParamId::FxOn
+            | ParamId::FxLevel
+            | ParamId::Gate
+            | ParamId::DeEss
+            | ParamId::DeEssFreq
+            | ParamId::CompThreshold
+            | ParamId::CompRatio
+            | ParamId::CompAttack
+            | ParamId::CompRelease
+            | ParamId::CompMakeup
+            | ParamId::DelaySync
+            | ParamId::DelayDivision
+            | ParamId::DelayTime
+            | ParamId::DelayFeedback
+            | ParamId::DelayPingPong
+            | ParamId::DelayTone
+            | ParamId::DelayLevel
+            | ParamId::ReverbDecay
+            | ParamId::ReverbDamping
+            | ParamId::ReverbPredelay
+            | ParamId::ReverbLevel
+            | ParamId::Duck
+            | ParamId::SendVoice
+            | ParamId::SendCreative
+            | ParamId::SendHarmony
+            | ParamId::SendVocoder => {
+                self.update_fx(snap);
+                return;
+            }
             ParamId::Voice => {
                 let range = VoiceRange::from_index(f64::from(v));
                 if range != self.range {
@@ -436,6 +520,16 @@ impl Engine {
             // Macros act through the values they modulate (the adapter
             // applies them before the engine sees anything).
             ParamId::Macro1 | ParamId::Macro2 | ParamId::Macro3 | ParamId::Macro4 => return,
+            // Snapshots, morph and MIDI out live in the adapter: the
+            // morph writes the parameters it moves, the MIDI out reads
+            // the engine's readings.
+            ParamId::Morph
+            | ParamId::MorphOn
+            | ParamId::MorphTime
+            | ParamId::SnapshotKeys
+            | ParamId::MidiOut
+            | ParamId::MidiOutChannel
+            | ParamId::MidiOutSource => return,
             _ => {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();
@@ -449,6 +543,76 @@ impl Engine {
         } else {
             ramp.set(target);
         }
+    }
+
+    /// Voice effects from the parameters. With FX off the dynamics are
+    /// neutral and the bus return fades out (its tails with it).
+    fn update_fx(&mut self, snap: bool) {
+        let v = &self.values;
+        #[allow(clippy::cast_possible_truncation)]
+        let f = |id: ParamId| v.get(id) as f32;
+        let pct = |id: ParamId| f(id) / 100.0;
+        let on = v.get(ParamId::FxOn) >= 0.5;
+        self.dynamics.set(if on {
+            DynamicsSettings {
+                gate_db: f(ParamId::Gate),
+                deess: pct(ParamId::DeEss),
+                deess_hz: f(ParamId::DeEssFreq),
+                threshold_db: f(ParamId::CompThreshold),
+                ratio: f(ParamId::CompRatio),
+                attack_ms: f(ParamId::CompAttack),
+                release_ms: f(ParamId::CompRelease),
+                makeup_db: f(ParamId::CompMakeup),
+            }
+        } else {
+            DynamicsSettings::default()
+        });
+        if on && !self.fx_on {
+            // Back on: no tail left over from before.
+            self.dynamics.reset();
+            self.space.reset();
+        }
+        self.fx_on = on;
+        self.space.set(SpaceSettings {
+            sync: v.get(ParamId::DelaySync) >= 0.5,
+            division: Division::from_index(v.get(ParamId::DelayDivision)),
+            delay_ms: f(ParamId::DelayTime),
+            feedback: pct(ParamId::DelayFeedback),
+            ping_pong: v.get(ParamId::DelayPingPong) >= 0.5,
+            delay_tone: pct(ParamId::DelayTone),
+            delay_level: pct(ParamId::DelayLevel),
+            decay_s: f(ParamId::ReverbDecay),
+            damping: pct(ParamId::ReverbDamping),
+            predelay_ms: f(ParamId::ReverbPredelay),
+            reverb_level: pct(ParamId::ReverbLevel),
+            duck: pct(ParamId::Duck),
+        });
+        let ret = if on { pct(ParamId::FxLevel) } else { 0.0 };
+        let sends = [
+            pct(ParamId::SendVoice),
+            pct(ParamId::SendCreative),
+            pct(ParamId::SendHarmony),
+            pct(ParamId::SendVocoder),
+        ];
+        for (r, t) in std::iter::once(&mut self.fx_return)
+            .chain(self.sends.iter_mut())
+            .zip(std::iter::once(ret).chain(sends))
+        {
+            if snap {
+                r.snap(t);
+            } else {
+                r.set(t);
+            }
+        }
+        if on {
+            self.space_on = true;
+        }
+    }
+
+    /// Gain reduction of the input compressor and de-esser, in dB (≤ 0).
+    #[must_use]
+    pub fn fx_reduction_db(&self) -> (f32, f32) {
+        self.dynamics.reduction_db()
     }
 
     /// Whether the Creative layer is on.
@@ -556,6 +720,12 @@ impl Engine {
         {
             s.spread = pct(ParamId::Spread) as f32;
         }
+        s.vibrato = pct(ParamId::HarmonyVibrato);
+        s.timing = pct(ParamId::HarmonyTiming);
+        #[allow(clippy::cast_possible_truncation)]
+        for (p, id) in s.pan.iter_mut().zip(crate::params::HARMONY_PAN_PARAMS) {
+            *p = (v.get(id) / 100.0) as f32;
+        }
         s.close = v.get(ParamId::CloseVoicing) >= 0.5;
         let double = if on { pct(ParamId::Double) } else { 0.0 };
         s.double = double > 0.0;
@@ -631,6 +801,23 @@ impl Engine {
         s.bend_range = v.get(ParamId::BendRange);
         s.width = pct(ParamId::VocoderWidth);
         s.lofi = pct(ParamId::VocoderLofi);
+        s.consonants = pct(ParamId::Consonants);
+        s.resonance = pct(ParamId::VocoderResonance);
+        s.tilt_db = v.get(ParamId::VocoderTilt);
+        s.gate_db = v.get(ParamId::VocoderGate);
+        s.ensemble = pct(ParamId::Ensemble);
+        s.sub = pct(ParamId::CarrierSub);
+        // Inputs swapped: the voice comes by the side-chain, the track
+        // (a synth) is the carrier.
+        let swap = v.get(ParamId::VocoderSwap) >= 0.5;
+        if swap {
+            s.carrier = Carrier::Sidechain;
+        }
+        if swap != self.swap {
+            self.swap = swap;
+            self.detector.reset();
+            self.shifter.reset();
+        }
         self.vocoder.apply_settings();
         self.vocoder.set_notes(&self.notes);
         #[allow(clippy::cast_possible_truncation)]
@@ -663,6 +850,7 @@ impl Engine {
     /// them).
     pub fn set_transport(&mut self, tempo: f64, bar_beats: f64, beat: Option<f64>) {
         self.glitch.set_transport(tempo, bar_beats, beat);
+        self.space.set_transport(tempo, bar_beats);
     }
 
     /// Whether a frozen grain is sounding (Creative layer).
@@ -783,17 +971,46 @@ impl Engine {
             // good: replaced by silence, absurd levels clamped.
             *l = sanitize(*l);
             *r = sanitize(*r);
+            let (sc_l, sc_r) = sidechain.map_or((0.0, 0.0), |(a, b)| {
+                (
+                    sanitize(a.get(i).copied().unwrap_or(0.0)),
+                    sanitize(b.get(i).copied().unwrap_or(0.0)),
+                )
+            });
+            // Swapped inputs: the voice is the side-chain, the track is
+            // the carrier and stays the dry signal.
+            let (track_l, track_r) = (self.track[0].tick(*l), self.track[1].tick(*r));
+            let (voice_l, voice_r, sc) = if self.swap {
+                (sc_l, sc_r, 0.5 * (*l + *r))
+            } else {
+                (*l, *r, 0.5 * (sc_l + sc_r))
+            };
             let g_in = self.in_gain.tick();
             let g_out = self.out_gain.tick();
             let mix = self.mix.tick();
             let byp = self.bypass.tick();
-            let transpose = self.pitch.tick();
+            let throat = self.throat.tick();
+            let throat_link = self.throat_pitch.tick();
+            #[allow(clippy::cast_possible_truncation)]
+            let (transpose, formant_st) = if throat == 0.0 {
+                (self.pitch.tick(), self.formant.tick())
+            } else {
+                let t = f64::from(throat);
+                (
+                    self.pitch.tick() + throat::pitch_st(t, f64::from(throat_link)) as f32,
+                    self.formant.tick() + throat::formant_st(t) as f32,
+                )
+            };
             self.retuner.transpose = f64::from(transpose);
-            let formant = semitones_to_ratio(self.formant.tick());
-            let (in_l, in_r) = (*l * g_in, *r * g_in);
+            let formant = semitones_to_ratio(formant_st);
+            let (in_l, in_r) = if self.fx_on {
+                self.dynamics.tick(voice_l * g_in, voice_r * g_in)
+            } else {
+                (voice_l * g_in, voice_r * g_in)
+            };
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
-            let (dry_l, dry_r) = (self.dry[0].tick(*l), self.dry[1].tick(*r));
+            let (dry_l, dry_r) = (self.dry[0].tick(voice_l), self.dry[1].tick(voice_r));
             let g_out = g_out * self.gate_delay.tick(self.gate.tick());
             self.shifter.set_layers([
                 self.layers[0].tick(),
@@ -820,40 +1037,75 @@ impl Engine {
                 robot: &mut self.robot,
                 harmony: &mut self.harmony,
             };
+            // The throat's body and top, before the grains (the formant
+            // shift moves them with the rest of the tract).
+            let (sh_l, sh_r) = self.throat_eq.tick(throat, in_l, in_r);
             let buses = self
                 .shifter
-                .tick_buses(in_l, in_r, period, &mut steer, formant);
+                .tick_buses(sh_l, sh_r, period, &mut steer, formant);
             let voc_level = self.vocoder_level.tick();
             let vocoding = voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off;
-            let sc = sidechain.map_or(0.0, |(a, b)| {
-                0.5 * sanitize(a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0))
-            });
             let follow = self
                 .retuner
                 .reading()
                 .map(|t| t.out)
                 .or_else(|| self.detector.estimate().map(|e| e.note()))
                 .map(|n| f64::from(n + transpose));
-            let (wet_l, wet_r) = match self.routing {
+            let sends = [
+                self.sends[0].tick(),
+                self.sends[1].tick(),
+                self.sends[2].tick(),
+                self.sends[3].tick(),
+            ];
+            let fx_return = self.fx_return.tick();
+            let ((wet_l, wet_r), (send_l, send_r)) = match self.routing {
                 Routing::Parallel => {
                     // The glitch cuts the creative layer only.
                     let [cl, cr] = buses.creative;
                     let (cl, cr) = self.glitch.tick(cl, cr);
-                    let wet_l = buses.lead[0] + buses.harmony[0] + cl * creative_level;
-                    let wet_r = buses.lead[1] + buses.harmony[1] + cr * creative_level;
+                    let (cl, cr) = (cl * creative_level, cr * creative_level);
+                    let wet_l = buses.lead[0] + buses.harmony[0] + cl;
+                    let wet_r = buses.lead[1] + buses.harmony[1] + cr;
+                    // Each layer's own send to the space bus.
+                    let send = |s: usize, x: f32| x * sends[s];
+                    let mut send_l =
+                        send(0, buses.lead[0]) + send(1, cl) + send(2, buses.harmony[0]);
+                    let mut send_r =
+                        send(0, buses.lead[1]) + send(1, cr) + send(2, buses.harmony[1]);
                     // Vocoder or talkbox, on top of the lead and harmonies.
                     if vocoding {
                         let dry = 0.5 * (dry_l + dry_r) * g_in;
                         let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
                         let (vl, vr) = self.vocoder.widen(v);
-                        (wet_l + vl, wet_r + vr)
+                        send_l += send(3, vl);
+                        send_r += send(3, vr);
+                        ((wet_l + vl, wet_r + vr), (send_l, send_r))
                     } else {
-                        (wet_l, wet_r)
+                        ((wet_l, wet_r), (send_l, send_r))
                     }
                 }
                 Routing::Series => {
-                    self.series(&buses, creative_level, voc_level, vocoding, sc, follow)
+                    // One output: the whole chain goes out on one send.
+                    let s = self.series(&buses, creative_level, voc_level, vocoding, sc, follow);
+                    (s, (s.0 * sends[0], s.1 * sends[0]))
                 }
+            };
+            let (wet_l, wet_r) = if self.space_on {
+                // Ducked by the voice as it comes out (lined up with it).
+                let key = 0.5 * (dry_l + dry_r) * g_in;
+                let (fl, fr) = self.space.tick(send_l, send_r, key);
+                if !self.fx_on && self.fx_return.is_settled() {
+                    // Faded out: stop spending on the bus.
+                    self.space_on = false;
+                }
+                (wet_l + fl * fx_return, wet_r + fr * fx_return)
+            } else {
+                (wet_l, wet_r)
+            };
+            let (dry_l, dry_r) = if self.swap {
+                (track_l, track_r)
+            } else {
+                (dry_l, dry_r)
             };
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
@@ -940,6 +1192,29 @@ mod tests {
         e.process(&mut l, &mut r);
         assert_eq!(l, r);
         l
+    }
+
+    #[test]
+    fn effects_add_no_latency() {
+        // FX on, dynamics neutral: the direct sound still lands on the
+        // reported latency, the delay and reverb come after it.
+        let mut e = Engine::new();
+        e.prepare(48_000.0, 512);
+        e.set_param(ParamId::FxOn, 1.0);
+        e.set_param(ParamId::DelayLevel, 50.0);
+        e.set_param(ParamId::SendVoice, 100.0);
+        e.reset();
+        let lat = e.latency_samples();
+        // Reverb tails differ left and right: the left side only.
+        let mut y = vec![0.0; 48_000];
+        let mut r = vec![0.0; 48_000];
+        y[0] = 1.0;
+        r[0] = 1.0;
+        e.process(&mut y, &mut r);
+        assert!((y[lat] - 1.0).abs() < 1e-3, "direct {}", y[lat]);
+        assert!(y[..lat].iter().all(|v| v.abs() < 1e-6));
+        let tail: f32 = y[lat + 1..].iter().map(|v| v.abs()).sum();
+        assert!(tail > 0.01, "no tail {tail}");
     }
 
     #[test]
@@ -1461,5 +1736,48 @@ mod tests {
         assert_eq!(e.notes().latest().map(|n| n.note), Some(67));
         e.all_notes_off();
         assert!(e.notes().held().is_empty());
+    }
+
+    #[test]
+    fn swapped_inputs_vocode_the_side_chain_voice_on_the_track() {
+        let mut e = Engine::new();
+        let lat = e.latency_samples();
+        let mut v = ParamValues::default();
+        v.set(ParamId::VocoderOn, 1.0);
+        v.set(ParamId::VocoderSwap, 1.0);
+        v.set(ParamId::Lead, 0.0);
+        v.set(ParamId::VocoderLevel, 100.0);
+        e.set_all(&v, true);
+        let n = 48_000;
+        // Track: a 110 Hz saw (the synth); side-chain: a buzzy voice.
+        let synth: Vec<f32> = (0..n)
+            .map(|i| (2.0 * ((i as f64 * 110.0 / 48_000.0) % 1.0) - 1.0) as f32 * 0.3)
+            .collect();
+        let voice: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / 48_000.0;
+                (0.3 * (std::f64::consts::TAU * 220.0 * t).sin()
+                    + 0.2 * (std::f64::consts::TAU * 660.0 * t).sin()) as f32
+            })
+            .collect();
+        let rms = |x: &[f32]| {
+            (x.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+        };
+        let (mut l, mut r) = (synth.clone(), synth.clone());
+        e.process_with_sidechain(&mut l, &mut r, Some((&voice, &voice)));
+        assert!(rms(&l[n / 2..]) > 0.01, "vocoded: {}", rms(&l[n / 2..]));
+        // No voice in the side-chain: the synth is not vocoded.
+        let (mut l, mut r) = (synth.clone(), synth.clone());
+        let silent = vec![0.0; n];
+        e.process_with_sidechain(&mut l, &mut r, Some((&silent, &silent)));
+        assert!(rms(&l[n / 2..]) < 1e-3, "silent: {}", rms(&l[n / 2..]));
+        // Dry and bypass are the track, lined up with the latency.
+        v.set(ParamId::Bypass, 1.0);
+        e.set_all(&v, true);
+        let (mut l, mut r) = (synth.clone(), synth.clone());
+        e.process_with_sidechain(&mut l, &mut r, Some((&voice, &voice)));
+        for i in n / 2..n / 2 + 100 {
+            assert!((l[i] - synth[i - lat]).abs() < 1e-5);
+        }
     }
 }

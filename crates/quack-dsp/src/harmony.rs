@@ -28,7 +28,17 @@
 //! of one: each voice lags the lead by a few slowly wandering
 //! milliseconds and drifts by a few cents (*Humanize*), has its own
 //! formant offset (*Character*: other throats), its own place in the
-//! stereo field (*Spread*), and glides between notes (*Glide*).
+//! stereo field (*Spread*, and a pan per interval voice), and glides
+//! between notes (*Glide*). On top of that, two habits of real backing
+//! singers:
+//!
+//! - *Vibrato*: each voice has its own vibrato, at its own rate, which
+//!   only starts once the note has been held a moment (a singer starts
+//!   a note straight); it adds to what the voices copy of the lead's.
+//! - *Timing*: each voice takes a new note a little late, by its own
+//!   amount (some singers are always later than others), and a played
+//!   MIDI note starts late the same way. Only the note changes are late:
+//!   the voices read the same input as the lead, so no latency.
 //!
 //! Real-time: fixed arrays, no allocation; the engine calls
 //! [`Harmonizer::tick`] once per sample and the shifter asks
@@ -73,7 +83,21 @@ const CHARACTER_ST: [f64; MAX_VOICES] = [
     1.6, -1.8, 0.9, -1.1, 2.2, -2.4, 0.5, -0.6, // harmonies
     0.6, -0.7, // doublers
 ];
-/// Place of each voice in the stereo field at full spread.
+/// Vibrato at 100 %: depth (cents, either way), the time a note is held
+/// straight before it starts and the time it takes to come in.
+const VIBRATO_CENTS: f64 = 30.0;
+const VIBRATO_ONSET_S: f64 = 0.25;
+const VIBRATO_RISE_S: f64 = 0.4;
+/// Vibrato rate of each voice (Hz): never two alike, so they never lock.
+const VIBRATO_HZ: [f64; MAX_VOICES] = [5.2, 5.7, 4.8, 6.0, 5.4, 4.6, 6.2, 5.0, 5.5, 5.8];
+/// Timing at 100 %: how late a voice takes a new note (ms).
+const TIMING_MIN_MS: f64 = 12.0;
+const TIMING_RANGE_MS: f64 = 70.0;
+/// How late each voice tends to be, 0 to 1 (its habit; the humanize
+/// wanderer moves it around).
+const LATENESS: [f64; MAX_VOICES] = [0.35, 0.8, 0.55, 1.0, 0.45, 0.9, 0.25, 0.7, 0.5, 0.6];
+/// Place of each voice in the stereo field at full spread (the interval
+/// voices have their own pan parameters, these are their defaults).
 const PAN: [f32; MAX_VOICES] = [
     -1.0, 1.0, -0.5, 0.5, -0.75, 0.75, -0.25, 0.25, // harmonies
     -1.0, 1.0, // doublers
@@ -265,8 +289,14 @@ pub struct HarmonySettings {
     pub humanize: f64,
     /// Formant offsets, 0 to 1.
     pub character: f64,
-    /// Stereo spread, 0 to 1.
+    /// Stereo spread, 0 to 1 (scales every pan).
     pub spread: f32,
+    /// Pan of each interval voice, -1 to 1 (before the spread).
+    pub pan: [f32; INTERVAL_VOICES],
+    /// Own vibrato of the voices, 0 to 1.
+    pub vibrato: f64,
+    /// Lateness of the voices on note changes, 0 to 1.
+    pub timing: f64,
     /// MIDI mode: move the played notes next to the lead.
     pub close: bool,
     /// Doubler on (its level comes with [`Harmonizer::tick`]).
@@ -286,6 +316,9 @@ impl Default for HarmonySettings {
             humanize: 0.3,
             character: 0.25,
             spread: 0.6,
+            pan: [PAN[0], PAN[1], PAN[2], PAN[3]],
+            vibrato: 0.0,
+            timing: 0.0,
             close: false,
             double: false,
         }
@@ -325,6 +358,11 @@ impl Wander {
     }
 }
 
+/// How late voice `v` takes a new note at full Timing (ms).
+fn late_ms(v: usize, s: &Slot) -> f64 {
+    TIMING_MIN_MS + TIMING_RANGE_MS * 0.5 * (LATENESS[v] + s.lag.value)
+}
+
 fn next_unit(rng: &mut u32) -> f64 {
     *rng ^= *rng << 13;
     *rng ^= *rng >> 17;
@@ -353,6 +391,16 @@ struct Slot {
     fold: i32,
     /// Note sung for the last grain (for the editor).
     sung: Option<f64>,
+    /// Timing: the note the voice holds, the one it is about to take
+    /// and the time left before it does.
+    held: f64,
+    pending: Option<f64>,
+    wait: f64,
+    /// Timing: time left before a played note starts (MIDI).
+    onset: f64,
+    /// Vibrato: phase (turns) and how long the note has been held.
+    vib_phase: f64,
+    age: f64,
 }
 
 /// The harmony voices. See the module docs.
@@ -364,6 +412,8 @@ pub struct Harmonizer {
     attack: f32,
     release: f32,
     pan_coef: f32,
+    /// Seconds per sample.
+    sample_time: f64,
     rng: u32,
     stamp: u64,
     /// Lead: note sent out (fractional), its reference note (hysteresis)
@@ -394,6 +444,7 @@ impl Default for Harmonizer {
             attack: 0.0,
             release: 0.0,
             pan_coef: 0.0,
+            sample_time: 1.0 / 48_000.0,
             rng: 0x9E37_79B9,
             stamp: 0,
             lead: None,
@@ -417,6 +468,7 @@ const WANDER_EVERY: u32 = 32;
 impl Harmonizer {
     pub fn prepare(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
+        self.sample_time = 1.0 / sample_rate;
         #[allow(clippy::cast_possible_truncation)]
         {
             self.attack = (1.0 / (sample_rate * ATTACK_S)) as f32;
@@ -431,6 +483,7 @@ impl Harmonizer {
             *s = Slot {
                 pan: PAN[i],
                 fold: i32::MIN,
+                held: f64::NAN,
                 ..Slot::default()
             };
         }
@@ -514,6 +567,11 @@ impl Harmonizer {
             s.gate = true;
             s.velocity = vel;
             s.stamp = self.stamp;
+            s.onset = if s.env <= 0.0 {
+                self.settings.timing * late_ms(i, s) * 0.001
+            } else {
+                0.0
+            };
             s.fold = i32::MIN;
         }
     }
@@ -570,6 +628,9 @@ impl Harmonizer {
         self.gap += dt.max(0.0);
         if self.gap > PHRASE_GAP_S {
             self.lead = None;
+            for s in &mut self.slots {
+                s.held = f64::NAN;
+            }
         }
     }
 
@@ -697,6 +758,49 @@ impl Harmonizer {
         }
         .clamp(-MAX_EXPRESSION_ST, MAX_EXPRESSION_ST);
         let s = &mut self.slots[v];
+        // Timing: a new note is taken late, by the voice's own amount.
+        // A voice starting (faded out, or a new phrase) takes its note
+        // at once.
+        let fresh = s.env <= 0.0 || s.held.is_nan();
+        let target = if fresh || st.timing <= 0.0 {
+            s.pending = None;
+            target
+        } else if (target - s.held).abs() < 0.01 {
+            s.pending = None;
+            s.held
+        } else {
+            match s.pending {
+                Some(p) if (p - target).abs() < 0.01 => {
+                    s.wait -= dt;
+                    if s.wait <= 0.0 {
+                        s.pending = None;
+                        target
+                    } else {
+                        s.held
+                    }
+                }
+                _ => {
+                    s.pending = Some(target);
+                    s.wait = st.timing * late_ms(v, s) * 0.001;
+                    s.held
+                }
+            }
+        };
+        if fresh || (target - s.held).abs() >= 0.01 {
+            s.age = 0.0;
+        } else {
+            s.age += dt;
+        }
+        s.held = target;
+        // Vibrato: the voice's own, once the note has been held a moment.
+        let vibrato = if st.vibrato > 0.0 {
+            let rate = VIBRATO_HZ[v] * (0.94 + 0.12 * s.drift.value);
+            s.vib_phase = (s.vib_phase + rate * dt).fract();
+            let rise = ((s.age - VIBRATO_ONSET_S) / VIBRATO_RISE_S).clamp(0.0, 1.0);
+            st.vibrato * VIBRATO_CENTS / 100.0 * rise * (std::f64::consts::TAU * s.vib_phase).sin()
+        } else {
+            0.0
+        };
         if s.env <= 0.0 {
             s.current = target;
         } else if st.glide_s > 0.0 {
@@ -706,7 +810,7 @@ impl Harmonizer {
         }
         let drift = st.humanize * DRIFT_CENTS / 100.0 * (2.0 * s.drift.value - 1.0);
         s.sung = Some(target);
-        Some(s.current + st.expression * dev + drift)
+        Some(s.current + st.expression * dev + drift + vibrato)
     }
 
     /// One sample: fades, pans, humanize, with the harmonies' level and
@@ -736,7 +840,13 @@ impl Harmonizer {
         for (i, s) in self.slots.iter_mut().enumerate() {
             let doubler = i >= MIDI_VOICES;
             let on = s.gate && (doubler || st.mode != HarmonyMode::Off);
-            s.env = if on {
+            let starting = on && s.onset > 0.0;
+            if starting {
+                s.onset -= self.sample_time;
+            }
+            s.env = if starting {
+                s.env
+            } else if on {
                 (s.env + self.attack).min(1.0)
             } else {
                 (s.env - self.release).max(0.0)
@@ -746,7 +856,12 @@ impl Harmonizer {
             } else {
                 st.spread
             };
-            let pan = PAN[i] * spread;
+            let place = if i < INTERVAL_VOICES {
+                st.pan[i].clamp(-1.0, 1.0)
+            } else {
+                PAN[i]
+            };
+            let pan = place * spread;
             s.pan += (pan - s.pan) * self.pan_coef;
             if wander && (on || s.env > 0.0) {
                 s.lag.tick(&mut self.rng, dt);
@@ -910,6 +1025,87 @@ mod tests {
         let b = h.voice_note(1, 0.005).unwrap();
         assert!((a - 67.1).abs() < 1e-9, "{a}");
         assert!((b - 58.1).abs() < 1e-9, "{b}");
+    }
+
+    /// A Fixed voice a major third up, faded in, with the lead on C.
+    fn third_up() -> Harmonizer {
+        let mut h = harm(HarmonyMode::Fixed);
+        h.settings.intervals = [4, 0, 0, 0];
+        h.apply_settings();
+        for _ in 0..4_800 {
+            h.tick(1.0, 0.0);
+        }
+        h.lead(60.0, 0.005);
+        h
+    }
+
+    #[test]
+    fn timing_takes_new_notes_late() {
+        let dt = 0.005;
+        let mut on_time = third_up();
+        let mut late = third_up();
+        late.settings.timing = 1.0;
+        for h in [&mut on_time, &mut late] {
+            for _ in 0..20 {
+                h.lead(60.0, dt);
+                h.voice_note(0, dt);
+            }
+            h.lead(62.0, dt);
+        }
+        assert!((on_time.voice_note(0, dt).unwrap() - 66.0).abs() < 1e-9);
+        // Still on the old note, then on the new one within the range.
+        let mut t = 0.0;
+        let mut changed = None;
+        while t < 0.2 {
+            late.lead(62.0, dt);
+            let n = late.voice_note(0, dt).unwrap();
+            if changed.is_none() && (n - 66.0).abs() < 1e-9 {
+                changed = Some(t);
+            }
+            t += dt;
+        }
+        let t = changed.expect("the voice never took the new note");
+        let max = (TIMING_MIN_MS + TIMING_RANGE_MS) * 0.001;
+        assert!(t > TIMING_MIN_MS * 0.001 && t <= max + dt, "late by {t}");
+    }
+
+    #[test]
+    fn vibrato_starts_after_a_straight_moment() {
+        let dt = 0.002;
+        let mut h = third_up();
+        h.settings.vibrato = 1.0;
+        let (mut early, mut later) = (0.0f64, 0.0f64);
+        for k in 0..600 {
+            h.lead(60.0, dt);
+            let dev = (h.voice_note(0, dt).unwrap() - 64.0).abs();
+            #[allow(clippy::cast_precision_loss)]
+            let t = k as f64 * dt;
+            if t < VIBRATO_ONSET_S {
+                early = early.max(dev);
+            } else if t > VIBRATO_ONSET_S + VIBRATO_RISE_S {
+                later = later.max(dev);
+            }
+        }
+        assert!(early < 1e-9, "straight start: {early}");
+        let want = VIBRATO_CENTS / 100.0;
+        assert!(later > 0.8 * want && later <= want + 1e-9, "{later}");
+    }
+
+    #[test]
+    fn each_interval_voice_has_its_own_pan() {
+        let mut h = harm(HarmonyMode::Fixed);
+        h.settings.intervals = [4, 7, 0, 0];
+        h.settings.spread = 1.0;
+        h.settings.pan = [0.8, 0.8, 0.0, 0.0];
+        h.apply_settings();
+        h.lead(60.0, 0.005);
+        let mut mix = [VoiceMix::default(); MAX_VOICES];
+        for _ in 0..48_000 {
+            mix = *h.tick(1.0, 0.0);
+        }
+        for m in &mix[..2] {
+            assert!(m.gain[1] > 2.0 * m.gain[0], "{:?}", m.gain);
+        }
     }
 
     #[test]

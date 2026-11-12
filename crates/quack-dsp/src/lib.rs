@@ -21,13 +21,17 @@
 //! | [`mode`] | Voice modes, including the *Natural* mode [1] |
 //! | [`pitch`] | Real-time pitch detection (YIN), voicing, confidence [2] |
 //! | [`shift`] | Pitch shifting with formant preservation [3] |
+//! | [`throat`] | Throat size (age, gender): formants, body, top |
 //! | [`autotune`] | Scales and note targeting [4] |
 //! | [`creative`] | Robot and glitch of the Creative mode [5] |
 //! | [`harmony`] | MIDI-driven harmony voices [6] |
 //! | [`vocoder`] | Vocoder and talkbox [7] |
+//! | [`fx`] | Input dynamics, delay and reverb on sends |
 //! | [`denormal`] | Flush-to-zero while processing [9] |
 //! | [`control`] | Macros, MIDI learn, program changes [8] |
 //! | [`presets`] | Factory library and preset files [8] |
+//! | [`snapshot`] | Snapshots A/B and the morph between them |
+//! | [`midiout`] | Sung notes as MIDI output |
 
 pub mod autotune;
 pub mod chain;
@@ -35,15 +39,19 @@ pub mod control;
 pub mod creative;
 pub mod denormal;
 pub mod engine;
+pub mod fx;
 pub mod harmony;
 pub mod latency;
 pub mod midi;
+pub mod midiout;
 pub mod mode;
 pub mod params;
 pub mod pitch;
 pub mod presets;
 pub mod shift;
 pub mod smooth;
+pub mod throat;
+pub mod snapshot;
 pub mod vocoder;
 
 pub use engine::Engine;

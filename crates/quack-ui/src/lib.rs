@@ -43,7 +43,7 @@ use theme::{color, radius, size, space};
 /// Editor size in points at 100 % zoom (the zoom scales it, with the
 /// AUv2 resize patch in `vendor/`).
 pub const BASE_W: u32 = 1040;
-pub const BASE_H: u32 = 820;
+pub const BASE_H: u32 = 904;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -90,6 +90,11 @@ pub struct View {
     pub harmony_notes: u128,
     /// Notes the vocoder's carrier plays, bit n = note n.
     pub vocoder_notes: u128,
+    /// Gain reduction of the input compressor and de-esser, dB (≤ 0).
+    pub comp_db: f32,
+    pub deess_db: f32,
+    /// Notes the MIDI output plays, bit n = note n.
+    pub midi_out_notes: u128,
 }
 
 /// Seconds of pitch history in the graph.
@@ -121,6 +126,15 @@ pub struct UiState {
     page: Page,
     /// Preset browser, values of this frame.
     presets: perform::PresetUi,
+    /// Vocoder page's tab: 0 voice and effects, 1 carrier.
+    vocoder_tab: usize,
+    /// Perform row lists open, and where they hang from.
+    keys_menu: bool,
+    channel_menu: bool,
+    source_menu: bool,
+    keys_rect: egui::Rect,
+    channel_rect: egui::Rect,
+    source_rect: egui::Rect,
 }
 
 impl Default for UiState {
@@ -133,6 +147,13 @@ impl Default for UiState {
             scale_menu: false,
             page: Page::Voice,
             presets: perform::PresetUi::default(),
+            vocoder_tab: 0,
+            keys_menu: false,
+            channel_menu: false,
+            source_menu: false,
+            keys_rect: egui::Rect::NOTHING,
+            channel_rect: egui::Rect::NOTHING,
+            source_rect: egui::Rect::NOTHING,
         }
     }
 }
@@ -146,10 +167,21 @@ pub enum Page {
     Creative,
     Harmony,
     Vocoder,
+    /// The voice effects: not a layer, the bus after them.
+    Fx,
 }
 
 impl Page {
+    /// The layers.
     pub const ALL: [Self; 4] = [Self::Voice, Self::Creative, Self::Harmony, Self::Vocoder];
+    /// Every page: the layers, then the effects.
+    pub const PAGES: [Self; 5] = [
+        Self::Voice,
+        Self::Creative,
+        Self::Harmony,
+        Self::Vocoder,
+        Self::Fx,
+    ];
 
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -158,6 +190,7 @@ impl Page {
             Self::Creative => "Creative",
             Self::Harmony => "Harmony",
             Self::Vocoder => "Vocoder",
+            Self::Fx => "FX",
         }
     }
 
@@ -169,6 +202,7 @@ impl Page {
             Self::Creative => Some(ParamId::CreativeOn),
             Self::Harmony => Some(ParamId::HarmonyOn),
             Self::Vocoder => Some(ParamId::VocoderOn),
+            Self::Fx => Some(ParamId::FxOn),
         }
     }
 
@@ -180,6 +214,7 @@ impl Page {
             Self::Creative => ParamId::CreativeLevel,
             Self::Harmony => ParamId::HarmonyLevel,
             Self::Vocoder => ParamId::VocoderLevel,
+            Self::Fx => ParamId::FxLevel,
         }
     }
 }
@@ -214,6 +249,7 @@ pub fn page_accent(page: Page, style: VoiceMode) -> Color32 {
         Page::Creative => color::CREATIVE,
         Page::Harmony => color::SYNTH,
         Page::Vocoder => color::VOCODER,
+        Page::Fx => color::FX,
     }
 }
 
@@ -325,13 +361,15 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         Page::Creative => creative_panel(ui, params, st, view, graph_r, page_acc),
         Page::Harmony => harmony_panel(ui, params, st, view, graph_r, page_acc),
         Page::Vocoder => vocoder_panel(ui, params, st, view, graph_r, page_acc),
+        Page::Fx => fx_panel(ui, params, st, view, graph_r, page_acc),
     }
 
     // Bottom row: voice, level, MIDI.
     let row_top = tune_r.bottom() + space::M;
     let foot_h = 26.0;
     let macro_h = 92.0;
-    let row_h = inner.bottom() - foot_h - macro_h - space::M - row_top;
+    let perform_h = 72.0;
+    let row_h = inner.bottom() - foot_h - macro_h - perform_h - 2.0 * space::M - row_top;
     let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(452.0, row_h));
     voice_panel(ui, params, st, voice_r, accent);
     let level_r = Rect::from_min_size(
@@ -403,12 +441,27 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     );
     keyboard(&p, kb, view.held_notes, accent);
 
+    // Perform row: snapshots and morph under the voice and level,
+    // MIDI out under MIDI in.
+    let perform_top = midi_r.bottom() + space::M;
+    let snap_r = Rect::from_min_max(
+        pos2(inner.left(), perform_top),
+        pos2(level_r.right(), perform_top + perform_h),
+    );
+    perform::snapshot_panel(ui, params, st, snap_r);
+    let out_r = Rect::from_min_max(
+        pos2(midi_r.left(), perform_top),
+        pos2(inner.right(), perform_top + perform_h),
+    );
+    perform::midi_out_panel(ui, params, st, view, out_r, accent);
+
     // Macros, program change, zoom.
     let macro_r = Rect::from_min_size(
-        pos2(inner.left(), midi_r.bottom() + space::M),
+        pos2(inner.left(), out_r.bottom() + space::M),
         vec2(inner.width(), macro_h),
     );
     perform::macro_panel(ui, params, st, macro_r, accent);
+    perform::perform_menus(ui, params, st, accent);
 
     // Footer: the DuckDSP mark.
     let mark_h = 14.0;
@@ -450,7 +503,7 @@ fn layers_panel(
     let row1 = r.top() + 9.0;
     let row2 = r.top() + 47.0;
     // Right block: voice range and latency, then the style.
-    let right_w = 290.0;
+    let right_w = 262.0;
     let voice_r = Rect::from_min_size(pos2(r.right() - space::L - 150.0, row1), vec2(150.0, 28.0));
     let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
     controls::stepper(
@@ -502,10 +555,13 @@ fn layers_panel(
     let order = layer_order(series, chain);
     let left = route_x + routing_w + space::M;
     let right = low_r.left() - space::XL;
-    let gap = 18.0;
+    let gap = 12.0;
+    // The layers, then the effects' cell after a gap (they come last,
+    // whatever the routing).
+    let cells = order.len() + 1;
     #[allow(clippy::cast_precision_loss)]
-    let w = (right - left - gap * (order.len() - 1) as f32) / order.len() as f32;
-    for (i, page) in order.into_iter().enumerate() {
+    let w = (right - left - gap * (cells - 1) as f32) / cells as f32;
+    for (i, page) in order.into_iter().chain([Page::Fx]).enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let x = left + (w + gap) * i as f32;
         let acc = page_accent(page, style);
@@ -513,7 +569,10 @@ fn layers_panel(
         let tab = Rect::from_min_size(pos2(x, row1), vec2(w, 28.0));
         layer_tab(ui, params, st, tab, page, on, acc);
         let fader = Rect::from_min_size(pos2(x, row2), vec2(w, 28.0));
-        let label = if page == Page::Voice { "Lead" } else { "Level" };
+        let label = match page {
+            Page::Voice => "Lead",
+            _ => "Level",
+        };
         controls::fader(
             ui,
             params,
@@ -523,7 +582,7 @@ fn layers_panel(
             if on { acc } else { acc.gamma_multiply(0.35) },
             label,
         );
-        if series && i > 0 {
+        if series && i > 0 && page != Page::Fx {
             let g = Rect::from_min_size(pos2(x - gap, row1), vec2(gap, row2 + 28.0 - row1));
             chain_link(ui, params, g, chain, i - 1);
         }
@@ -754,7 +813,9 @@ fn voice_panel(
     );
     let shift = params.get_plain(ParamId::Pitch) + params.get_plain(ParamId::Fine) / 100.0;
     let formant = params.get_plain(ParamId::Formant);
+    let throat = params.get_plain(ParamId::Throat);
     let (line1, line2) = voice_summary(shift, formant);
+    let line2 = throat_summary(throat, params.get_plain(ParamId::ThroatPitch)).unwrap_or(line2);
     value(
         p,
         r.right_top() + vec2(-space::L, 20.0),
@@ -777,17 +838,20 @@ fn voice_panel(
     );
     let st_fmt = |v: f64| format!("{v:+.1}");
     let ct_fmt = |v: f64| format!("{v:+.0}");
-    let kw = r.width() / 3.0;
+    let pct = |v: f64| format!("{v:.0}");
+    let kw = r.width() / 5.0;
     let ky = r.center().y - 4.0;
-    let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
+    let knobs: [(ParamId, &dyn Fn(f64) -> String); 5] = [
         (ParamId::Pitch, &st_fmt),
         (ParamId::Fine, &ct_fmt),
         (ParamId::Formant, &st_fmt),
+        (ParamId::Throat, &ct_fmt),
+        (ParamId::ThroatPitch, &pct),
     ];
     for (i, (id, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let cx = r.left() + kw * (i as f32 + 0.5);
-        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
+        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 60.0, accent, fmt);
     }
 }
 
@@ -1013,7 +1077,7 @@ fn harmony_panel(
 
     let knob_d = 64.0;
     let kw = (r.width() - 2.0 * space::L) / 6.0;
-    let row1 = r.top() + 124.0;
+    let row1 = r.top() + 108.0;
     let cap_y = row1 - knob_d * 0.5 - 16.0;
     let intervals_on = mode != HarmonyMode::Midi;
     let key = note_name(params.get_plain(ParamId::Key).round().clamp(0.0, 11.0) as u8 + 60);
@@ -1097,6 +1161,27 @@ fn harmony_panel(
             if live { accent } else { dim },
             "",
         );
+        // And its place in the stereo field.
+        let pr = fr.translate(vec2(0.0, 26.0));
+        controls::fader(
+            ui,
+            params,
+            st,
+            quack_dsp::params::HARMONY_PAN_PARAMS[i],
+            pr,
+            if live { accent } else { dim },
+            "",
+        );
+        if i == quack_dsp::harmony::INTERVAL_VOICES - 1 {
+            text(
+                p,
+                pos2(r.left() + space::L + kw * 5.0, pr.center().y),
+                Align2::CENTER_CENTER,
+                "← Level and pan of each voice",
+                size::CAPTION - 1.0,
+                color::TEXT_FAINT,
+            );
+        }
     }
     let pct = |v: f64| format!("{v:.0}");
     let off = |v: f64| {
@@ -1143,24 +1228,27 @@ fn harmony_panel(
         }
     };
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String);
-    let knobs: [Knob; 6] = [
+    let knobs: [Knob; 8] = [
         (ParamId::Spread, "Spread", &pct),
         (ParamId::HarmonyHumanize, "Humanize", &off),
-        (ParamId::Character, "Character", &off),
-        (ParamId::Expression, "Expression", &pct),
+        (ParamId::HarmonyVibrato, "Vibrato", &off),
+        (ParamId::HarmonyTiming, "Timing", &off),
+        (ParamId::Character, "Timbre", &off),
+        (ParamId::Expression, "Express", &pct),
         (ParamId::Glide, "Glide", &ms),
         (ParamId::Double, "Double", &off),
     ];
+    let kw8 = kw * 6.0 / 8.0;
     for (i, (id, label, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
-        let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+        let cx = r.left() + space::L + kw8 * (i as f32 + 0.5);
         controls::knob_named(
             ui,
             params,
             st,
             id,
             pos2(cx, row2),
-            knob_d,
+            knob_d.min(kw8 - space::S),
             0.0,
             accent,
             fmt,
@@ -1216,7 +1304,16 @@ fn vocoder_panel(
         vec2(r.width() - 2.0 * space::L, 26.0),
     );
     let cnames: Vec<&str> = Carrier::ALL.iter().map(|c| c.name()).collect();
-    controls::segmented(ui, params, ParamId::Carrier, car_r, &cnames, &[accent]);
+    let dim = accent.gamma_multiply(0.35);
+    let swapped = params.get_plain(ParamId::VocoderSwap) >= 0.5;
+    controls::segmented(
+        ui,
+        params,
+        ParamId::Carrier,
+        car_r,
+        &cnames,
+        &[if swapped { dim } else { accent }],
+    );
     let playing: Vec<String> = (0..128u8)
         .filter(|n| view.vocoder_notes & (1u128 << n) != 0)
         .map(note_name)
@@ -1229,8 +1326,10 @@ fn vocoder_panel(
         .collect::<Vec<_>>()
         .join(" ");
     let more = if playing.len() > 3 { " …" } else { "" };
+    let carrier = if swapped { Carrier::Sidechain } else { carrier };
     let status = match (mode, carrier) {
         _ if !layer => "Off".to_owned(),
+        _ if swapped => "Voice: side-chain · Carrier: track".to_owned(),
         (_, Carrier::Sidechain) => "Side-chain".to_owned(),
         _ if !playing.is_empty() && view.held_notes == 0 && follow => {
             format!("Follow · {shown}{more}")
@@ -1255,7 +1354,7 @@ fn vocoder_panel(
         },
     );
 
-    let knob_d = 54.0;
+    let knob_d = 50.0;
     let off = |v: f64| {
         if v < 0.5 {
             "Off".to_owned()
@@ -1264,44 +1363,86 @@ fn vocoder_panel(
         }
     };
     let ms = |v: f64| format!("{v:.0}");
+    let pct = |v: f64| format!("{v:.0}");
     let st_fmt = |v: f64| format!("{v:+.1}");
+    let db_fmt = |v: f64| format!("{v:+.0}");
+    let gate_fmt = |v: f64| {
+        if v <= quack_dsp::vocoder::GATE_OFF_DB + 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
     let bands = |v: f64| format!("{}", bands_from_index(v));
     #[allow(clippy::cast_possible_truncation)]
     let octave = |v: f64| format!("{:+}", v.round() as i32 - 2);
     let vocoder_only = mode != VocoderMode::Talkbox;
     let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
-    let dim = accent.gamma_multiply(0.35);
+    let synth = carrier != Carrier::Sidechain;
+    // Tabs: the voice and the effects, or the carrier synth; the inputs
+    // swap on the right (the voice by the side-chain, like the EVOC).
+    let tab_y = car_r.bottom() + space::S + 26.0 + space::S;
+    let tr = Rect::from_min_size(pos2(car_r.left(), tab_y), vec2(220.0, 24.0));
+    controls::tabs(
+        ui,
+        "vocoder",
+        tr,
+        &["Voice & FX", "Carrier"],
+        &mut st.vocoder_tab,
+        accent,
+    );
+    let sr = Rect::from_min_size(pos2(car_r.right() - 190.0, tab_y), vec2(190.0, 24.0));
+    controls::toggle(
+        ui,
+        params,
+        ParamId::VocoderSwap,
+        sr,
+        "Voice from side-chain",
+        accent,
+    );
     type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, bool);
-    let row1: [Knob; 6] = [
-        (ParamId::BendRange, "Bend", &st_fmt, pitched),
+    let voice_row1: [Knob; 6] = [
         (ParamId::Bands, "Bands", &bands, vocoder_only),
         (ParamId::Response, "Response", &ms, vocoder_only),
         (ParamId::BandShift, "Shift", &st_fmt, true),
-        (ParamId::Sibilance, "Sibilance", &off, true),
-        (ParamId::VocoderWidth, "Width", &off, true),
+        (ParamId::VocoderResonance, "Resonance", &pct, true),
+        (ParamId::VocoderTilt, "Tilt", &db_fmt, true),
+        (ParamId::VocoderGate, "Gate", &gate_fmt, true),
     ];
-    let synth = carrier != Carrier::Sidechain;
-    let row2: [Knob; 6] = [
-        (ParamId::CarrierOctave, "Octave", &octave, pitched),
-        (ParamId::Detune, "Detune", &off, pitched),
-        (ParamId::CarrierNoise, "Noise", &off, pitched),
-        (ParamId::CarrierRelease, "Release", &ms, synth),
-        (ParamId::CarrierGlide, "Glide", &off, pitched),
+    let voice_row2: [Knob; 5] = [
+        (ParamId::Sibilance, "Sibilance", &off, true),
+        (ParamId::Consonants, "Consonants", &off, true),
+        (ParamId::VocoderWidth, "Width", &off, true),
+        (ParamId::Ensemble, "Ensemble", &off, true),
         (ParamId::VocoderLofi, "Lo-Fi", &off, true),
     ];
+    let carrier_row1: [Knob; 6] = [
+        (ParamId::CarrierOctave, "Octave", &octave, pitched),
+        (ParamId::Detune, "Detune", &off, pitched),
+        (ParamId::CarrierSub, "Sub", &off, pitched),
+        (ParamId::CarrierNoise, "Noise", &off, pitched),
+        (ParamId::CarrierGlide, "Glide", &off, pitched),
+        (ParamId::CarrierRelease, "Release", &ms, synth),
+    ];
+    let carrier_row2: [Knob; 1] = [(ParamId::BendRange, "Bend", &st_fmt, pitched)];
     let kw = (r.width() - 2.0 * space::L) / 6.0;
-    let y1 = r.top() + 156.0;
-    let y2 = r.bottom() - 64.0;
-    for (row, y) in [(&row1[..], y1), (&row2[..], y2)] {
+    let y1 = tab_y + 24.0 + 12.0 + knob_d / 2.0;
+    let y2 = r.bottom() - 58.0;
+    let rows: [(&[Knob], f32); 2] = if st.vocoder_tab == 0 {
+        [(&voice_row1[..], y1), (&voice_row2[..], y2)]
+    } else {
+        [(&carrier_row1[..], y1), (&carrier_row2[..], y2)]
+    };
+    for (row, y) in &rows {
         for (i, (id, label, fmt, live)) in row.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
-            let cx = r.left() + space::L + kw * (i as f32 + 0.5);
+            let cx = r.left() + space::L + kw * (i as f32 + 0.5 + (6 - row.len()) as f32 / 2.0);
             controls::knob_named(
                 ui,
                 params,
                 st,
                 *id,
-                pos2(cx, y),
+                pos2(cx, *y),
                 knob_d,
                 id.spec().kind.min(),
                 if *live { accent } else { dim },
@@ -1329,6 +1470,201 @@ fn vocoder_panel(
         cr,
         &chords,
         &[if follow && synth { accent } else { dim }],
+    );
+}
+
+/// The voice effects: dynamics at the input (gate, de-esser,
+/// compressor), then delay and reverb on a bus fed by each layer's send.
+fn fx_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &View,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    layer_switch(ui, params, ParamId::FxOn, r, "FX", accent);
+    let on = params.get_plain(ParamId::FxOn) >= 0.5;
+    let dim = accent.gamma_multiply(0.35);
+    let live = |b: bool| if b && on { accent } else { dim };
+    // Gain reduction, while it works.
+    let gr = if !on {
+        "Off · nothing added to the latency".to_owned()
+    } else if view.comp_db < -0.1 || view.deess_db < -0.1 {
+        format!(
+            "Comp {:.1} dB · De-ess {:.1} dB",
+            view.comp_db, view.deess_db
+        )
+    } else {
+        "No latency added".to_owned()
+    };
+    text(
+        p,
+        pos2(r.right() - space::L, r.top() + 22.0),
+        Align2::RIGHT_CENTER,
+        &gr,
+        size::CAPTION,
+        if on && view.comp_db < -0.1 {
+            accent
+        } else {
+            color::TEXT_FAINT
+        },
+    );
+
+    let off_db = |v: f64| {
+        if v <= f64::from(quack_dsp::fx::GATE_OFF_DB) + 0.01 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let off = |v: f64| {
+        if v < 0.5 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let pct = |v: f64| format!("{v:.0}");
+    let db = |v: f64| format!("{v:.0}");
+    let khz = |v: f64| format!("{:.1}k", v / 1000.0);
+    let ratio = |v: f64| {
+        if v < 1.01 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    let ms = |v: f64| {
+        if v < 10.0 {
+            format!("{v:.1}")
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let secs = |v: f64| format!("{v:.1}s");
+    let comp = params.get_plain(ParamId::CompRatio) > 1.01;
+    let deess = params.get_plain(ParamId::DeEss) > 0.5;
+    let sync = params.get_plain(ParamId::DelaySync) >= 0.5;
+    let delay = params.get_plain(ParamId::DelayLevel) > 0.5;
+    let reverb = params.get_plain(ParamId::ReverbLevel) > 0.5;
+    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
+    type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, Color32);
+    let row1: [Knob; 8] = [
+        (ParamId::Gate, "Gate", &off_db, live(true)),
+        (ParamId::DeEss, "De-Ess", &off, live(true)),
+        (ParamId::DeEssFreq, "Freq", &khz, live(deess)),
+        (ParamId::CompThreshold, "Thresh", &db, live(comp)),
+        (ParamId::CompRatio, "Ratio", &ratio, live(true)),
+        (ParamId::CompAttack, "Attack", &ms, live(comp)),
+        (ParamId::CompRelease, "Release", &ms, live(comp)),
+        (ParamId::CompMakeup, "Makeup", &db, live(true)),
+    ];
+    let row2: [Knob; 8] = [
+        (ParamId::DelayLevel, "Delay", &off, live(true)),
+        (ParamId::DelayTime, "Time", &ms, live(delay && !sync)),
+        (ParamId::DelayFeedback, "Feedback", &pct, live(delay)),
+        (ParamId::DelayTone, "Tone", &pct, live(delay)),
+        (ParamId::ReverbLevel, "Reverb", &off, live(true)),
+        (ParamId::ReverbDecay, "Decay", &secs, live(reverb)),
+        (ParamId::ReverbDamping, "Damping", &pct, live(reverb)),
+        (ParamId::ReverbPredelay, "Pre-Delay", &ms, live(reverb)),
+    ];
+    let layer = |pg: Page, b: bool| {
+        if on && b {
+            page_accent(pg, VoiceMode::Natural)
+        } else {
+            dim
+        }
+    };
+    let row3: [Knob; 5] = [
+        (ParamId::Duck, "Duck", &off, live(delay || reverb)),
+        (
+            ParamId::SendVoice,
+            if series { "Chain" } else { "Voice" },
+            &pct,
+            layer(Page::Voice, true),
+        ),
+        (
+            ParamId::SendCreative,
+            "Creative",
+            &pct,
+            layer(Page::Creative, !series),
+        ),
+        (
+            ParamId::SendHarmony,
+            "Harmony",
+            &pct,
+            layer(Page::Harmony, !series),
+        ),
+        (
+            ParamId::SendVocoder,
+            "Vocoder",
+            &pct,
+            layer(Page::Vocoder, !series),
+        ),
+    ];
+    let knob_d = 40.0;
+    let inner_w = r.width() - 2.0 * space::L;
+    let kw = inner_w / 8.0;
+    let y1 = r.top() + 84.0;
+    let y2 = y1 + 86.0;
+    let y3 = y2 + 86.0;
+    for (row, y, x0) in [
+        (&row1[..], y1, 0.0),
+        (&row2[..], y2, 0.0),
+        (&row3[..], y3, 3.0),
+    ] {
+        for (i, (id, name, fmt, acc)) in row.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let cx = r.left() + space::L + kw * (x0 + i as f32 + 0.5);
+            controls::knob_named(
+                ui,
+                params,
+                st,
+                *id,
+                pos2(cx, y),
+                knob_d,
+                id.spec().kind.min(),
+                *acc,
+                *fmt,
+                name,
+            );
+        }
+    }
+    // Delay sync, its note value, ping-pong (row 3, left).
+    let ty = y3 - 24.0;
+    let sr = Rect::from_min_size(
+        pos2(r.left() + space::L, ty),
+        vec2(kw * 1.5 - space::XS, 24.0),
+    );
+    controls::toggle(ui, params, ParamId::DelaySync, sr, "Sync", live(delay));
+    let pr = Rect::from_min_size(
+        pos2(sr.right() + space::XS, ty),
+        vec2(kw * 1.5 - space::S, 24.0),
+    );
+    controls::toggle(
+        ui,
+        params,
+        ParamId::DelayPingPong,
+        pr,
+        "Ping-Pong",
+        live(delay),
+    );
+    let dr = Rect::from_min_size(
+        pos2(r.left() + space::L, ty + 28.0),
+        vec2(kw * 3.0 - space::S, 24.0),
+    );
+    let div = quack_dsp::fx::Division::from_index(params.get_plain(ParamId::DelayDivision));
+    controls::stepper(
+        ui,
+        params,
+        ParamId::DelayDivision,
+        dr,
+        div.name(),
+        live(delay && sync),
     );
 }
 
@@ -1786,6 +2122,30 @@ pub fn voice_summary(shift_st: f64, formant_st: f64) -> (String, String) {
     (line1, line2)
 }
 
+/// What the throat does, for the voice panel (`None` at rest).
+#[must_use]
+pub fn throat_summary(throat_pct: f64, link_pct: f64) -> Option<String> {
+    if throat_pct.abs() < 0.5 {
+        return None;
+    }
+    let t = throat_pct / 100.0;
+    let who = match t {
+        t if t <= -0.75 => "child",
+        t if t <= -0.35 => "younger, smaller",
+        t if t < 0.0 => "a little smaller",
+        t if t < 0.35 => "a little bigger",
+        t if t < 0.75 => "bigger, deeper",
+        _ => "giant",
+    };
+    let pitch = quack_dsp::throat::pitch_st(t, link_pct / 100.0);
+    let fmt = quack_dsp::throat::formant_st(t);
+    Some(if pitch.abs() < 0.05 {
+        format!("Throat: {who} · formants {fmt:+.1} st, body and air")
+    } else {
+        format!("Throat: {who} · formants {fmt:+.1} st, pitch {pitch:+.1} st")
+    })
+}
+
 /// Nearest note and the offset from it in cents, for a pitch in Hz.
 #[must_use]
 pub fn nearest_note(hz: f32) -> Option<(u8, f32)> {
@@ -1893,7 +2253,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        for (mode, page) in Page::ALL.into_iter().enumerate() {
+        for (mode, page) in Page::PAGES.into_iter().enumerate() {
             let mode = u8::try_from(mode).unwrap_or(0);
             st.set_page(page);
             {
@@ -1916,6 +2276,9 @@ mod tests {
                 frozen: mode == 2,
                 harmony_notes: if mode == 3 { 1 << 64 } else { 0 },
                 vocoder_notes: 0,
+                comp_db: -3.5,
+                deess_db: -1.0,
+                midi_out_notes: 0,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

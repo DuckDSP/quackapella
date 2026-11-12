@@ -125,6 +125,23 @@ fn heavy(mode: f64) -> ParamValues {
     set("carrier_follow", 1.0);
     set("vocoder_width", 50.0);
     set("vocoder_lofi", 20.0);
+    set("consonants", 50.0);
+    set("vocoder_resonance", 60.0);
+    set("vocoder_tilt", -4.0);
+    set("vocoder_gate", -70.0);
+    set("ensemble", 50.0);
+    set("carrier_sub", 30.0);
+    set("fx_on", 1.0);
+    set("gate", -60.0);
+    set("deess", 50.0);
+    set("comp_ratio", 4.0);
+    set("comp_threshold", -30.0);
+    set("delay_level", 40.0);
+    set("delay_feedback", 20.0);
+    set("delay_ping_pong", 1.0);
+    set("reverb_level", 60.0);
+    set("reverb_decay", 0.5);
+    set("duck", 30.0);
     v
 }
 
