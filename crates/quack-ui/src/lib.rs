@@ -93,6 +93,9 @@ pub struct View {
     /// Gain reduction of the input compressor and de-esser, dB (≤ 0).
     pub comp_db: f32,
     pub deess_db: f32,
+    /// The same, for the output dynamics.
+    pub out_comp_db: f32,
+    pub out_deess_db: f32,
     /// Notes the MIDI output plays, bit n = note n.
     pub midi_out_notes: u128,
 }
@@ -375,81 +378,22 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     let row_h = inner.bottom() - foot_h - macro_h - perform_h - 2.0 * space::M - row_top;
     let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(452.0, row_h));
     voice_panel(ui, params, st, voice_r, accent);
-    let level_r = Rect::from_min_size(
+    // The mixer, where the level and MIDI-in panels were: the levels,
+    // then each layer's delay, reverb, chorus and drive.
+    let split_x = voice_r.right() + space::M + 250.0 + space::M;
+    let mix_r = Rect::from_min_max(
         pos2(voice_r.right() + space::M, row_top),
-        vec2(250.0, row_h),
+        pos2(inner.right(), row_top + row_h),
     );
-    panel(&p, level_r);
-    text(
-        &p,
-        level_r.left_top() + vec2(space::L, 20.0),
-        Align2::LEFT_CENTER,
-        "Level",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    let db = |v: f64| format!("{v:+.1}");
-    let pct = |v: f64| format!("{v:.0}");
-    let ky = level_r.center().y + 6.0;
-    let kw = level_r.width() / 3.0;
-    let knobs: [(ParamId, &dyn Fn(f64) -> String); 3] = [
-        (ParamId::InputGain, &db),
-        (ParamId::Mix, &pct),
-        (ParamId::OutputGain, &db),
-    ];
-    for (i, (id, fmt)) in knobs.into_iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let cx = level_r.left() + kw * (i as f32 + 0.5);
-        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 70.0, accent, fmt);
-    }
+    mixer_panel(ui, params, st, mix_r, accent);
+    let midi_r = Rect::from_min_max(pos2(split_x, row_top), mix_r.max);
 
-    // MIDI panel.
-    let midi_r = Rect::from_min_max(
-        pos2(level_r.right() + space::M, row_top),
-        pos2(inner.right(), level_r.bottom()),
-    );
-    panel(&p, midi_r);
-    text(
-        &p,
-        midi_r.left_top() + vec2(space::L, 20.0),
-        Align2::LEFT_CENTER,
-        "MIDI In",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    let latest = (0..128u8)
-        .rev()
-        .find(|n| view.held_notes & (1u128 << n) != 0);
-    let count = view.held_notes.count_ones();
-    let status = match latest {
-        None => "No note".to_owned(),
-        Some(n) if count == 1 => note_name(n),
-        Some(n) => format!("{} (+{})", note_name(n), count - 1),
-    };
-    value(
-        &p,
-        midi_r.right_top() + vec2(-space::L, 20.0),
-        Align2::RIGHT_CENTER,
-        &status,
-        size::VALUE,
-        if latest.is_some() {
-            accent
-        } else {
-            color::TEXT_FAINT
-        },
-    );
-    let kb = Rect::from_min_max(
-        pos2(midi_r.left() + space::L, midi_r.top() + 40.0),
-        pos2(midi_r.right() - space::L, midi_r.bottom() - space::L),
-    );
-    keyboard(&p, kb, view.held_notes, accent);
-
-    // Perform row: snapshots and morph under the voice and level,
+    // Perform row: snapshots and morph under the voice and mixer,
     // MIDI out under MIDI in.
     let perform_top = midi_r.bottom() + space::M;
     let snap_r = Rect::from_min_max(
         pos2(inner.left(), perform_top),
-        pos2(level_r.right(), perform_top + perform_h),
+        pos2(split_x - space::M, perform_top + perform_h),
     );
     perform::snapshot_panel(ui, params, st, snap_r);
     let out_r = Rect::from_min_max(
@@ -839,6 +783,10 @@ fn voice_panel(
         size::CAPTION,
         color::TEXT_FAINT,
     );
+    // Keep In Key: the transposition before the correction, so the
+    // voice lands on the scale.
+    let kk = Rect::from_min_size(pos2(r.left() + 76.0, r.top() + 8.0), vec2(112.0, 24.0));
+    controls::toggle(ui, params, ParamId::KeepInKey, kk, "Keep in Key", accent);
     let st_fmt = |v: f64| format!("{v:+.1}");
     let ct_fmt = |v: f64| format!("{v:+.0}");
     let pct = |v: f64| format!("{v:.0}");
@@ -1476,37 +1424,154 @@ fn vocoder_panel(
     );
 }
 
+/// The mixer: input, mix and output levels, then for each layer its
+/// delay and reverb sends and its chorus and drive amounts.
+fn mixer_panel(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    r: Rect,
+    accent: Color32,
+) {
+    let p = ui.painter();
+    panel(p, r);
+    text(
+        p,
+        r.left_top() + vec2(space::L, 20.0),
+        Align2::LEFT_CENTER,
+        "Mixer",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    let fx = params.get_plain(ParamId::FxOn) >= 0.5;
+    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
+    let row_y = |i: usize| {
+        #[allow(clippy::cast_precision_loss)]
+        let y = r.top() + 40.0 + 27.0 * i as f32;
+        y
+    };
+    let fh = 21.0;
+    // Levels, on the right.
+    let lv_w = 118.0;
+    let lv_x = r.right() - space::L - lv_w;
+    for (i, (id, name)) in [
+        (ParamId::InputGain, "In"),
+        (ParamId::Mix, "Mix"),
+        (ParamId::OutputGain, "Out"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fr = Rect::from_min_size(pos2(lv_x, row_y(i)), vec2(lv_w, fh));
+        controls::fader(ui, params, st, id, fr, accent, name);
+    }
+    // The matrix: rows are the effects, columns the layers.
+    let label_w = 54.0;
+    let left = r.left() + space::L + label_w;
+    let right = lv_x - space::L;
+    let gap = space::XS;
+    let cw = (right - left - 3.0 * gap) / 4.0;
+    let fx_switch = |id: ParamId| fx && params.get_plain(id) >= 0.5;
+    let rows: [(&str, [ParamId; 4], bool); 4] = [
+        (
+            "Delay",
+            quack_dsp::params::DELAY_SEND_PARAMS,
+            fx_switch(ParamId::DelayOn),
+        ),
+        (
+            "Reverb",
+            quack_dsp::params::REVERB_SEND_PARAMS,
+            fx_switch(ParamId::ReverbOn),
+        ),
+        (
+            "Chorus",
+            quack_dsp::params::CHORUS_AMOUNT_PARAMS,
+            fx_switch(ParamId::ChorusOn),
+        ),
+        (
+            "Drive",
+            quack_dsp::params::DRIVE_AMOUNT_PARAMS,
+            fx_switch(ParamId::DriveOn),
+        ),
+    ];
+    for (c, page) in Page::ALL.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let x = left + (cw + gap) * c as f32;
+        let live = layer_on(params, page) && (!series || c == 0);
+        let acc = page_accent(page, VoiceMode::from_index(params.get_plain(ParamId::Mode)));
+        let name = if series && c == 0 {
+            "Chain"
+        } else {
+            page.name()
+        };
+        text(
+            p,
+            pos2(x + cw / 2.0, r.top() + 20.0),
+            Align2::CENTER_CENTER,
+            name,
+            size::CAPTION,
+            if live { acc } else { color::TEXT_FAINT },
+        );
+        for (i, (_, ids, on)) in rows.iter().enumerate() {
+            let fr = Rect::from_min_size(pos2(x, row_y(i)), vec2(cw, fh));
+            let a = if live && *on {
+                acc
+            } else {
+                acc.gamma_multiply(0.3)
+            };
+            controls::fader(ui, params, st, ids[c], fr, a, "");
+        }
+    }
+    for (i, (name, _, on)) in rows.iter().enumerate() {
+        text(
+            p,
+            pos2(r.left() + space::L, row_y(i) + fh / 2.0),
+            Align2::LEFT_CENTER,
+            name,
+            size::CAPTION,
+            if *on {
+                color::TEXT_DIM
+            } else {
+                color::TEXT_FAINT
+            },
+        );
+    }
+}
+
 /// The effects of the FX page, one tab each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FxTab {
     Tone,
     #[default]
-    Dynamics,
+    Input,
+    Drive,
+    Chorus,
     Delay,
     Reverb,
-    Chorus,
-    Sends,
+    Output,
 }
 
 impl FxTab {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Tone,
-        Self::Dynamics,
+        Self::Input,
+        Self::Drive,
+        Self::Chorus,
         Self::Delay,
         Self::Reverb,
-        Self::Chorus,
-        Self::Sends,
+        Self::Output,
     ];
 
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Tone => "Tone",
-            Self::Dynamics => "Dynamics",
+            Self::Input => "Input",
+            Self::Drive => "Drive",
+            Self::Chorus => "Chorus",
             Self::Delay => "Delay",
             Self::Reverb => "Reverb",
-            Self::Chorus => "Chorus",
-            Self::Sends => "Sends",
+            Self::Output => "Output",
         }
     }
 
@@ -1515,23 +1580,25 @@ impl FxTab {
     pub const fn switch(self) -> Option<ParamId> {
         match self {
             Self::Tone => Some(ParamId::ToneOn),
-            Self::Dynamics => Some(ParamId::DynamicsOn),
+            Self::Input => Some(ParamId::DynamicsOn),
+            Self::Drive => Some(ParamId::DriveOn),
+            Self::Chorus => Some(ParamId::ChorusOn),
             Self::Delay => Some(ParamId::DelayOn),
             Self::Reverb => Some(ParamId::ReverbOn),
-            Self::Chorus => Some(ParamId::ChorusOn),
-            Self::Sends => None,
+            Self::Output => Some(ParamId::OutputOn),
         }
     }
 
     /// What the effect does, under the tabs.
     const fn caption(self) -> &'static str {
         match self {
-            Self::Tone => "Input EQ and saturation, before every layer",
-            Self::Dynamics => "Gate, de-esser and compressor on the input",
-            Self::Delay => "On the FX bus, fed by each layer's send",
-            Self::Reverb => "On the FX bus, fed by each layer's send",
-            Self::Chorus => "On every layer, after them",
-            Self::Sends => "How much of each layer goes to the delay and reverb",
+            Self::Tone => "Input EQ, before every layer",
+            Self::Input => "Gate, de-esser and compressor on the input",
+            Self::Drive => "Each layer's amount is in the mixer below",
+            Self::Chorus => "Each layer's amount is in the mixer below",
+            Self::Delay => "Each layer's send is in the mixer below",
+            Self::Reverb => "Each layer's send is in the mixer below",
+            Self::Output => "De-esser, compressor and limiter on the whole sound",
         }
     }
 }
@@ -1747,17 +1814,40 @@ fn fx_panel(
     let rate = |v: f64| format!("{v:.2}");
     let y1 = r.top() + 152.0;
     let y2 = r.bottom() - 58.0;
+    let dyn_bars = |p: &egui::Painter, at: Rect, on: bool, rows: [(&str, f32); 2]| {
+        for (i, (name, v)) in rows.into_iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let y = at.top() + 13.0 + 26.0 * i as f32;
+            text(
+                p,
+                pos2(at.left(), y),
+                Align2::LEFT_CENTER,
+                name,
+                size::CAPTION,
+                color::TEXT_FAINT,
+            );
+            let bar =
+                Rect::from_min_max(pos2(at.left() + 56.0, y - 5.0), pos2(at.right(), y + 5.0));
+            paint::rounded(p, bar, 2, color::WELL, color::BORDER);
+            let frac = if on { (-v / 18.0).clamp(0.0, 1.0) } else { 0.0 };
+            if frac > 0.0 {
+                let fill =
+                    Rect::from_min_max(pos2(bar.right() - bar.width() * frac, bar.top()), bar.max);
+                paint::rounded(p, fill, 2, accent, accent);
+            }
+        }
+    };
+    let inner_w = r.width() - 2.0 * space::L;
     match tab {
         FxTab::Tone => {
-            let k: [FxKnob; 4] = [
+            let k: [FxKnob; 3] = [
                 (ParamId::LowCut, "Low Cut", &low_cut, live(true)),
                 (ParamId::Presence, "Presence", &sdb, live(true)),
                 (ParamId::Air, "Air", &sdb, live(true)),
-                (ParamId::Drive, "Drive", &off, live(true)),
             ];
-            fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 4, 0, &k);
+            fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 3, 0, &k);
         }
-        FxTab::Dynamics => {
+        FxTab::Input => {
             let comp = params.get_plain(ParamId::CompRatio) > 1.01;
             let deess = params.get_plain(ParamId::DeEss) > 0.5;
             let k1: [FxKnob; 3] = [
@@ -1766,46 +1856,16 @@ fn fx_panel(
                 (ParamId::DeEssFreq, "De-Ess Freq", &hz, live(deess)),
             ];
             fx_knobs(ui, params, st, r, y1, 5, 0, &k1);
-            // The two reductions, as bars.
             let meter = Rect::from_min_size(
-                pos2(
-                    r.left() + space::L + (r.width() - 2.0 * space::L) * 0.62,
-                    y1 - 26.0,
-                ),
-                vec2((r.width() - 2.0 * space::L) * 0.38, 52.0),
+                pos2(r.left() + space::L + inner_w * 0.62, y1 - 26.0),
+                vec2(inner_w * 0.38, 52.0),
             );
-            for (i, (name, v)) in [("Comp", view.comp_db), ("De-ess", view.deess_db)]
-                .into_iter()
-                .enumerate()
-            {
-                #[allow(clippy::cast_precision_loss)]
-                let y = meter.top() + 13.0 + 26.0 * i as f32;
-                text(
-                    p,
-                    pos2(meter.left(), y),
-                    Align2::LEFT_CENTER,
-                    name,
-                    size::CAPTION,
-                    color::TEXT_FAINT,
-                );
-                let bar = Rect::from_min_max(
-                    pos2(meter.left() + 56.0, y - 5.0),
-                    pos2(meter.right(), y + 5.0),
-                );
-                paint::rounded(p, bar, 2, color::WELL, color::BORDER);
-                let frac = if dyn_on {
-                    (-v / 18.0).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                if frac > 0.0 {
-                    let fill = Rect::from_min_max(
-                        pos2(bar.right() - bar.width() * frac, bar.top()),
-                        bar.max,
-                    );
-                    paint::rounded(p, fill, 2, accent, accent);
-                }
-            }
+            dyn_bars(
+                p,
+                meter,
+                dyn_on,
+                [("Comp", view.comp_db), ("De-ess", view.deess_db)],
+            );
             let k2: [FxKnob; 5] = [
                 (ParamId::CompThreshold, "Threshold", &db, live(comp)),
                 (ParamId::CompRatio, "Ratio", &ratio, live(true)),
@@ -1814,6 +1874,27 @@ fn fx_panel(
                 (ParamId::CompMakeup, "Makeup", &db, live(true)),
             ];
             fx_knobs(ui, params, st, r, y2, 5, 0, &k2);
+        }
+        FxTab::Drive => {
+            let names: Vec<&str> = quack_dsp::fx::DriveStyle::ALL
+                .iter()
+                .map(|d| d.name())
+                .collect();
+            let seg =
+                Rect::from_min_size(pos2(r.left() + space::L, y1 - 14.0), vec2(inner_w, 28.0));
+            controls::segmented(ui, params, ParamId::DriveStyle, seg, &names, &[live(true)]);
+            let k: [FxKnob; 2] = [
+                (ParamId::Drive, "Drive", &pct, live(true)),
+                (ParamId::DriveTone, "Tone", &pct, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, y2, 4, 1, &k);
+        }
+        FxTab::Chorus => {
+            let k: [FxKnob; 2] = [
+                (ParamId::ChorusRate, "Rate", &rate, live(true)),
+                (ParamId::ChorusDepth, "Depth", &pct, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 4, 1, &k);
         }
         FxTab::Delay => {
             let sync = params.get_plain(ParamId::DelaySync) >= 0.5;
@@ -1827,15 +1908,13 @@ fn fx_panel(
             ];
             fx_knobs(ui, params, st, r, y1, 5, 0, &k1);
             // Sync, its note value and ping-pong, then the options.
-            let kw = (r.width() - 2.0 * space::L) / 5.0;
+            let kw = inner_w / 5.0;
             let ty = y2 - 30.0;
             let sr = Rect::from_min_size(pos2(r.left() + space::L, ty), vec2(kw - space::XS, 26.0));
             controls::toggle(ui, params, ParamId::DelaySync, sr, "Sync", live(true));
             let div = quack_dsp::fx::Division::from_index(params.get_plain(ParamId::DelayDivision));
-            let dr = Rect::from_min_size(
-                pos2(sr.right() + space::XS, ty),
-                vec2(kw * 1.2 - space::XS, 26.0),
-            );
+            let dr =
+                Rect::from_min_size(pos2(sr.right() + space::XS, ty), vec2(kw - space::XS, 26.0));
             controls::stepper(
                 ui,
                 params,
@@ -1846,7 +1925,7 @@ fn fx_panel(
             );
             let pr = Rect::from_min_size(
                 pos2(r.left() + space::L, ty + 32.0),
-                vec2(kw * 2.2 - space::XS, 26.0),
+                vec2(kw * 2.0 - space::XS, 26.0),
             );
             controls::toggle(
                 ui,
@@ -1861,85 +1940,43 @@ fn fx_panel(
                 (ParamId::DelayWidth, "Width", &off, live(!ping)),
                 (ParamId::DelayToReverb, "To Reverb", &off, live(true)),
             ];
-            let kw_r = Rect::from_min_max(pos2(r.left() + kw * 2.2, r.top()), r.max);
-            fx_knobs(ui, params, st, kw_r, y2, 3, 0, &k2);
+            fx_knobs(ui, params, st, r, y2, 5, 2, &k2);
         }
         FxTab::Reverb => {
-            let k1: [FxKnob; 4] = [
+            let k1: [FxKnob; 5] = [
                 (ParamId::ReverbLevel, "Level", &off, live(true)),
                 (ParamId::ReverbDecay, "Decay", &secs, live(true)),
                 (ParamId::ReverbSize, "Size", &pct, live(true)),
                 (ParamId::ReverbPredelay, "Pre-Delay", &ms, live(true)),
+                (ParamId::Duck, "Duck", &off, live(true)),
             ];
-            fx_knobs(ui, params, st, r, y1, 4, 0, &k1);
+            fx_knobs(ui, params, st, r, y1, 5, 0, &k1);
             let k2: [FxKnob; 4] = [
                 (ParamId::ReverbDamping, "Damping", &pct, live(true)),
                 (ParamId::ReverbLowCut, "Low Cut", &hz, live(true)),
                 (ParamId::ReverbMod, "Modulation", &off, live(true)),
                 (ParamId::ReverbWidth, "Width", &pct, live(true)),
             ];
-            fx_knobs(ui, params, st, r, y2, 4, 0, &k2);
+            fx_knobs(ui, params, st, r, y2, 5, 0, &k2);
         }
-        FxTab::Chorus => {
+        FxTab::Output => {
+            let out_on = on && params.get_plain(ParamId::OutputOn) >= 0.5;
+            let ceiling = |v: f64| format!("{v:.1}");
             let k: [FxKnob; 3] = [
-                (ParamId::ChorusRate, "Rate", &rate, live(true)),
-                (ParamId::ChorusDepth, "Depth", &pct, live(true)),
-                (ParamId::ChorusMix, "Mix", &off, live(true)),
+                (ParamId::OutDeEss, "De-Ess", &off, live(true)),
+                (ParamId::OutComp, "Comp", &off, live(true)),
+                (ParamId::OutCeiling, "Ceiling", &ceiling, live(true)),
             ];
-            fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 3, 0, &k);
-        }
-        FxTab::Sends => {
-            let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
-            let layer = |pg: Page, b: bool| {
-                if on && b {
-                    page_accent(pg, VoiceMode::Natural)
-                } else {
-                    dim
-                }
-            };
-            let k1: [FxKnob; 4] = [
-                (
-                    ParamId::SendVoice,
-                    if series { "Chain" } else { "Voice" },
-                    &pct,
-                    layer(Page::Voice, true),
-                ),
-                (
-                    ParamId::SendCreative,
-                    "Creative",
-                    &pct,
-                    layer(Page::Creative, !series),
-                ),
-                (
-                    ParamId::SendHarmony,
-                    "Harmony",
-                    &pct,
-                    layer(Page::Harmony, !series),
-                ),
-                (
-                    ParamId::SendVocoder,
-                    "Vocoder",
-                    &pct,
-                    layer(Page::Vocoder, !series),
-                ),
-            ];
-            fx_knobs(ui, params, st, r, y1, 4, 0, &k1);
-            let k2: [FxKnob; 1] = [(ParamId::Duck, "Duck", &off, live(true))];
-            fx_knobs(ui, params, st, r, y2, 4, 0, &k2);
-            text(
+            fx_knobs(ui, params, st, r, y1, 3, 0, &k);
+            let meter = Rect::from_min_size(
+                pos2(r.left() + space::L + inner_w * 0.2, y2 - 26.0),
+                vec2(inner_w * 0.6, 52.0),
+            );
+            dyn_bars(
                 p,
-                pos2(
-                    r.left() + space::L + (r.width() - 2.0 * space::L) / 4.0 + space::S,
-                    y2,
-                ),
-                Align2::LEFT_CENTER,
-                if series {
-                    "Series: one send for the whole chain. Duck lowers the bus while you sing"
-                } else {
-                    "Duck lowers the delay and reverb while you sing"
-                },
-                size::CAPTION,
-                color::TEXT_FAINT,
+                meter,
+                out_on,
+                [("Comp", view.out_comp_db), ("De-ess", view.out_deess_db)],
             );
         }
     }
@@ -2438,56 +2475,6 @@ pub fn nearest_note(hz: f32) -> Option<(u8, f32)> {
     Some((n as u8, (m - n) * 100.0))
 }
 
-/// Three octaves from C3, held notes lit (any octave folds in).
-fn keyboard(p: &egui::Painter, r: Rect, held: u128, accent: Color32) {
-    const LOW: u8 = 48;
-    const OCTAVES: u8 = 3;
-    well(p, r);
-    let r = r.shrink(3.0);
-    let whites: Vec<u8> = (LOW..LOW + 12 * OCTAVES)
-        .filter(|n| !is_black(*n))
-        .collect();
-    #[allow(clippy::cast_precision_loss)]
-    let ww = r.width() / whites.len() as f32;
-    let lit = |n: u8| {
-        // Notes outside the drawn range light their pitch class.
-        (0..128u8).any(|m| {
-            held & (1u128 << m) != 0
-                && (m == n || (m % 12 == n % 12 && !(LOW..LOW + 12 * OCTAVES).contains(&m)))
-        })
-    };
-    for (i, n) in whites.iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let k = Rect::from_min_size(
-            pos2(r.left() + ww * i as f32, r.top()),
-            vec2(ww - 1.0, r.height()),
-        );
-        let fill = if lit(*n) {
-            accent
-        } else {
-            Color32::from_rgb(0xC9, 0xD2, 0xDE)
-        };
-        p.rect_filled(k, 2.0, fill);
-    }
-    for (i, n) in whites.iter().enumerate() {
-        let b = n + 1;
-        if is_black(b) && b < LOW + 12 * OCTAVES {
-            #[allow(clippy::cast_precision_loss)]
-            let x = r.left() + ww * (i as f32 + 1.0);
-            let k = Rect::from_min_size(
-                pos2(x - ww * 0.3, r.top()),
-                vec2(ww * 0.6, r.height() * 0.6),
-            );
-            let fill = if lit(b) { accent } else { color::BG };
-            p.rect_filled(k, 2.0, fill);
-        }
-    }
-}
-
-fn is_black(n: u8) -> bool {
-    matches!(n % 12, 1 | 3 | 6 | 8 | 10)
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -2555,6 +2542,8 @@ mod tests {
                 vocoder_notes: 0,
                 comp_db: -3.5,
                 deess_db: -1.0,
+                out_comp_db: 0.0,
+                out_deess_db: 0.0,
                 midi_out_notes: 0,
             };
             for _ in 0..2 {

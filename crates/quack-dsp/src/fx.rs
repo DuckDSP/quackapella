@@ -704,7 +704,14 @@ impl Space {
     /// (the voice, for the ducking). Returns delay plus reverb.
     #[inline]
     pub fn tick(&mut self, l: f32, r: f32, key: f32) -> (f32, f32) {
+        self.tick_sends((l, r), (l, r), key)
+    }
+
+    /// One stereo sample with the delay's and the reverb's own inputs.
+    #[inline]
+    pub fn tick_sends(&mut self, delay: (f32, f32), reverb: (f32, f32), key: f32) -> (f32, f32) {
         let s = self.settings;
+        let (l, r) = delay;
         let mut out = (0.0, 0.0);
         let mut fed = 0.0;
 
@@ -747,7 +754,7 @@ impl Space {
         }
 
         if s.reverb_level > 0.0 {
-            self.predelay.push(0.5 * (l + r) + fed);
+            self.predelay.push(0.5 * (reverb.0 + reverb.1) + fed);
             let x = self.predelay.read(self.predelay_len);
             // Low cut on the way in: no boom in the tail.
             self.rv_low += (x - self.rv_low) * self.rv_low_coef;
@@ -819,8 +826,6 @@ pub struct ToneSettings {
     /// Presence (bell at 3.5 kHz) and air (shelf from 10 kHz), dB.
     pub presence_db: f32,
     pub air_db: f32,
-    /// Soft saturation, 0-1.
-    pub drive: f32,
 }
 
 /// Low cut setting that means "off".
@@ -832,13 +837,12 @@ impl Default for ToneSettings {
             low_cut_hz: LOW_CUT_OFF_HZ,
             presence_db: 0.0,
             air_db: 0.0,
-            drive: 0.0,
         }
     }
 }
 
-/// Input tone: low cut (before the dynamics), then presence, air and
-/// drive (after them). No latency. Real-time safe.
+/// Input tone: low cut (before the dynamics), then presence and air
+/// (after them). No latency. Real-time safe.
 #[derive(Debug, Clone, Default)]
 pub struct Tone {
     sample_rate: f32,
@@ -897,10 +901,9 @@ impl Tone {
         (self.low[0].tick(l).2, self.low[1].tick(r).2)
     }
 
-    /// Presence, air and drive, after the dynamics.
+    /// Presence and air, after the dynamics.
     #[inline]
     pub fn post(&mut self, l: f32, r: f32) -> (f32, f32) {
-        let s = self.settings;
         let mut io = [l, r];
         for (c, x) in io.iter_mut().enumerate() {
             if self.presence_gain != 0.0 {
@@ -910,12 +913,6 @@ impl Tone {
             if self.air_gain != 0.0 {
                 let (_, _, hp) = self.air[c].tick(*x);
                 *x += self.air_gain * hp;
-            }
-            if s.drive > 0.0 {
-                // Peaks rounded off, a little make-up so the voice keeps
-                // its loudness.
-                let d = 1.0 + 7.0 * s.drive;
-                *x = (d * *x).tanh() / d * (1.0 + 0.4 * s.drive);
             }
         }
         (io[0], io[1])
@@ -980,8 +977,18 @@ impl Chorus {
         self.inc = 2.0 * PI * s.rate_hz.clamp(0.05, 10.0) / self.sample_rate.max(1.0);
     }
 
+    /// The chorus on the whole of `(l, r)`, at its mix.
     #[inline]
     pub fn tick(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let m = self.settings.mix;
+        self.tick_send(l, r, l * m, r * m)
+    }
+
+    /// The layers' sum `(l, r)` with the chorus on the part of it each
+    /// layer sends (`(sl, sr)`, its amount times the layer): what is
+    /// sent is partly replaced by its chorused copy.
+    #[inline]
+    pub fn tick_send(&mut self, l: f32, r: f32, sl: f32, sr: f32) -> (f32, f32) {
         let s = self.settings;
         if s.mix <= 0.0 {
             return (l, r);
@@ -994,14 +1001,254 @@ impl Chorus {
         // Voices in quadrature, mirrored between the sides.
         let taps = [[sn, -cs], [cs, -sn]];
         let mut out = [l, r];
-        for (c, x) in [l, r].into_iter().enumerate() {
+        for (c, (x, send)) in [(l, sl), (r, sr)].into_iter().enumerate() {
             let wet = 0.5
                 * (self.ring[c].read_frac(base + depth * (1.0 + taps[c][0]))
                     + self.ring[c].read_frac(base * 1.3 + depth * (1.0 + taps[c][1])));
-            self.ring[c].push(x);
-            out[c] = x * (1.0 - 0.4 * s.mix) + wet * 0.8 * s.mix;
+            self.ring[c].push(send);
+            out[c] = x - 0.4 * send + 0.8 * wet;
         }
         (out[0], out[1])
+    }
+}
+
+/// Distortion styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DriveStyle {
+    /// Warm and asymmetric, like a valve.
+    #[default]
+    Tube,
+    /// Soft, round compression of the peaks.
+    Tape,
+    /// Hard clipping.
+    Hard,
+    /// Square-edged, buzzing.
+    Fuzz,
+    /// Fewer bits and a lower rate.
+    LoFi,
+}
+
+impl DriveStyle {
+    pub const COUNT: u32 = 5;
+    pub const ALL: [Self; 5] = [Self::Tube, Self::Tape, Self::Hard, Self::Fuzz, Self::LoFi];
+
+    #[must_use]
+    pub fn from_index(i: f64) -> Self {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let i = i.round().clamp(0.0, f64::from(Self::COUNT - 1)) as usize;
+        Self::ALL[i]
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tube => "Tube",
+            Self::Tape => "Tape",
+            Self::Hard => "Hard",
+            Self::Fuzz => "Fuzz",
+            Self::LoFi => "Lo-Fi",
+        }
+    }
+}
+
+/// Settings of the distortion (plain values).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DriveSettings {
+    pub style: DriveStyle,
+    /// Drive 0-1 (0 to +36 dB into the shaper), tone 0-1 (dark to bright).
+    pub drive: f32,
+    pub tone: f32,
+}
+
+/// Distortion of one layer, mixed in by the layer's amount. No
+/// latency. Real-time safe.
+#[derive(Debug, Clone, Default)]
+pub struct Distortion {
+    sample_rate: f32,
+    settings: DriveSettings,
+    gain: f32,
+    makeup: f32,
+    tone: [f32; 2],
+    tone_coef: f32,
+    dc: [f32; 2],
+    dc_x: [f32; 2],
+    dc_coef: f32,
+    held: [f32; 2],
+    count: f32,
+}
+
+impl Distortion {
+    pub fn prepare(&mut self, sample_rate: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.sample_rate = sample_rate as f32;
+        }
+        self.dc_coef = 1.0 - 2.0 * PI * 20.0 / self.sample_rate.max(1.0);
+        let s = self.settings;
+        self.set(s);
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        self.tone = [0.0; 2];
+        self.dc = [0.0; 2];
+        self.dc_x = [0.0; 2];
+        self.held = [0.0; 2];
+        self.count = 0.0;
+    }
+
+    pub fn set(&mut self, s: DriveSettings) {
+        self.settings = s;
+        let d = s.drive.clamp(0.0, 1.0);
+        self.gain = from_db(36.0 * d);
+        // Quiet parts stay near their level, loud ones are squashed.
+        self.makeup = self.gain.powf(-0.7);
+        let hz = 2000.0 * 9.0_f32.powf(s.tone.clamp(0.0, 1.0));
+        self.tone_coef = coef(self.sample_rate.max(1.0), 1000.0 / (2.0 * PI * hz));
+    }
+
+    #[inline]
+    fn shape(&self, x: f32) -> f32 {
+        let g = x * self.gain;
+        match self.settings.style {
+            DriveStyle::Tube => {
+                // Softer on one side: even harmonics.
+                if g >= 0.0 {
+                    g.tanh()
+                } else {
+                    (0.7 * g).tanh() / 0.7
+                }
+            }
+            DriveStyle::Tape => g / (1.0 + g.abs()),
+            DriveStyle::Hard => g.clamp(-1.0, 1.0),
+            DriveStyle::Fuzz => (3.0 * g).tanh().clamp(-0.8, 0.8) / 0.8,
+            DriveStyle::LoFi => {
+                let bits = 16.0 - 12.0 * self.settings.drive;
+                let q = 2.0_f32.powf(bits - 1.0);
+                ((x * q).round() / q).clamp(-1.0, 1.0) / self.makeup.max(1e-3)
+            }
+        }
+    }
+
+    /// One stereo sample, `amount` (0-1) of it distorted.
+    #[inline]
+    pub fn tick(&mut self, l: f32, r: f32, amount: f32) -> (f32, f32) {
+        if amount <= 0.0 {
+            return (l, r);
+        }
+        let lofi = self.settings.style == DriveStyle::LoFi;
+        // Lo-fi: the rate falls with the drive (hold 1 to 16 samples).
+        let step = if lofi {
+            1.0 / (1.0 + 15.0 * self.settings.drive)
+        } else {
+            1.0
+        };
+        self.count += step;
+        let take = self.count >= 1.0;
+        if take {
+            self.count -= 1.0;
+        }
+        let mut out = [l, r];
+        for (c, x) in [l, r].into_iter().enumerate() {
+            let y = if take || !lofi {
+                let y = self.shape(x) * self.makeup;
+                self.held[c] = y;
+                y
+            } else {
+                self.held[c]
+            };
+            // Tone, then a DC blocker (the tube is asymmetric).
+            self.tone[c] += (y - self.tone[c]) * self.tone_coef;
+            let t = self.tone[c];
+            let d = t - self.dc_x[c] + self.dc_coef * self.dc[c];
+            self.dc_x[c] = t;
+            self.dc[c] = d;
+            out[c] = x + (d - x) * amount;
+        }
+        (out[0], out[1])
+    }
+}
+
+/// Settings of the output dynamics (plain values, 0-1 amounts).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputSettings {
+    pub deess: f32,
+    /// One-knob compressor: threshold, ratio and make-up together.
+    pub comp: f32,
+    /// Limiter ceiling, dB.
+    pub ceiling_db: f32,
+}
+
+impl Default for OutputSettings {
+    fn default() -> Self {
+        Self {
+            deess: 0.0,
+            comp: 0.0,
+            ceiling_db: 0.0,
+        }
+    }
+}
+
+/// Output dynamics: de-esser and compressor on the whole mix, then a
+/// soft limiter. No look-ahead, no latency. Real-time safe.
+#[derive(Debug, Clone, Default)]
+pub struct Output {
+    dynamics: Dynamics,
+    ceiling: f32,
+    active: bool,
+}
+
+impl Output {
+    pub fn prepare(&mut self, sample_rate: f64) {
+        self.dynamics.prepare(sample_rate);
+    }
+
+    pub fn reset(&mut self) {
+        self.dynamics.reset();
+    }
+
+    pub fn set(&mut self, s: OutputSettings, on: bool) {
+        let c = s.comp.clamp(0.0, 1.0);
+        self.dynamics.set(DynamicsSettings {
+            gate_db: GATE_OFF_DB,
+            deess: s.deess,
+            deess_hz: 6500.0,
+            threshold_db: -6.0 - 24.0 * c,
+            ratio: if c > 0.0 { 1.5 + 4.5 * c } else { 1.0 },
+            attack_ms: 3.0,
+            release_ms: 120.0,
+            makeup_db: 9.0 * c,
+        });
+        self.ceiling = from_db(s.ceiling_db.min(0.0));
+        self.active = on;
+    }
+
+    /// Gain reduction of the compressor and de-esser, in dB (≤ 0).
+    #[must_use]
+    pub fn reduction_db(&self) -> (f32, f32) {
+        self.dynamics.reduction_db()
+    }
+
+    #[inline]
+    pub fn tick(&mut self, l: f32, r: f32) -> (f32, f32) {
+        if !self.active {
+            return (l, r);
+        }
+        let (l, r) = self.dynamics.tick(l, r);
+        (limit(l, self.ceiling), limit(r, self.ceiling))
+    }
+}
+
+/// Soft limit to `ceiling`: untouched below 80 % of it.
+#[inline]
+fn limit(x: f32, ceiling: f32) -> f32 {
+    let knee = 0.8 * ceiling;
+    let a = x.abs();
+    if a <= knee {
+        x
+    } else {
+        let room = ceiling - knee;
+        x.signum() * (knee + room * ((a - knee) / room).tanh())
     }
 }
 
@@ -1254,5 +1501,51 @@ mod tests {
             }
             assert!(peak > 0.01 && peak < 8.0, "size {size}: {peak}");
         }
+    }
+
+    #[test]
+    fn every_drive_style_is_bounded_and_dry_at_zero() {
+        let x = sine(48_000.0, 220.0, 9600, 0.5);
+        for style in DriveStyle::ALL {
+            let mut d = Distortion::default();
+            d.prepare(48_000.0);
+            d.set(DriveSettings {
+                style,
+                drive: 0.8,
+                tone: 0.5,
+            });
+            for &v in &x {
+                let (a, _) = d.tick(v, v, 0.0);
+                assert!((a - v).abs() < 1e-7);
+            }
+            let y: Vec<f32> = x.iter().map(|&v| d.tick(v, v, 1.0).0).collect();
+            assert!(
+                y.iter().all(|v| v.is_finite() && v.abs() < 2.0),
+                "{style:?}"
+            );
+            assert!(rms(&y[4800..]) > 0.01, "{style:?} silent");
+            assert!(
+                y.iter().zip(&x).any(|(a, b)| (a - b).abs() > 0.02),
+                "{style:?} clean"
+            );
+        }
+    }
+
+    #[test]
+    fn output_limiter_holds_the_ceiling() {
+        let mut o = Output::default();
+        o.prepare(48_000.0);
+        o.set(
+            OutputSettings {
+                ceiling_db: -6.0,
+                ..OutputSettings::default()
+            },
+            true,
+        );
+        let c = from_db(-6.0);
+        for v in sine(48_000.0, 220.0, 4800, 2.0) {
+            assert!(o.tick(v, v).0.abs() <= c + 1e-6);
+        }
+        assert!((o.tick(0.1, 0.1).0 - 0.1).abs() < 1e-6);
     }
 }

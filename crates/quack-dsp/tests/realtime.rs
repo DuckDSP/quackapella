@@ -146,6 +146,11 @@ fn heavy(mode: f64) -> ParamValues {
     set("presence", 4.0);
     set("air", 3.0);
     set("drive", 40.0);
+    set("drive_on", 1.0);
+    set("drive_style", 4.0);
+    set("out_comp", 50.0);
+    set("out_deess", 40.0);
+    set("keep_in_key", 1.0);
     set("chorus_on", 1.0);
     set("delay_mod", 50.0);
     set("delay_width", 50.0);

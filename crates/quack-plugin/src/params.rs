@@ -427,6 +427,20 @@ pub enum OutSourceParam {
     HeardHarmony,
 }
 
+#[derive(ParamEnum)]
+pub enum DriveStyleParam {
+    #[name = "Tube"]
+    Tube,
+    #[name = "Tape"]
+    Tape,
+    #[name = "Hard"]
+    Hard,
+    #[name = "Fuzz"]
+    Fuzz,
+    #[name = "Lo-Fi"]
+    LoFi,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -1406,47 +1420,47 @@ pub struct QuackParams {
 
     #[param(
         id = 950,
-        name = "Send Voice",
+        name = "Voice Reverb",
         range = "linear(0, 100)",
         default = 15.0,
         unit = "%",
         format = "fmt_percent",
         smooth = "none"
     )]
-    pub send_voice: FloatParam,
+    pub voice_reverb: FloatParam,
 
     #[param(
         id = 951,
-        name = "Send Creative",
+        name = "Creative Reverb",
         range = "linear(0, 100)",
         default = 30.0,
         unit = "%",
         format = "fmt_percent",
         smooth = "none"
     )]
-    pub send_creative: FloatParam,
+    pub creative_reverb: FloatParam,
 
     #[param(
         id = 952,
-        name = "Send Harmony",
+        name = "Harmony Reverb",
         range = "linear(0, 100)",
         default = 40.0,
         unit = "%",
         format = "fmt_percent",
         smooth = "none"
     )]
-    pub send_harmony: FloatParam,
+    pub harmony_reverb: FloatParam,
 
     #[param(
         id = 953,
-        name = "Send Vocoder",
+        name = "Vocoder Reverb",
         range = "linear(0, 100)",
         default = 30.0,
         unit = "%",
         format = "fmt_percent",
         smooth = "none"
     )]
-    pub send_vocoder: FloatParam,
+    pub vocoder_reverb: FloatParam,
 
     #[param(
         id = 1200,
@@ -1535,7 +1549,7 @@ pub struct QuackParams {
         id = 963,
         name = "Drive",
         range = "linear(0, 100)",
-        default = 0.0,
+        default = 40.0,
         unit = "%",
         format = "fmt_percent",
         smooth = "none"
@@ -1649,16 +1663,192 @@ pub struct QuackParams {
     )]
     pub chorus_depth: FloatParam,
 
+    #[param(id = 941, name = "Output On", default = true)]
+    pub output_on: BoolParam,
+
     #[param(
-        id = 987,
-        name = "Chorus Mix",
+        id = 942,
+        name = "Out De-Ess",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub out_deess: FloatParam,
+
+    #[param(
+        id = 943,
+        name = "Out Comp",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub out_comp: FloatParam,
+
+    #[param(
+        id = 944,
+        name = "Out Ceiling",
+        range = "linear(-12, 0)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub out_ceiling: FloatParam,
+
+    #[param(id = 959, name = "Keep In Key")]
+    pub keep_in_key: BoolParam,
+
+    #[param(id = 964, name = "Drive Style", default = 0)]
+    pub drive_style: EnumParam<DriveStyleParam>,
+
+    #[param(
+        id = 965,
+        name = "Drive Tone",
+        range = "linear(0, 100)",
+        default = 60.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub drive_tone: FloatParam,
+
+    #[param(id = 966, name = "Drive On")]
+    pub drive_on: BoolParam,
+
+    #[param(
+        id = 980,
+        name = "Voice Chorus",
         range = "linear(0, 100)",
         default = 50.0,
         unit = "%",
         format = "fmt_percent",
         smooth = "none"
     )]
-    pub chorus_mix: FloatParam,
+    pub voice_chorus: FloatParam,
+
+    #[param(
+        id = 981,
+        name = "Creative Chorus",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub creative_chorus: FloatParam,
+
+    #[param(
+        id = 982,
+        name = "Harmony Chorus",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_chorus: FloatParam,
+
+    #[param(
+        id = 983,
+        name = "Vocoder Chorus",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub vocoder_chorus: FloatParam,
+
+    #[param(
+        id = 990,
+        name = "Voice Delay",
+        range = "linear(0, 100)",
+        default = 15.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub voice_delay: FloatParam,
+
+    #[param(
+        id = 991,
+        name = "Creative Delay",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub creative_delay: FloatParam,
+
+    #[param(
+        id = 992,
+        name = "Harmony Delay",
+        range = "linear(0, 100)",
+        default = 40.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_delay: FloatParam,
+
+    #[param(
+        id = 993,
+        name = "Vocoder Delay",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub vocoder_delay: FloatParam,
+
+    #[param(
+        id = 994,
+        name = "Voice Drive",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub voice_drive: FloatParam,
+
+    #[param(
+        id = 995,
+        name = "Creative Drive",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub creative_drive: FloatParam,
+
+    #[param(
+        id = 996,
+        name = "Harmony Drive",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub harmony_drive: FloatParam,
+
+    #[param(
+        id = 997,
+        name = "Vocoder Drive",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub vocoder_drive: FloatParam,
 
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
@@ -1928,10 +2118,10 @@ impl QuackParams {
             (ParamId::ReverbPredelay, &self.reverb_predelay),
             (ParamId::ReverbLevel, &self.reverb_level),
             (ParamId::Duck, &self.duck),
-            (ParamId::SendVoice, &self.send_voice),
-            (ParamId::SendCreative, &self.send_creative),
-            (ParamId::SendHarmony, &self.send_harmony),
-            (ParamId::SendVocoder, &self.send_vocoder),
+            (ParamId::VoiceReverb, &self.voice_reverb),
+            (ParamId::CreativeReverb, &self.creative_reverb),
+            (ParamId::HarmonyReverb, &self.harmony_reverb),
+            (ParamId::VocoderReverb, &self.vocoder_reverb),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }
@@ -1996,7 +2186,38 @@ impl QuackParams {
             (ParamId::DelayToReverb, &self.delay_to_reverb),
             (ParamId::ChorusRate, &self.chorus_rate),
             (ParamId::ChorusDepth, &self.chorus_depth),
-            (ParamId::ChorusMix, &self.chorus_mix),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
+        for (id, p) in [
+            (ParamId::OutputOn, &self.output_on),
+            (ParamId::KeepInKey, &self.keep_in_key),
+            (ParamId::DriveOn, &self.drive_on),
+        ] {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        v.set(
+            ParamId::DriveStyle,
+            self.drive_style.value().to_index() as f64,
+        );
+        for (id, p) in [
+            (ParamId::OutDeEss, &self.out_deess),
+            (ParamId::OutComp, &self.out_comp),
+            (ParamId::OutCeiling, &self.out_ceiling),
+            (ParamId::DriveTone, &self.drive_tone),
+            (ParamId::VoiceChorus, &self.voice_chorus),
+            (ParamId::CreativeChorus, &self.creative_chorus),
+            (ParamId::HarmonyChorus, &self.harmony_chorus),
+            (ParamId::VocoderChorus, &self.vocoder_chorus),
+            (ParamId::VoiceDelay, &self.voice_delay),
+            (ParamId::CreativeDelay, &self.creative_delay),
+            (ParamId::HarmonyDelay, &self.harmony_delay),
+            (ParamId::VocoderDelay, &self.vocoder_delay),
+            (ParamId::VoiceDrive, &self.voice_drive),
+            (ParamId::CreativeDrive, &self.creative_drive),
+            (ParamId::HarmonyDrive, &self.harmony_drive),
+            (ParamId::VocoderDrive, &self.vocoder_drive),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }

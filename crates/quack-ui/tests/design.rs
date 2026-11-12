@@ -146,6 +146,8 @@ fn editor_captures() {
             frozen: mode == 2.0,
             comp_db: if mode == 5.0 { -4.2 } else { 0.0 },
             deess_db: if mode == 5.0 { -1.5 } else { 0.0 },
+            out_comp_db: 0.0,
+            out_deess_db: 0.0,
             vocoder_notes: if mode == 4.0 {
                 (1 << 45) | (1 << 48) | (1 << 52)
             } else {
@@ -228,7 +230,7 @@ fn editor_captures() {
         // The FX page: every other tab too.
         if mode == 5.0 {
             for tab in FxTab::ALL {
-                if tab == FxTab::Dynamics {
+                if tab == FxTab::Input {
                     continue;
                 }
                 st.set_fx_tab(tab);

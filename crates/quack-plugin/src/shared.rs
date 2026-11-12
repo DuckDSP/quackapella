@@ -29,6 +29,8 @@ pub struct Shared {
     /// Gain reduction of the input compressor and de-esser (f32 dB bits).
     comp_db: AtomicU32,
     deess_db: AtomicU32,
+    out_comp_db: AtomicU32,
+    out_deess_db: AtomicU32,
     /// Notes the MIDI output plays.
     midi_out_lo: AtomicU64,
     midi_out_hi: AtomicU64,
@@ -76,6 +78,11 @@ impl Shared {
         self.deess_db.store(deess.to_bits(), Ordering::Relaxed);
     }
 
+    pub fn publish_output_reduction(&self, (comp, deess): (f32, f32)) {
+        self.out_comp_db.store(comp.to_bits(), Ordering::Relaxed);
+        self.out_deess_db.store(deess.to_bits(), Ordering::Relaxed);
+    }
+
     pub fn publish_midi_out(&self, mask: u128) {
         #[allow(clippy::cast_possible_truncation)]
         self.midi_out_lo.store(mask as u64, Ordering::Relaxed);
@@ -119,6 +126,8 @@ impl Shared {
                 | (u128::from(self.vocoder_hi.load(Ordering::Relaxed)) << 64),
             comp_db: f32::from_bits(self.comp_db.load(Ordering::Relaxed)),
             deess_db: f32::from_bits(self.deess_db.load(Ordering::Relaxed)),
+            out_comp_db: f32::from_bits(self.out_comp_db.load(Ordering::Relaxed)),
+            out_deess_db: f32::from_bits(self.out_deess_db.load(Ordering::Relaxed)),
             midi_out_notes: u128::from(self.midi_out_lo.load(Ordering::Relaxed))
                 | (u128::from(self.midi_out_hi.load(Ordering::Relaxed)) << 64),
         }

@@ -228,10 +228,10 @@ pub enum ParamId {
     ReverbPredelay,
     ReverbLevel,
     Duck,
-    SendVoice,
-    SendCreative,
-    SendHarmony,
-    SendVocoder,
+    VoiceReverb,
+    CreativeReverb,
+    HarmonyReverb,
+    VocoderReverb,
     Morph,
     MorphOn,
     MorphTime,
@@ -258,10 +258,29 @@ pub enum ParamId {
     DelayToReverb,
     ChorusRate,
     ChorusDepth,
-    ChorusMix,
+    OutputOn,
+    OutDeEss,
+    OutComp,
+    OutCeiling,
+    KeepInKey,
+    DriveStyle,
+    DriveTone,
+    DriveOn,
+    VoiceChorus,
+    CreativeChorus,
+    HarmonyChorus,
+    VocoderChorus,
+    VoiceDelay,
+    CreativeDelay,
+    HarmonyDelay,
+    VocoderDelay,
+    VoiceDrive,
+    CreativeDrive,
+    HarmonyDrive,
+    VocoderDrive,
 }
 
-pub const PARAM_COUNT: usize = 156;
+pub const PARAM_COUNT: usize = 175;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -285,6 +304,33 @@ pub const HARMONY_LEVEL_PARAMS: [ParamId; 4] = [
     ParamId::HarmonyLevel2,
     ParamId::HarmonyLevel3,
     ParamId::HarmonyLevel4,
+];
+
+/// Per layer (voice, creative, harmony, vocoder): reverb send, delay
+/// send, chorus amount and drive amount.
+pub const REVERB_SEND_PARAMS: [ParamId; 4] = [
+    ParamId::VoiceReverb,
+    ParamId::CreativeReverb,
+    ParamId::HarmonyReverb,
+    ParamId::VocoderReverb,
+];
+pub const DELAY_SEND_PARAMS: [ParamId; 4] = [
+    ParamId::VoiceDelay,
+    ParamId::CreativeDelay,
+    ParamId::HarmonyDelay,
+    ParamId::VocoderDelay,
+];
+pub const CHORUS_AMOUNT_PARAMS: [ParamId; 4] = [
+    ParamId::VoiceChorus,
+    ParamId::CreativeChorus,
+    ParamId::HarmonyChorus,
+    ParamId::VocoderChorus,
+];
+pub const DRIVE_AMOUNT_PARAMS: [ParamId; 4] = [
+    ParamId::VoiceDrive,
+    ParamId::CreativeDrive,
+    ParamId::HarmonyDrive,
+    ParamId::VocoderDrive,
 ];
 
 /// The twelve note switches of the autotune, C first.
@@ -1548,9 +1594,9 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         },
     },
     ParamSpec {
-        key: "send_voice",
+        key: "voice_reverb",
         host_id: 950,
-        name: "Send Voice",
+        name: "Voice Reverb",
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
@@ -1559,9 +1605,9 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         },
     },
     ParamSpec {
-        key: "send_creative",
+        key: "creative_reverb",
         host_id: 951,
-        name: "Send Creative",
+        name: "Creative Reverb",
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
@@ -1570,9 +1616,9 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         },
     },
     ParamSpec {
-        key: "send_harmony",
+        key: "harmony_reverb",
         host_id: 952,
-        name: "Send Harmony",
+        name: "Harmony Reverb",
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
@@ -1581,9 +1627,9 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         },
     },
     ParamSpec {
-        key: "send_vocoder",
+        key: "vocoder_reverb",
         host_id: 953,
-        name: "Send Vocoder",
+        name: "Vocoder Reverb",
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
@@ -1733,7 +1779,7 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         kind: ParamKind::Float {
             min: 0.0,
             max: 100.0,
-            default: 0.0,
+            default: 40.0,
         },
     },
     ParamSpec {
@@ -1847,14 +1893,210 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         },
     },
     ParamSpec {
-        key: "chorus_mix",
-        host_id: 987,
-        name: "Chorus Mix",
+        key: "output_on",
+        host_id: 941,
+        name: "Output On",
+        unit: "",
+        kind: ParamKind::Bool { default: true },
+    },
+    ParamSpec {
+        key: "out_deess",
+        host_id: 942,
+        name: "Out De-Ess",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "out_comp",
+        host_id: 943,
+        name: "Out Comp",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "out_ceiling",
+        host_id: 944,
+        name: "Out Ceiling",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 0.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "keep_in_key",
+        host_id: 959,
+        name: "Keep In Key",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "drive_style",
+        host_id: 964,
+        name: "Drive Style",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::fx::DriveStyle::COUNT,
+            default: 0,
+        },
+    },
+    ParamSpec {
+        key: "drive_tone",
+        host_id: 965,
+        name: "Drive Tone",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 60.0,
+        },
+    },
+    ParamSpec {
+        key: "drive_on",
+        host_id: 966,
+        name: "Drive On",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "voice_chorus",
+        host_id: 980,
+        name: "Voice Chorus",
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
             max: 100.0,
             default: 50.0,
+        },
+    },
+    ParamSpec {
+        key: "creative_chorus",
+        host_id: 981,
+        name: "Creative Chorus",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_chorus",
+        host_id: 982,
+        name: "Harmony Chorus",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_chorus",
+        host_id: 983,
+        name: "Vocoder Chorus",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        },
+    },
+    ParamSpec {
+        key: "voice_delay",
+        host_id: 990,
+        name: "Voice Delay",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 15.0,
+        },
+    },
+    ParamSpec {
+        key: "creative_delay",
+        host_id: 991,
+        name: "Creative Delay",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_delay",
+        host_id: 992,
+        name: "Harmony Delay",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 40.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_delay",
+        host_id: 993,
+        name: "Vocoder Delay",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 30.0,
+        },
+    },
+    ParamSpec {
+        key: "voice_drive",
+        host_id: 994,
+        name: "Voice Drive",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "creative_drive",
+        host_id: 995,
+        name: "Creative Drive",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_drive",
+        host_id: 996,
+        name: "Harmony Drive",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "vocoder_drive",
+        host_id: 997,
+        name: "Vocoder Drive",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
         },
     },
 ];
@@ -1986,10 +2228,10 @@ impl ParamId {
         Self::ReverbPredelay,
         Self::ReverbLevel,
         Self::Duck,
-        Self::SendVoice,
-        Self::SendCreative,
-        Self::SendHarmony,
-        Self::SendVocoder,
+        Self::VoiceReverb,
+        Self::CreativeReverb,
+        Self::HarmonyReverb,
+        Self::VocoderReverb,
         Self::Morph,
         Self::MorphOn,
         Self::MorphTime,
@@ -2016,7 +2258,26 @@ impl ParamId {
         Self::DelayToReverb,
         Self::ChorusRate,
         Self::ChorusDepth,
-        Self::ChorusMix,
+        Self::OutputOn,
+        Self::OutDeEss,
+        Self::OutComp,
+        Self::OutCeiling,
+        Self::KeepInKey,
+        Self::DriveStyle,
+        Self::DriveTone,
+        Self::DriveOn,
+        Self::VoiceChorus,
+        Self::CreativeChorus,
+        Self::HarmonyChorus,
+        Self::VocoderChorus,
+        Self::VoiceDelay,
+        Self::CreativeDelay,
+        Self::HarmonyDelay,
+        Self::VocoderDelay,
+        Self::VoiceDrive,
+        Self::CreativeDrive,
+        Self::HarmonyDrive,
+        Self::VocoderDrive,
     ];
 
     #[must_use]

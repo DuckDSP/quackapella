@@ -299,6 +299,9 @@ pub struct Retuner {
     pub settings: TuneSettings,
     /// Transposition added on top of the correction, in semitones.
     pub transpose: f64,
+    /// Transpose first, then correct: the output lands on the scale
+    /// (Keep In Key). Otherwise the transposition comes after.
+    pub transpose_first: bool,
     sample_rate: f64,
     active: bool,
     target: f64,
@@ -368,7 +371,9 @@ impl Retuner {
             return st_to_ratio(transpose);
         }
         let s = &self.settings;
-        let sung = crate::pitch::hz_to_midi_f64(self.sample_rate / period);
+        // Keep In Key: the note is chosen for the transposed voice.
+        let offset = if self.transpose_first { transpose } else { 0.0 };
+        let sung = crate::pitch::hz_to_midi_f64(self.sample_rate / period) + offset;
         let mut restart = !self.active || self.gap_s > RESTART_S;
         self.gap_s = 0.0;
         let dt = dt.clamp(0.0, 0.05);
@@ -380,7 +385,7 @@ impl Retuner {
         }
         let mut sorted = self.periods;
         sorted.sort_unstable_by(f64::total_cmp);
-        let robust = crate::pitch::hz_to_midi_f64(self.sample_rate / sorted[MEDIAN / 2]);
+        let robust = crate::pitch::hz_to_midi_f64(self.sample_rate / sorted[MEDIAN / 2]) + offset;
         if !restart && (robust - self.choice).abs() > RESTART_JUMP_ST {
             restart = true;
             self.periods = [period; MEDIAN];
@@ -660,6 +665,28 @@ mod tests {
             "{:?}",
             &out[..3]
         );
+    }
+
+    #[test]
+    fn keep_in_key_lands_the_transposed_voice_on_the_scale() {
+        // C major, hard tune, a quarter-tone transposition (Throat
+        // Pitch): after the correction it is off key, before it is not.
+        let settings = TuneSettings {
+            amount: 1.0,
+            retune_s: 0.0,
+            vibrato: 0.0,
+            mask: scale_mask(0, Scale::Major),
+            ..TuneSettings::default()
+        };
+        let mut r = retuner(settings);
+        r.transpose = 0.5;
+        let out = run(&mut r, &[60.1; 100]);
+        assert!((out[99] - 60.5).abs() < 0.01, "{}", out[99]);
+        let mut r = retuner(settings);
+        r.transpose = 0.5;
+        r.transpose_first = true;
+        let out = run(&mut r, &[60.1; 100]);
+        assert!((out[99] - 60.0).abs() < 0.01, "{}", out[99]);
     }
 
     #[test]
