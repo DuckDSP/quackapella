@@ -26,3 +26,20 @@ Test : `crates/quack-plugin/tests/clap_host.rs`
 (`latency_change_while_active_goes_through_a_restart`).
 
 À proposer en amont (truce-audio/truce).
+
+## Patch 2 : `params.rescan` après un chargement d'état (2026-11-12)
+
+Fichier : `src/lib.rs`, `state_load` et `preset_load_from_location`.
+
+Problème signalé par clap-validator (`state-reproducibility-basic`,
+`-binary`, `-buffered`) : le chargement réapplique bien les valeurs, mais
+sans prévenir l'hôte. CLAP demande `clap_host_params::rescan` quand les
+valeurs changent hors du flux d'événements ; sinon un hôte garde à l'écran
+les anciennes valeurs.
+
+Correctif : après l'application de l'état (actif ou non), appel direct de
+`rescan(CLAP_PARAM_RESCAN_VALUES)`, sur le thread principal où ces deux
+fonctions sont appelées.
+
+Test : `crates/quack-plugin/tests/clap_host.rs`
+(`state_round_trip_restores_every_parameter`).

@@ -36,6 +36,7 @@ struct HostLog {
     restart: AtomicU32,
     active: AtomicBool,
     changed_while_active: AtomicU32,
+    rescan_values: AtomicU32,
 }
 
 unsafe fn log(host: *const clap_host) -> &'static HostLog {
@@ -56,8 +57,26 @@ unsafe extern "C" fn get_extension(_: *const clap_host, id: *const c_char) -> *c
     if unsafe { CStr::from_ptr(id) } == CLAP_EXT_LATENCY {
         return (&raw const HOST_LATENCY).cast();
     }
+    if unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+        return (&raw const HOST_PARAMS).cast();
+    }
     ptr::null()
 }
+unsafe extern "C" fn rescan(host: *const clap_host, flags: u32) {
+    if flags & clap_sys::ext::params::CLAP_PARAM_RESCAN_VALUES != 0 {
+        unsafe { log(host) }
+            .rescan_values
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+unsafe extern "C" fn clear(_: *const clap_host, _: u32, _: u32) {}
+unsafe extern "C" fn request_flush(_: *const clap_host) {}
+static HOST_PARAMS: clap_sys::ext::params::clap_host_params =
+    clap_sys::ext::params::clap_host_params {
+        rescan: Some(rescan),
+        clear: Some(clear),
+        request_flush: Some(request_flush),
+    };
 unsafe extern "C" fn request_restart(host: *const clap_host) {
     unsafe { log(host) }.restart.fetch_add(1, Ordering::SeqCst);
 }
@@ -323,6 +342,12 @@ fn state_round_trip_restores_every_parameter() {
 
     let b = Plugin::new();
     b.load(&blob);
+    // clap-validator: values changed by a load need a rescan request.
+    assert_eq!(
+        b.2.rescan_values.load(Ordering::SeqCst),
+        1,
+        "no params rescan after load"
+    );
     for (&(id, _), &expect) in wanted.iter().zip(&read_a) {
         let got = b.get(id);
         assert!(

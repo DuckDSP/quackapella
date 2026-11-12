@@ -2846,6 +2846,17 @@ unsafe extern "C" fn state_load<P: PluginExport>(
             editor.state_changed();
         }
 
+        // DuckDSP patch 2: the load changed parameter values on the host
+        // thread; CLAP wants `params.rescan(VALUES)` so the host re-reads
+        // them (clap-validator `state-reproducibility-*`). We are on the
+        // main thread here, so call it directly.
+        if !data.host.is_null()
+            && !data.host_params.is_null()
+            && let Some(rescan) = (*data.host_params).rescan
+        {
+            rescan(data.host, CLAP_PARAM_RESCAN_VALUES);
+        }
+
         true
     })
 }
@@ -2917,6 +2928,17 @@ unsafe extern "C" fn preset_load_from_location<P: PluginExport>(
         }
         if let Some(ref mut editor) = data.gui.enter().editor {
             editor.state_changed();
+        }
+
+        // DuckDSP patch 2: the load changed parameter values on the host
+        // thread; CLAP wants `params.rescan(VALUES)` so the host re-reads
+        // them (clap-validator `state-reproducibility-*`). We are on the
+        // main thread here, so call it directly.
+        if !data.host.is_null()
+            && !data.host_params.is_null()
+            && let Some(rescan) = (*data.host_params).rescan
+        {
+            rescan(data.host, CLAP_PARAM_RESCAN_VALUES);
         }
 
         // Tell the host the preset landed so it can update its
