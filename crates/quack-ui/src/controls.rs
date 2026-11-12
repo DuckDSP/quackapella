@@ -60,6 +60,34 @@ pub(crate) fn knob_floor(
     accent: Color32,
     fmt: &dyn Fn(f64) -> String,
 ) {
+    knob_named(
+        ui,
+        params,
+        st,
+        id,
+        centre,
+        size_pt,
+        floor,
+        accent,
+        fmt,
+        id.spec().name,
+    );
+}
+
+/// [`knob_floor`] with its own label (when the host name is too long).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn knob_named(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    id: ParamId,
+    centre: egui::Pos2,
+    size_pt: f32,
+    floor: f64,
+    accent: Color32,
+    fmt: &dyn Fn(f64) -> String,
+    label: &str,
+) {
     let spec = id.spec();
     let kind = spec.kind;
     let raw = params.get_plain(id);
@@ -127,7 +155,7 @@ pub(crate) fn knob_floor(
         p,
         centre + vec2(0.0, size_pt * 0.5 + 12.0),
         Align2::CENTER_CENTER,
-        spec.name,
+        label,
         size::CAPTION,
         color::TEXT_DIM,
     );

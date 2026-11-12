@@ -26,6 +26,8 @@ pub use params::{ModeParam, QuackParams};
 pub const SCRATCH_FRAMES: usize = 1024;
 
 /// MIDI CC numbers handled here.
+/// Sustain pedal.
+const CC_SUSTAIN: u8 = 64;
 const CC_ALL_SOUND_OFF: u8 = 120;
 const CC_ALL_NOTES_OFF: u8 = 123;
 
@@ -76,6 +78,9 @@ impl QuackDsp {
                 if cc == CC_ALL_NOTES_OFF || cc == CC_ALL_SOUND_OFF =>
             {
                 self.engine.all_notes_off();
+            }
+            EventBody::ControlChange { cc, value, .. } if cc == CC_SUSTAIN => {
+                self.engine.set_sustain(value >= 64);
             }
             _ => {}
         }
@@ -184,6 +189,7 @@ impl PluginLogic for Quackapella {
             .shared
             .publish_tune(state.engine.tune(), state.engine.tune_mask());
         params.shared.publish_frozen(state.engine.frozen());
+        params.shared.publish_harmony(state.engine.harmony_notes());
         ProcessStatus::Normal
     }
 

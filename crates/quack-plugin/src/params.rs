@@ -102,6 +102,63 @@ pub enum SourceParam {
     MidiExact,
 }
 
+/// Harmony sources, in `quack_dsp::harmony::HarmonyMode` order.
+#[derive(ParamEnum)]
+pub enum HarmonyParam {
+    #[name = "Off"]
+    Off,
+    #[name = "MIDI"]
+    Midi,
+    #[name = "Scale"]
+    Scale,
+    #[name = "Chord"]
+    Chord,
+}
+
+/// Harmony intervals in scale steps, -9 (a tenth down) to +9, in
+/// `quack_dsp::harmony::interval_steps` order.
+#[derive(ParamEnum)]
+pub enum IntervalParam {
+    #[name = "10th down"]
+    Down9,
+    #[name = "9th down"]
+    Down8,
+    #[name = "Octave down"]
+    Down7,
+    #[name = "7th down"]
+    Down6,
+    #[name = "6th down"]
+    Down5,
+    #[name = "5th down"]
+    Down4,
+    #[name = "4th down"]
+    Down3,
+    #[name = "3rd down"]
+    Down2,
+    #[name = "2nd down"]
+    Down1,
+    #[name = "Off"]
+    Off,
+    #[name = "2nd up"]
+    Up1,
+    #[name = "3rd up"]
+    Up2,
+    #[name = "4th up"]
+    Up3,
+    #[name = "5th up"]
+    Up4,
+    #[name = "6th up"]
+    Up5,
+    #[name = "7th up"]
+    Up6,
+    #[name = "Octave up"]
+    Up7,
+    #[name = "9th up"]
+    Up8,
+    #[name = "10th up"]
+    Up9,
+}
+
 #[derive(ParamEnum)]
 pub enum GlitchRateParam {
     #[name = "1/4"]
@@ -373,6 +430,107 @@ pub struct QuackParams {
     #[param(id = 101, name = "Low Latency")]
     pub low_latency: BoolParam,
 
+    #[param(id = 400, name = "Harmony", default = 2)]
+    pub harmony: EnumParam<HarmonyParam>,
+
+    #[param(id = 401, name = "Harmony 1", default = 11)]
+    pub harmony_1: EnumParam<IntervalParam>,
+
+    #[param(id = 402, name = "Harmony 2", default = 6)]
+    pub harmony_2: EnumParam<IntervalParam>,
+
+    #[param(id = 403, name = "Harmony 3", default = 9)]
+    pub harmony_3: EnumParam<IntervalParam>,
+
+    #[param(id = 404, name = "Harmony 4", default = 9)]
+    pub harmony_4: EnumParam<IntervalParam>,
+
+    #[param(
+        id = 405,
+        name = "Lead",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub lead: FloatParam,
+
+    #[param(
+        id = 406,
+        name = "Harmony Level",
+        range = "linear(0, 100)",
+        default = 80.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_level: FloatParam,
+
+    #[param(
+        id = 407,
+        name = "Spread",
+        range = "linear(0, 100)",
+        default = 60.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub spread: FloatParam,
+
+    #[param(
+        id = 408,
+        name = "Harmony Humanize",
+        range = "linear(0, 100)",
+        default = 30.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_humanize: FloatParam,
+
+    #[param(
+        id = 409,
+        name = "Character",
+        range = "linear(0, 100)",
+        default = 25.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub character: FloatParam,
+
+    #[param(
+        id = 410,
+        name = "Expression",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub expression: FloatParam,
+
+    #[param(
+        id = 411,
+        name = "Glide",
+        range = "linear(0, 500)",
+        default = 30.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub glide: FloatParam,
+
+    #[param(
+        id = 412,
+        name = "Double",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub double: FloatParam,
+
+    #[param(id = 413, name = "Close Voicing")]
+    pub close_voicing: BoolParam,
+
+    #[param(id = 414, name = "Latch")]
+    pub latch: BoolParam,
+
     /// Audio → editor: held notes, latency. Not a parameter, not saved.
     #[skip]
     pub shared: Arc<Shared>,
@@ -467,6 +625,35 @@ impl QuackParams {
             ParamId::LowLatency,
             f64::from(u8::from(self.low_latency.value())),
         );
+        #[allow(clippy::cast_precision_loss)]
+        {
+            v.set(ParamId::Harmony, self.harmony.value().to_index() as f64);
+            for (id, p) in [
+                (ParamId::Harmony1, &self.harmony_1),
+                (ParamId::Harmony2, &self.harmony_2),
+                (ParamId::Harmony3, &self.harmony_3),
+                (ParamId::Harmony4, &self.harmony_4),
+            ] {
+                v.set(id, p.value().to_index() as f64);
+            }
+        }
+        for (id, p) in [
+            (ParamId::Lead, &self.lead),
+            (ParamId::HarmonyLevel, &self.harmony_level),
+            (ParamId::Spread, &self.spread),
+            (ParamId::HarmonyHumanize, &self.harmony_humanize),
+            (ParamId::Character, &self.character),
+            (ParamId::Expression, &self.expression),
+            (ParamId::Glide, &self.glide),
+            (ParamId::Double, &self.double),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
+        v.set(
+            ParamId::CloseVoicing,
+            f64::from(u8::from(self.close_voicing.value())),
+        );
+        v.set(ParamId::Latch, f64::from(u8::from(self.latch.value())));
         v
     }
 }

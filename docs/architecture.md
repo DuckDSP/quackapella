@@ -19,7 +19,7 @@ quack-plugin   adaptateur Truce : paramètres hôte, MIDI, buffers, latence
 - `quack_dsp::params` est la source de vérité des paramètres ; la
   déclaration Truce est vérifiée contre elle par test. Plages d'ids
   réservées : 100 détection, 200 pitch/formants, 300 autotune,
-  400 harmoniseur, 500 vocodeur, 600 effets façon Manipulator.
+  400 harmoniseur (400 à 414), 500 vocodeur, 600 effets façon Manipulator.
 
 ## Chaîne (étape 1)
 
@@ -248,6 +248,67 @@ Plus tard : morphing entre réglages (étape 8, avec presets et macros),
 analyse partagée par l'harmoniseur (étape 6, sur la même mécanique que
 les couches).
 
+## Harmoniseur (étape 6)
+
+Actif **seulement en mode Synth** (comme les effets Creative en mode
+Creative) : Natural, Tune et Creative ne l'entendent jamais. **Aucune
+latence ajoutée** : les voix lisent la même entrée que la voix
+principale, dans le budget déjà gelé.
+
+- **Mêmes grains que la voix** : chaque voix d'harmonie (jusqu'à 8) a ses
+  propres marques de synthèse, espacées de sa propre période, et prend le
+  grain d'analyse de la voix le plus proche dans le temps. Le grain *est*
+  l'enveloppe spectrale du chanteur : une harmonie sonne comme le même
+  chanteur sur une autre note, formants en place, pas comme une copie
+  rééchantillonnée. Les voix se taisent sur les consonnes et le souffle
+  (pas de consonnes doublées), démarrent sur une marque de la voix
+  principale et suivent sa correction.
+- **Sources** (*Harmony*, id 400) :
+  - **MIDI** : chaque note tenue est une voix, à sa hauteur (polyphonique,
+    8 voix, vélocité → niveau, fondus de 15 ms / 80 ms) ;
+  - **Scale** : jusqu'à 4 voix à intervalle fixe (*Harmony 1* à *4*, ids
+    401 à 404, de −10e à +10e), comptés en notes de la gamme de l'autotune
+    depuis la note de la voix : tierces majeures ou mineures là où il faut.
+    En Chromatic, les intervalles comptent dans la gamme majeure de la
+    tonalité ;
+  - **Chord** : les mêmes intervalles, chacun ramené à la note la plus
+    proche de l'accord tenu au MIDI (toutes octaves), du même côté de la
+    voix, jamais sur sa note ni sur une autre voix. Sans accord : comme
+    Scale.
+- **Expression** (id 410) : part des inflexions de la voix copiée par les
+  voix. En Scale / Chord, l'écart de la voix à sa note de référence
+  (hystérésis 0,3 demi-ton) : une voix chantée un peu basse garde des
+  harmonies parallèles. En MIDI, seulement ses mouvements rapides
+  (vibrato, scoops ; au-delà de 150 ms, la note jouée fait foi).
+  Limitée à ±1 demi-ton. À 0 : voix pile sur les notes (son plus
+  synthétique).
+- **Plusieurs chanteurs plutôt que des clones** : *Humanize* (id 408)
+  retarde chaque voix de 4 à 18 ms qui errent lentement et la désaccorde
+  de ±12 cents ; *Character* (id 409) donne à chaque voix son propre
+  décalage de formants (jusqu'à ±2,4 demi-tons : d'autres gorges) ;
+  *Spread* (id 407) les place dans le champ stéréo (puissance constante) ;
+  *Glide* (id 411, 0-500 ms) les fait glisser d'une note à l'autre.
+- **Doubleur** (*Double*, id 412) : deux prises de la voix elle-même, à
+  gauche et à droite (au moins 60 % d'écart), en retard de 9 à 23 ms qui
+  errent, désaccordées de quelques cents en sens opposés, avec leurs
+  propres formants : un double tracking. Indépendant de la source
+  d'harmonie (marche aussi avec *Harmony* sur Off).
+- **Jeu au clavier** : *Close Voicing* (id 413, mode MIDI) ramène chaque
+  note jouée à l'octave la plus proche de la voix, et l'y garde tant
+  qu'elle reste à moins de 9 demi-tons (pas de saut d'octave quand la
+  voix bouge un peu) : on joue les accords n'importe où sur le clavier.
+  *Latch* (id 414) garde l'accord après relâchement, jusqu'au suivant.
+  La pédale de sustain (CC 64) garde aussi les notes, dans tous les modes.
+- **Niveaux** : *Lead* (id 405, la voix principale) et *Harmony Level*
+  (id 406). Plusieurs voix s'additionnent sans s'empiler linéairement
+  (quatre voix ≈ deux fois la puissance d'une).
+
+Le panneau **Harmony** remplace le graphe de hauteur en mode Synth et
+montre les notes que chantent les voix. Rendu hors ligne : `mode=3
+harmony=2 harmony_1=11` (indices d'intervalle : 9 = Off, 11 = tierce
+au-dessus, 4 = sixte en dessous) ; en mode Synth le rendu sort en stéréo.
+Rendus d'écoute dans `ecoute/harmoniseur/`.
+
 ## Modes
 
 | Mode | Intention | Formants |
@@ -281,7 +342,8 @@ qui le rend naturel, prévu aux étapes 2 à 4 :
 4. Autotune : gammes, notes MIDI, vitesse de retune, humanisation.
 5. **Modes façon Manipulator** : couches d'octave, formants qui suivent,
    freeze jouable au MIDI, robot, glitch au tempo.
-6. Harmoniseur MIDI polyphonique.
+6. **Harmoniseur** : voix sur les grains de la voix, MIDI polyphonique,
+   intervalles dans la gamme, accords MIDI, humanisation, stéréo.
 7. Vocodeur et talkbox avec porteuse interne.
 8. Interface complète, presets, macros, MIDI learn, zoom.
 9. Optimisation CPU et tests en live.

@@ -12,7 +12,8 @@
 //! `t` seconds (`freeze=1@2.1 freeze=0@4`). `--demo` writes a synthetic singer
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
-//! 32-bit float, mono or stereo; out: 32-bit float, same channels.
+//! 32-bit float, mono or stereo; out: 32-bit float, same channels
+//! (always stereo in the Synth mode, for the harmonies' spread).
 
 use std::f64::consts::{PI, TAU};
 use std::fs;
@@ -140,7 +141,8 @@ fn process(
     }
     // Latency compensation, as the host does.
     let mut out = vec![l[lat..lat + n].to_vec()];
-    if chans.len() > 1 {
+    // The harmonies spread in stereo: a mono take comes out stereo.
+    if chans.len() > 1 || values.get(ParamId::Mode) == 3.0 {
         out.push(r[lat..lat + n].to_vec());
     }
     out

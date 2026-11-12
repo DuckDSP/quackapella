@@ -29,7 +29,12 @@ impl ParamAccess for Values {
 fn editor_captures() {
     let write = std::env::var_os("QUACK_WRITE_CAPTURES").is_some();
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design");
-    for (mode, name) in [(0.0, "natural"), (1.0, "tune"), (2.0, "creative")] {
+    for (mode, name) in [
+        (0.0, "natural"),
+        (1.0, "tune"),
+        (2.0, "creative"),
+        (3.0, "synth"),
+    ] {
         let mut v = ParamValues::default();
         v.set(ParamId::Mode, mode);
         v.set(ParamId::InputGain, 3.0);
@@ -47,6 +52,15 @@ fn editor_captures() {
             v.set(ParamId::GlitchMode, 1.0);
             v.set(ParamId::Freeze, 1.0);
         }
+        if mode == 3.0 {
+            v.set(ParamId::Pitch, 0.0);
+            v.set(ParamId::Fine, 0.0);
+            v.set(ParamId::Harmony, 3.0);
+            v.set(ParamId::Harmony3, 16.0);
+            v.set(ParamId::Lead, 90.0);
+            v.set(ParamId::Double, 40.0);
+            v.set(ParamId::Latch, 1.0);
+        }
         if mode == 1.0 {
             v.set(ParamId::Pitch, 0.0);
             v.set(ParamId::Fine, 0.0);
@@ -59,7 +73,11 @@ fn editor_captures() {
         }
         let params = Values(RefCell::new(v));
         let view = View {
-            held_notes: (1 << 57) | (1 << 64),
+            held_notes: if mode == 3.0 {
+                (1 << 57) | (1 << 60) | (1 << 64)
+            } else {
+                (1 << 57) | (1 << 64)
+            },
             latency_samples: 591,
             sample_rate: 48_000.0,
             pitch_hz: if mode == 2.0 { 0.0 } else { 223.1 },
@@ -69,6 +87,11 @@ fn editor_captures() {
             tune_out: if mode == 1.0 { 57.0 } else { 57.1 },
             tune_mask: if mode == 1.0 { 0b1010_1001_1101 } else { 0xFFF },
             frozen: mode == 2.0,
+            harmony_notes: if mode == 3.0 {
+                (1 << 52) | (1 << 60) | (1 << 64)
+            } else {
+                0
+            },
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);

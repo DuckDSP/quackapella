@@ -20,6 +20,9 @@ pub struct Shared {
     tune_mask: AtomicU32,
     /// A frozen grain is sounding (Creative mode).
     frozen: AtomicBool,
+    /// Notes the harmony voices sing (Synth mode).
+    harmony_lo: AtomicU64,
+    harmony_hi: AtomicU64,
 }
 
 impl Shared {
@@ -43,6 +46,13 @@ impl Shared {
             .store(t.target.to_bits(), Ordering::Relaxed);
         self.tune_out.store(t.out.to_bits(), Ordering::Relaxed);
         self.tune_mask.store(u32::from(mask), Ordering::Relaxed);
+    }
+
+    pub fn publish_harmony(&self, mask: u128) {
+        #[allow(clippy::cast_possible_truncation)]
+        self.harmony_lo.store(mask as u64, Ordering::Relaxed);
+        self.harmony_hi
+            .store((mask >> 64) as u64, Ordering::Relaxed);
     }
 
     pub fn publish_frozen(&self, frozen: bool) {
@@ -75,6 +85,8 @@ impl Shared {
             #[allow(clippy::cast_possible_truncation)]
             tune_mask: self.tune_mask.load(Ordering::Relaxed) as u16,
             frozen: self.frozen.load(Ordering::Relaxed),
+            harmony_notes: u128::from(self.harmony_lo.load(Ordering::Relaxed))
+                | (u128::from(self.harmony_hi.load(Ordering::Relaxed)) << 64),
         }
     }
 }

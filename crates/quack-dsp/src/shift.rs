@@ -39,6 +39,7 @@
 
 use std::f64::consts::PI;
 
+use crate::harmony::{MAX_VOICES, VoiceMix};
 use crate::pitch::{Biquad, MAX_HZ, MIN_HZ};
 
 /// Spacing of the unvoiced marks. Grains of unvoiced input are put back
@@ -72,8 +73,8 @@ const NOISY_S: f64 = 0.002;
 /// Analysis marks remembered (several periods of the lowest voice).
 const MARKS: usize = 256;
 /// Grains sounding at once, at most (two octaves up with the formant
-/// down still fit).
-const GRAINS: usize = 128;
+/// down, plus eight harmony voices, still fit).
+const GRAINS: usize = 256;
 /// Widest formant shift supported by the buffers (ratio 0.5 to 2).
 pub const MAX_FORMANT_RATIO: f32 = 2.0;
 /// Widest pitch shift supported (ratio 0.25 to 4, two octaves).
@@ -102,6 +103,20 @@ enum Stream {
     Layer(u8),
     /// The frozen grain, read from its own buffer.
     Frozen,
+    /// A harmony voice (index into the voices).
+    Voice(u8),
+}
+
+/// A harmony voice's own synthesis marks, on the lead's analysis.
+#[derive(Debug, Clone, Copy, Default)]
+struct VoiceStream {
+    on: bool,
+    /// Next synthesis mark and the previous grain's (centre, mark,
+    /// ratio), as for the lead.
+    next_s: f64,
+    last: Option<(f64, usize, f64)>,
+    /// 0 (unvoiced) to 1 (voiced): the voice fades with the voicing.
+    voicing: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -141,6 +156,11 @@ pub trait PitchControl {
     /// An unvoiced grain (never transposed), `dt` seconds after the
     /// previous one.
     fn unvoiced(&mut self, _dt: f64) {}
+    /// Harmony voice `v`: the note it sings (fractional MIDI note) for a
+    /// grain, `dt` seconds after its previous one; `None` = silent.
+    fn voice(&mut self, _v: usize, _dt: f64) -> Option<f64> {
+        None
+    }
 }
 
 impl PitchControl for f32 {
@@ -265,6 +285,13 @@ pub struct Psola {
     /// Freeze pitch: a played note (Hz), or the transposition now.
     freeze_hz: Option<f32>,
     freeze_transpose: f64,
+    /// Harmony voices: their marks and, per sample, their mix.
+    voices: [VoiceStream; MAX_VOICES],
+    voice_mix: [VoiceMix; MAX_VOICES],
+    /// Level of the lead (main voice, layers, freeze) and of the
+    /// harmonies.
+    lead_gain: f32,
+    harmony_gain: f32,
 }
 
 impl Psola {
@@ -299,6 +326,7 @@ impl Psola {
         self.sample_rate = sr;
         if self.attack == 0.0 {
             self.attack = 1.0;
+            self.lead_gain = 1.0;
         }
         self.max_latency = latency;
         self.latency = latency as i64;
@@ -353,6 +381,7 @@ impl Psola {
         self.main_ratio = 1.0;
         self.frozen.state = FreezeState::Off;
         self.frozen.fade = 0.0;
+        self.voices = [VoiceStream::default(); MAX_VOICES];
     }
 
     /// Levels of the layers (see [`LAYER_RATIOS`]), 0 to 1, already
@@ -361,6 +390,15 @@ impl Psola {
         for (l, v) in self.layer_level.iter_mut().zip(levels) {
             *l = v.clamp(0.0, 1.0);
         }
+    }
+
+    /// Harmony voices for this sample (from
+    /// [`crate::harmony::Harmonizer::tick`]), and the levels of the lead
+    /// and of the harmonies. Real-time safe.
+    pub fn set_voices(&mut self, mix: &[VoiceMix; MAX_VOICES], lead: f32, harmony: f32) {
+        self.voice_mix = *mix;
+        self.lead_gain = lead;
+        self.harmony_gain = harmony;
     }
 
     /// How much the formants follow the pitch shift, 0 to 1.
@@ -495,6 +533,7 @@ impl Psola {
             }
         }
         self.run_freeze(c, f64::from(fr));
+        self.run_voices(c, pitch, f64::from(fr));
         let out = self.render(c);
         self.n += 1;
         out
@@ -509,6 +548,7 @@ impl Psola {
         let newest = (self.n - 2) as f64;
         let (mut l, mut r) = (0.0f32, 0.0f32);
         let (mut fl, mut fz) = (0.0f32, 0.0f32);
+        let (mut hl, mut hr) = (0.0f32, 0.0f32);
         let mut i = 0;
         while i < self.active {
             let mut g = self.grains[i];
@@ -547,6 +587,12 @@ impl Psola {
                     fl += w * read_buf(&self.frozen.buf[0], src);
                     fz += w * read_buf(&self.frozen.buf[1], src);
                 }
+                Stream::Voice(v) => {
+                    let [gl, gr] = self.voice_mix[usize::from(v)].gain;
+                    let src = (g.a + d * g.fr).min(newest);
+                    hl += w * gl * self.read(0, src);
+                    hr += w * gr * self.read(1, src);
+                }
                 stream => {
                     let w = match stream {
                         Stream::Layer(j) => w * self.layer_level[usize::from(j)],
@@ -572,7 +618,8 @@ impl Psola {
             l += f * (fl - l);
             r += f * (fz - r);
         }
-        (l, r)
+        let (g, h) = (self.lead_gain, self.harmony_gain);
+        (g * l + h * hl, g * r + h * hr)
     }
 
     #[inline]
@@ -1007,6 +1054,103 @@ impl Psola {
                 stream: Stream::Frozen,
             });
             self.frozen.next_s = s + p / ratio;
+        }
+    }
+
+    /// The harmony voices' grains due by output sample `c`. Each voice
+    /// has its own synthesis marks, spaced by its own period, and takes
+    /// the lead's analysis grain nearest in time (a few milliseconds
+    /// later with Humanize): the singer's grains, so the singer's
+    /// formants, at the voice's pitch. Like the lead it waits for a mark
+    /// that is not placed yet, so it never needs more latency.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn run_voices(&mut self, c: f64, pitch: &mut impl PitchControl, formant_ratio: f64) {
+        let max = f64::from(MAX_PITCH_RATIO);
+        for v in 0..MAX_VOICES {
+            let mix = self.voice_mix[v];
+            if !mix.active {
+                self.voices[v].on = false;
+                continue;
+            }
+            if !self.voices[v].on {
+                // Starts on the lead's next mark: pulses in step.
+                self.voices[v] = VoiceStream {
+                    on: true,
+                    next_s: self.next_centre().max(c),
+                    last: None,
+                    voicing: 0.0,
+                };
+            }
+            let fr0 = (formant_ratio * mix.formant).clamp(
+                1.0 / f64::from(MAX_FORMANT_RATIO),
+                f64::from(MAX_FORMANT_RATIO),
+            );
+            for _ in 0..8 {
+                let vs = self.voices[v];
+                let s = match vs.last {
+                    Some((ls, k, ratio)) if k + MARKS > self.count => ls + self.right(k) / ratio,
+                    _ => vs.next_s,
+                };
+                let target = s - self.offset - mix.lag;
+                let Some(k) = self.nearest_mark(target) else {
+                    break;
+                };
+                let m = self.mark(k);
+                if k + 1 == self.count && target - (m.pos as f64) > 0.5 * f64::from(m.period) {
+                    break;
+                }
+                let hl = self.rise(k, fr0);
+                if s - hl > c + 1.0 {
+                    break;
+                }
+                let right = self.right(k);
+                let left = self.left(k);
+                let step = right / self.glide;
+                let voicing = if m.voiced {
+                    (vs.voicing + step).min(1.0)
+                } else {
+                    (vs.voicing - step).max(0.0)
+                };
+                let late = (c - 1.0 + hl - s).max(0.0);
+                let s = s + late;
+                let dt = vs
+                    .last
+                    .map_or(0.0, |l| ((s - l.0) / self.sample_rate).max(0.0));
+                let mut ratio = 1.0;
+                if m.voiced {
+                    let last = if k + 1 < self.count { right } else { left };
+                    let own = if (last / f64::from(m.period)).ln().abs() < 0.2 {
+                        last
+                    } else {
+                        f64::from(m.period)
+                    };
+                    let sung = crate::pitch::hz_to_midi_f64(self.sample_rate / own);
+                    if let Some(note) = pitch.voice(v, dt) {
+                        ratio = (((note - sung) / 12.0).exp2()).clamp(1.0 / max, max);
+                        let fr = self.followed(fr0, ratio);
+                        if voicing > 0.0 {
+                            self.push_grain(Grain {
+                                s,
+                                a: m.pos as f64,
+                                hl,
+                                hr: right / fr,
+                                fr,
+                                gain: ((fr / ratio).sqrt() * voicing) as f32,
+                                attack: self.attack,
+                                k,
+                                right_known: k + 1 < self.count,
+                                stream: Stream::Voice(v as u8),
+                            });
+                        }
+                    }
+                }
+                self.voices[v] = VoiceStream {
+                    on: true,
+                    next_s: s + right / ratio,
+                    last: Some((s, k, ratio)),
+                    voicing,
+                };
+            }
         }
     }
 

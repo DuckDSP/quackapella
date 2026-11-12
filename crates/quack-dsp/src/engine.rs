@@ -16,12 +16,13 @@
 //!
 //! The autotune ([`Retuner`]) steers the shifter grain by grain: it
 //! gets each grain's own period and returns the grain's pitch ratio
-//! (correction plus transposition). Harmonies (next steps) will add
-//! voices on the same marks.
+//! (correction plus transposition). In the Synth mode the harmony
+//! voices ([`Harmonizer`]) are built on the same analysis grains.
 
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
+use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_steps};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
@@ -75,6 +76,11 @@ pub struct Engine {
     freeze: bool,
     robot: Robot,
     glitch: Glitch,
+    /// Synth mode: harmony voices, lead and harmony levels.
+    harmony: Harmonizer,
+    lead: Ramp,
+    harmony_level: Ramp,
+    double: Ramp,
 }
 
 impl Default for Engine {
@@ -111,6 +117,10 @@ impl Engine {
             freeze: false,
             robot: Robot::default(),
             glitch: Glitch::default(),
+            harmony: Harmonizer::default(),
+            lead: Ramp::new(1.0),
+            harmony_level: Ramp::new(0.0),
+            double: Ramp::new(0.0),
         };
         e.prepare(48_000.0, 512);
         e
@@ -131,6 +141,9 @@ impl Engine {
             &mut self.pitch,
             &mut self.formant,
             &mut self.follow,
+            &mut self.lead,
+            &mut self.harmony_level,
+            &mut self.double,
         ]
         .into_iter()
         .chain(self.layers.iter_mut())
@@ -145,6 +158,7 @@ impl Engine {
         self.retuner.prepare(sample_rate);
         self.robot.prepare(sample_rate);
         self.glitch.prepare(sample_rate);
+        self.harmony.prepare(sample_rate);
         self.notes.clear();
         self.latency = max;
         self.range = VoiceRange::from_index(self.values.get(ParamId::Voice));
@@ -188,6 +202,7 @@ impl Engine {
         self.retuner.reset();
         self.robot.reset();
         self.glitch.reset();
+        self.harmony.reset();
         self.notes.clear();
         self.apply_all(true);
         self.prime_gate();
@@ -281,6 +296,7 @@ impl Engine {
                 self.mode = VoiceMode::from_index(f64::from(v));
                 self.update_tune();
                 self.update_creative(snap);
+                self.update_harmony(snap);
                 return;
             }
             ParamId::FormantFollow
@@ -294,6 +310,24 @@ impl Engine {
             | ParamId::GlitchMode
             | ParamId::GlitchHold => {
                 self.update_creative(snap);
+                return;
+            }
+            ParamId::Harmony
+            | ParamId::Harmony1
+            | ParamId::Harmony2
+            | ParamId::Harmony3
+            | ParamId::Harmony4
+            | ParamId::Lead
+            | ParamId::HarmonyLevel
+            | ParamId::Spread
+            | ParamId::HarmonyHumanize
+            | ParamId::Character
+            | ParamId::Expression
+            | ParamId::Glide
+            | ParamId::Double
+            | ParamId::CloseVoicing
+            | ParamId::Latch => {
+                self.update_harmony(snap);
                 return;
             }
             ParamId::Voice => {
@@ -313,7 +347,9 @@ impl Engine {
                 return;
             }
             _ => {
+                // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();
+                self.update_harmony(snap);
                 return;
             }
         };
@@ -359,6 +395,83 @@ impl Engine {
         } else {
             self.follow.set(follow);
         }
+    }
+
+    /// Harmony voices from the parameters, the mode and the held notes:
+    /// only in the Synth mode.
+    fn update_harmony(&mut self, snap: bool) {
+        let on = self.mode == VoiceMode::Synth;
+        let v = &self.values;
+        let mode = if on {
+            HarmonyMode::from_index(v.get(ParamId::Harmony))
+        } else {
+            HarmonyMode::Off
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let key = v.get(ParamId::Key).round().clamp(0.0, 11.0) as u8;
+        let scale = match Scale::from_index(v.get(ParamId::Scale)) {
+            // Thirds must be thirds: chromatic counts in the major key.
+            Scale::Chromatic => Scale::Major,
+            s => s,
+        };
+        let ids = [
+            ParamId::Harmony1,
+            ParamId::Harmony2,
+            ParamId::Harmony3,
+            ParamId::Harmony4,
+        ];
+        let mut intervals = [0; INTERVAL_VOICES];
+        for (i, id) in intervals.iter_mut().zip(ids) {
+            *i = interval_steps(v.get(id));
+        }
+        let pct = |id: ParamId| v.get(id) / 100.0;
+        let s = &mut self.harmony.settings;
+        s.mode = mode;
+        s.intervals = intervals;
+        s.scale = scale_mask(key, scale);
+        s.chord = crate::autotune::held_mask(&self.notes);
+        s.expression = pct(ParamId::Expression);
+        s.glide_s = v.get(ParamId::Glide) / 1000.0;
+        s.humanize = pct(ParamId::HarmonyHumanize);
+        s.character = pct(ParamId::Character);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            s.spread = pct(ParamId::Spread) as f32;
+        }
+        s.close = v.get(ParamId::CloseVoicing) >= 0.5;
+        let double = if on { pct(ParamId::Double) } else { 0.0 };
+        s.double = double > 0.0;
+        // Latch: only where the notes play the harmonies.
+        let latch = on && v.get(ParamId::Latch) >= 0.5;
+        self.notes.set_latch(latch);
+        self.harmony.apply_settings();
+        self.harmony.set_notes(&self.notes);
+        #[allow(clippy::cast_possible_truncation)]
+        let double = double as f32;
+        if snap {
+            self.double.snap(double);
+        } else {
+            self.double.set(double);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let (lead, level) = if on {
+            (pct(ParamId::Lead) as f32, pct(ParamId::HarmonyLevel) as f32)
+        } else {
+            (1.0, 0.0)
+        };
+        if snap {
+            self.lead.snap(lead);
+            self.harmony_level.snap(level);
+        } else {
+            self.lead.set(lead);
+            self.harmony_level.set(level);
+        }
+    }
+
+    /// Notes the harmony voices sing now (bit n = note n).
+    #[must_use]
+    pub fn harmony_notes(&self) -> u128 {
+        self.harmony.sounding()
     }
 
     /// Host tempo, bar length in beats and, while playing, the beat
@@ -427,18 +540,29 @@ impl Engine {
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
         self.notes.note_on(channel, note, velocity);
         self.update_tune();
+        self.update_harmony(false);
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
         self.notes.note_off(channel, note);
         self.update_tune();
+        self.update_harmony(false);
+        self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
+    }
+
+    /// Sustain pedal (CC 64): released notes stay held while it is down.
+    pub fn set_sustain(&mut self, down: bool) {
+        self.notes.set_sustain(down);
+        self.update_tune();
+        self.update_harmony(false);
         self.robot.note = self.notes.latest().map(|n| f64::from(n.note));
     }
 
     pub fn all_notes_off(&mut self) {
         self.notes.clear();
         self.update_tune();
+        self.update_harmony(false);
         self.robot.note = None;
     }
 
@@ -475,9 +599,15 @@ impl Engine {
                 .note
                 .map(|n| (440.0 * ((n + f64::from(transpose) - 69.0) / 12.0).exp2()) as f32);
             self.shifter.set_freeze(self.freeze, freeze_hz, transpose);
+            let lead = self.lead.tick();
+            let level = self.harmony_level.tick();
+            let double = self.double.tick();
+            let voices = self.harmony.tick(level, double);
+            self.shifter.set_voices(voices, lead, 1.0);
             let mut steer = Steer {
                 retuner: &mut self.retuner,
                 robot: &mut self.robot,
+                harmony: &mut self.harmony,
             };
             let (wet_l, wet_r) = self
                 .shifter
@@ -754,6 +884,61 @@ mod tests {
             assert_eq!(l, with, "mode {mode}");
             assert_ne!(plain, with);
         }
+    }
+
+    /// Synth mode, the lead muted, one harmony voice.
+    fn harmony_only(mode: f64, steps: i32) -> ParamValues {
+        let mut v = ParamValues::default();
+        v.set(ParamId::Mode, 3.0);
+        v.set(ParamId::Harmony, mode);
+        v.set(ParamId::Lead, 0.0);
+        v.set(ParamId::HarmonyLevel, 100.0);
+        v.set(
+            ParamId::Harmony1,
+            f64::from(steps + crate::harmony::MAX_STEPS),
+        );
+        v.set(ParamId::Harmony2, f64::from(crate::harmony::MAX_STEPS));
+        v.set(ParamId::HarmonyHumanize, 0.0);
+        v
+    }
+
+    #[test]
+    fn harmony_sings_a_third_in_the_key() {
+        // A3 in C major: a third above is C4, a sixth below C3.
+        let got = tuned_note(&harmony_only(2.0, 2), 0.0, None);
+        assert!((got - 60.0).abs() < 0.05, "{got}");
+        let got = tuned_note(&harmony_only(2.0, -5), 0.0, None);
+        assert!((got - 48.0).abs() < 0.05, "{got}");
+        // A minor (key A, minor): a third above A is C too, a second B.
+        let mut v = harmony_only(2.0, 1);
+        v.set(ParamId::Key, 9.0);
+        v.set(ParamId::Scale, 2.0);
+        let got = tuned_note(&v, 0.0, None);
+        assert!((got - 59.0).abs() < 0.05, "{got}");
+    }
+
+    #[test]
+    fn harmony_plays_the_midi_note() {
+        let got = tuned_note(&harmony_only(1.0, 0), 0.0, Some(64));
+        assert!((got - 64.0).abs() < 0.05, "{got}");
+    }
+
+    #[test]
+    fn harmony_adds_no_latency_and_stays_in_synth() {
+        let mut e = Engine::new();
+        let lat = e.latency_samples();
+        let mut v = harmony_only(2.0, 2);
+        v.set(ParamId::Lead, 100.0);
+        e.set_all(&v, true);
+        assert_eq!(e.latency_samples(), lat);
+        // Impulse (unvoiced): only the lead, on time.
+        let y = impulse_response(&mut e, lat + 8);
+        assert!((y[lat] - 1.0).abs() < 1e-6);
+        // Other modes: no harmony at all, even with the knobs set.
+        v.set(ParamId::Mode, 0.0);
+        let mut e = Engine::new();
+        e.set_all(&v, true);
+        assert_eq!(e.harmony.settings.mode, HarmonyMode::Off);
     }
 
     #[test]
