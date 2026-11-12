@@ -126,6 +126,8 @@ pub struct UiState {
     page: Page,
     /// Preset browser, values of this frame.
     presets: perform::PresetUi,
+    /// Effect shown on the FX page.
+    fx_tab: FxTab,
     /// Vocoder page's tab: 0 voice and effects, 1 carrier.
     vocoder_tab: usize,
     /// Perform row lists open, and where they hang from.
@@ -147,6 +149,7 @@ impl Default for UiState {
             scale_menu: false,
             page: Page::Voice,
             presets: perform::PresetUi::default(),
+            fx_tab: FxTab::default(),
             vocoder_tab: 0,
             keys_menu: false,
             channel_menu: false,
@@ -1473,8 +1476,177 @@ fn vocoder_panel(
     );
 }
 
-/// The voice effects: dynamics at the input (gate, de-esser,
-/// compressor), then delay and reverb on a bus fed by each layer's send.
+/// The effects of the FX page, one tab each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FxTab {
+    Tone,
+    #[default]
+    Dynamics,
+    Delay,
+    Reverb,
+    Chorus,
+    Sends,
+}
+
+impl FxTab {
+    pub const ALL: [Self; 6] = [
+        Self::Tone,
+        Self::Dynamics,
+        Self::Delay,
+        Self::Reverb,
+        Self::Chorus,
+        Self::Sends,
+    ];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tone => "Tone",
+            Self::Dynamics => "Dynamics",
+            Self::Delay => "Delay",
+            Self::Reverb => "Reverb",
+            Self::Chorus => "Chorus",
+            Self::Sends => "Sends",
+        }
+    }
+
+    /// The effect's own switch (the sends have none).
+    #[must_use]
+    pub const fn switch(self) -> Option<ParamId> {
+        match self {
+            Self::Tone => Some(ParamId::ToneOn),
+            Self::Dynamics => Some(ParamId::DynamicsOn),
+            Self::Delay => Some(ParamId::DelayOn),
+            Self::Reverb => Some(ParamId::ReverbOn),
+            Self::Chorus => Some(ParamId::ChorusOn),
+            Self::Sends => None,
+        }
+    }
+
+    /// What the effect does, under the tabs.
+    const fn caption(self) -> &'static str {
+        match self {
+            Self::Tone => "Input EQ and saturation, before every layer",
+            Self::Dynamics => "Gate, de-esser and compressor on the input",
+            Self::Delay => "On the FX bus, fed by each layer's send",
+            Self::Reverb => "On the FX bus, fed by each layer's send",
+            Self::Chorus => "On every layer, after them",
+            Self::Sends => "How much of each layer goes to the delay and reverb",
+        }
+    }
+}
+
+impl UiState {
+    /// Show an effect on the FX page.
+    pub fn set_fx_tab(&mut self, tab: FxTab) {
+        self.fx_tab = tab;
+    }
+}
+
+type FxKnob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, Color32);
+
+/// One row of knobs across `r`, in `cols` slots from slot `first`.
+#[allow(clippy::too_many_arguments)]
+fn fx_knobs(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    r: Rect,
+    y: f32,
+    cols: usize,
+    first: usize,
+    knobs: &[FxKnob],
+) {
+    #[allow(clippy::cast_precision_loss)]
+    let kw = (r.width() - 2.0 * space::L) / cols as f32;
+    for (i, (id, name, fmt, acc)) in knobs.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let cx = r.left() + space::L + kw * ((first + i) as f32 + 0.5);
+        controls::knob_named(
+            ui,
+            params,
+            st,
+            *id,
+            pos2(cx, y),
+            54.0,
+            id.spec().kind.min(),
+            *acc,
+            *fmt,
+            name,
+        );
+    }
+}
+
+/// The tabs of the FX page: a switch (dot) and the name, which shows
+/// the effect.
+fn fx_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, accent: Color32) {
+    let p = ui.painter();
+    let gap = space::XS;
+    #[allow(clippy::cast_precision_loss)]
+    let n = FxTab::ALL.len() as f32;
+    let w = (r.width() - gap * (n - 1.0)) / n;
+    for (i, tab) in FxTab::ALL.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let x = r.left() + (w + gap) * i as f32;
+        let cell = Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height()));
+        let shown = st.fx_tab == tab;
+        let on = tab.switch().is_none_or(|id| params.get_plain(id) >= 0.5);
+        let dot_w = if tab.switch().is_some() { 17.0 } else { 0.0 };
+        let name_r = Rect::from_min_max(pos2(cell.left() + dot_w, cell.top()), cell.max);
+        let resp = ui.interact(name_r, ui.id().with(("quack-fx-tab", i)), Sense::click());
+        if resp.clicked() {
+            st.fx_tab = tab;
+        }
+        let (fill, stroke) = if shown {
+            (accent.gamma_multiply(0.22), accent.gamma_multiply(0.8))
+        } else if resp.hovered() {
+            (color::BORDER, color::BORDER)
+        } else {
+            (color::RAISED, color::BORDER)
+        };
+        paint::rounded(p, cell, radius::CONTROL, fill, stroke);
+        text(
+            p,
+            name_r.center() - vec2(1.0, 0.0),
+            Align2::CENTER_CENTER,
+            tab.name(),
+            size::CAPTION - 1.0,
+            if shown {
+                accent
+            } else if on {
+                color::TEXT_DIM
+            } else {
+                color::TEXT_FAINT
+            },
+        );
+        if let Some(id) = tab.switch() {
+            let dot_r = Rect::from_min_size(cell.min, vec2(dot_w, cell.height()));
+            let presp = ui.interact(dot_r, ui.id().with(("quack-fx-on", i)), Sense::click());
+            if presp.clicked() {
+                set_once(params, id, if on { 0.0 } else { 1.0 });
+            }
+            crate::perform::attach(ui, &presp, params, id);
+            let dot = dot_r.center() + vec2(2.5, 0.0);
+            let ring = if presp.hovered() {
+                color::TEXT_DIM
+            } else {
+                color::TEXT_FAINT
+            };
+            p.circle_stroke(
+                dot,
+                4.5,
+                egui::Stroke::new(1.5_f32, if on { accent } else { ring }),
+            );
+            if on {
+                p.circle_filled(dot, 2.5, accent);
+            }
+        }
+    }
+}
+
+/// The voice effects, one tab each: tone and dynamics at the input,
+/// delay and reverb on a bus fed by each layer's send, the chorus after
+/// the layers.
 fn fx_panel(
     ui: &egui::Ui,
     params: &dyn ParamAccess,
@@ -1487,12 +1659,16 @@ fn fx_panel(
     panel(p, r);
     layer_switch(ui, params, ParamId::FxOn, r, "FX", accent);
     let on = params.get_plain(ParamId::FxOn) >= 0.5;
+    let tab = st.fx_tab;
+    let tab_on = on && tab.switch().is_none_or(|id| params.get_plain(id) >= 0.5);
     let dim = accent.gamma_multiply(0.35);
-    let live = |b: bool| if b && on { accent } else { dim };
-    // Gain reduction, while it works.
-    let gr = if !on {
-        "Off · nothing added to the latency".to_owned()
-    } else if view.comp_db < -0.1 || view.deess_db < -0.1 {
+    let live = |b: bool| if b && tab_on { accent } else { dim };
+    // Gain reduction while it works, else what the page does.
+    let dyn_on = on && params.get_plain(ParamId::DynamicsOn) >= 0.5;
+    let reducing = dyn_on && (view.comp_db < -0.1 || view.deess_db < -0.1);
+    let status = if !on {
+        "Off · no latency added".to_owned()
+    } else if reducing {
         format!(
             "Comp {:.1} dB · De-ess {:.1} dB",
             view.comp_db, view.deess_db
@@ -1504,22 +1680,24 @@ fn fx_panel(
         p,
         pos2(r.right() - space::L, r.top() + 22.0),
         Align2::RIGHT_CENTER,
-        &gr,
+        &status,
         size::CAPTION,
-        if on && view.comp_db < -0.1 {
-            accent
-        } else {
-            color::TEXT_FAINT
-        },
+        if reducing { accent } else { color::TEXT_FAINT },
+    );
+    let tabs_r = Rect::from_min_size(
+        pos2(r.left() + space::L, r.top() + 46.0),
+        vec2(r.width() - 2.0 * space::L, 28.0),
+    );
+    fx_tabs(ui, params, st, tabs_r, accent);
+    text(
+        p,
+        pos2(r.left() + space::L, tabs_r.bottom() + 16.0),
+        Align2::LEFT_CENTER,
+        tab.caption(),
+        size::CAPTION,
+        color::TEXT_FAINT,
     );
 
-    let off_db = |v: f64| {
-        if v <= f64::from(quack_dsp::fx::GATE_OFF_DB) + 0.01 {
-            "Off".to_owned()
-        } else {
-            format!("{v:.0}")
-        }
-    };
     let off = |v: f64| {
         if v < 0.5 {
             "Off".to_owned()
@@ -1529,7 +1707,28 @@ fn fx_panel(
     };
     let pct = |v: f64| format!("{v:.0}");
     let db = |v: f64| format!("{v:.0}");
-    let khz = |v: f64| format!("{:.1}k", v / 1000.0);
+    let sdb = |v: f64| format!("{v:+.1}");
+    let hz = |v: f64| {
+        if v >= 1000.0 {
+            format!("{:.1}k", v / 1000.0)
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let low_cut = |v: f64| {
+        if v <= f64::from(quack_dsp::fx::LOW_CUT_OFF_HZ) + 0.01 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let gate = |v: f64| {
+        if v <= f64::from(quack_dsp::fx::GATE_OFF_DB) + 0.01 {
+            "Off".to_owned()
+        } else {
+            format!("{v:.0}")
+        }
+    };
     let ratio = |v: f64| {
         if v < 1.01 {
             "Off".to_owned()
@@ -1545,127 +1744,205 @@ fn fx_panel(
         }
     };
     let secs = |v: f64| format!("{v:.1}s");
-    let comp = params.get_plain(ParamId::CompRatio) > 1.01;
-    let deess = params.get_plain(ParamId::DeEss) > 0.5;
-    let sync = params.get_plain(ParamId::DelaySync) >= 0.5;
-    let delay = params.get_plain(ParamId::DelayLevel) > 0.5;
-    let reverb = params.get_plain(ParamId::ReverbLevel) > 0.5;
-    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
-    type Knob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, Color32);
-    let row1: [Knob; 8] = [
-        (ParamId::Gate, "Gate", &off_db, live(true)),
-        (ParamId::DeEss, "De-Ess", &off, live(true)),
-        (ParamId::DeEssFreq, "Freq", &khz, live(deess)),
-        (ParamId::CompThreshold, "Thresh", &db, live(comp)),
-        (ParamId::CompRatio, "Ratio", &ratio, live(true)),
-        (ParamId::CompAttack, "Attack", &ms, live(comp)),
-        (ParamId::CompRelease, "Release", &ms, live(comp)),
-        (ParamId::CompMakeup, "Makeup", &db, live(true)),
-    ];
-    let row2: [Knob; 8] = [
-        (ParamId::DelayLevel, "Delay", &off, live(true)),
-        (ParamId::DelayTime, "Time", &ms, live(delay && !sync)),
-        (ParamId::DelayFeedback, "Feedback", &pct, live(delay)),
-        (ParamId::DelayTone, "Tone", &pct, live(delay)),
-        (ParamId::ReverbLevel, "Reverb", &off, live(true)),
-        (ParamId::ReverbDecay, "Decay", &secs, live(reverb)),
-        (ParamId::ReverbDamping, "Damping", &pct, live(reverb)),
-        (ParamId::ReverbPredelay, "Pre-Delay", &ms, live(reverb)),
-    ];
-    let layer = |pg: Page, b: bool| {
-        if on && b {
-            page_accent(pg, VoiceMode::Natural)
-        } else {
-            dim
+    let rate = |v: f64| format!("{v:.2}");
+    let y1 = r.top() + 152.0;
+    let y2 = r.bottom() - 58.0;
+    match tab {
+        FxTab::Tone => {
+            let k: [FxKnob; 4] = [
+                (ParamId::LowCut, "Low Cut", &low_cut, live(true)),
+                (ParamId::Presence, "Presence", &sdb, live(true)),
+                (ParamId::Air, "Air", &sdb, live(true)),
+                (ParamId::Drive, "Drive", &off, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 4, 0, &k);
         }
-    };
-    let row3: [Knob; 5] = [
-        (ParamId::Duck, "Duck", &off, live(delay || reverb)),
-        (
-            ParamId::SendVoice,
-            if series { "Chain" } else { "Voice" },
-            &pct,
-            layer(Page::Voice, true),
-        ),
-        (
-            ParamId::SendCreative,
-            "Creative",
-            &pct,
-            layer(Page::Creative, !series),
-        ),
-        (
-            ParamId::SendHarmony,
-            "Harmony",
-            &pct,
-            layer(Page::Harmony, !series),
-        ),
-        (
-            ParamId::SendVocoder,
-            "Vocoder",
-            &pct,
-            layer(Page::Vocoder, !series),
-        ),
-    ];
-    let knob_d = 40.0;
-    let inner_w = r.width() - 2.0 * space::L;
-    let kw = inner_w / 8.0;
-    let y1 = r.top() + 84.0;
-    let y2 = y1 + 86.0;
-    let y3 = y2 + 86.0;
-    for (row, y, x0) in [
-        (&row1[..], y1, 0.0),
-        (&row2[..], y2, 0.0),
-        (&row3[..], y3, 3.0),
-    ] {
-        for (i, (id, name, fmt, acc)) in row.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
-            let cx = r.left() + space::L + kw * (x0 + i as f32 + 0.5);
-            controls::knob_named(
+        FxTab::Dynamics => {
+            let comp = params.get_plain(ParamId::CompRatio) > 1.01;
+            let deess = params.get_plain(ParamId::DeEss) > 0.5;
+            let k1: [FxKnob; 3] = [
+                (ParamId::Gate, "Gate", &gate, live(true)),
+                (ParamId::DeEss, "De-Ess", &off, live(true)),
+                (ParamId::DeEssFreq, "De-Ess Freq", &hz, live(deess)),
+            ];
+            fx_knobs(ui, params, st, r, y1, 5, 0, &k1);
+            // The two reductions, as bars.
+            let meter = Rect::from_min_size(
+                pos2(
+                    r.left() + space::L + (r.width() - 2.0 * space::L) * 0.62,
+                    y1 - 26.0,
+                ),
+                vec2((r.width() - 2.0 * space::L) * 0.38, 52.0),
+            );
+            for (i, (name, v)) in [("Comp", view.comp_db), ("De-ess", view.deess_db)]
+                .into_iter()
+                .enumerate()
+            {
+                #[allow(clippy::cast_precision_loss)]
+                let y = meter.top() + 13.0 + 26.0 * i as f32;
+                text(
+                    p,
+                    pos2(meter.left(), y),
+                    Align2::LEFT_CENTER,
+                    name,
+                    size::CAPTION,
+                    color::TEXT_FAINT,
+                );
+                let bar = Rect::from_min_max(
+                    pos2(meter.left() + 56.0, y - 5.0),
+                    pos2(meter.right(), y + 5.0),
+                );
+                paint::rounded(p, bar, 2, color::WELL, color::BORDER);
+                let frac = if dyn_on {
+                    (-v / 18.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                if frac > 0.0 {
+                    let fill = Rect::from_min_max(
+                        pos2(bar.right() - bar.width() * frac, bar.top()),
+                        bar.max,
+                    );
+                    paint::rounded(p, fill, 2, accent, accent);
+                }
+            }
+            let k2: [FxKnob; 5] = [
+                (ParamId::CompThreshold, "Threshold", &db, live(comp)),
+                (ParamId::CompRatio, "Ratio", &ratio, live(true)),
+                (ParamId::CompAttack, "Attack", &ms, live(comp)),
+                (ParamId::CompRelease, "Release", &ms, live(comp)),
+                (ParamId::CompMakeup, "Makeup", &db, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, y2, 5, 0, &k2);
+        }
+        FxTab::Delay => {
+            let sync = params.get_plain(ParamId::DelaySync) >= 0.5;
+            let ping = params.get_plain(ParamId::DelayPingPong) >= 0.5;
+            let k1: [FxKnob; 5] = [
+                (ParamId::DelayLevel, "Level", &off, live(true)),
+                (ParamId::DelayTime, "Time", &ms, live(!sync)),
+                (ParamId::DelayFeedback, "Feedback", &pct, live(true)),
+                (ParamId::DelayTone, "Tone", &pct, live(true)),
+                (ParamId::DelayLowCut, "Low Cut", &hz, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, y1, 5, 0, &k1);
+            // Sync, its note value and ping-pong, then the options.
+            let kw = (r.width() - 2.0 * space::L) / 5.0;
+            let ty = y2 - 30.0;
+            let sr = Rect::from_min_size(pos2(r.left() + space::L, ty), vec2(kw - space::XS, 26.0));
+            controls::toggle(ui, params, ParamId::DelaySync, sr, "Sync", live(true));
+            let div = quack_dsp::fx::Division::from_index(params.get_plain(ParamId::DelayDivision));
+            let dr = Rect::from_min_size(
+                pos2(sr.right() + space::XS, ty),
+                vec2(kw * 1.2 - space::XS, 26.0),
+            );
+            controls::stepper(
                 ui,
                 params,
-                st,
-                *id,
-                pos2(cx, y),
-                knob_d,
-                id.spec().kind.min(),
-                *acc,
-                *fmt,
-                name,
+                ParamId::DelayDivision,
+                dr,
+                div.name(),
+                live(sync),
+            );
+            let pr = Rect::from_min_size(
+                pos2(r.left() + space::L, ty + 32.0),
+                vec2(kw * 2.2 - space::XS, 26.0),
+            );
+            controls::toggle(
+                ui,
+                params,
+                ParamId::DelayPingPong,
+                pr,
+                "Ping-Pong",
+                live(true),
+            );
+            let k2: [FxKnob; 3] = [
+                (ParamId::DelayMod, "Wobble", &off, live(true)),
+                (ParamId::DelayWidth, "Width", &off, live(!ping)),
+                (ParamId::DelayToReverb, "To Reverb", &off, live(true)),
+            ];
+            let kw_r = Rect::from_min_max(pos2(r.left() + kw * 2.2, r.top()), r.max);
+            fx_knobs(ui, params, st, kw_r, y2, 3, 0, &k2);
+        }
+        FxTab::Reverb => {
+            let k1: [FxKnob; 4] = [
+                (ParamId::ReverbLevel, "Level", &off, live(true)),
+                (ParamId::ReverbDecay, "Decay", &secs, live(true)),
+                (ParamId::ReverbSize, "Size", &pct, live(true)),
+                (ParamId::ReverbPredelay, "Pre-Delay", &ms, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, y1, 4, 0, &k1);
+            let k2: [FxKnob; 4] = [
+                (ParamId::ReverbDamping, "Damping", &pct, live(true)),
+                (ParamId::ReverbLowCut, "Low Cut", &hz, live(true)),
+                (ParamId::ReverbMod, "Modulation", &off, live(true)),
+                (ParamId::ReverbWidth, "Width", &pct, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, y2, 4, 0, &k2);
+        }
+        FxTab::Chorus => {
+            let k: [FxKnob; 3] = [
+                (ParamId::ChorusRate, "Rate", &rate, live(true)),
+                (ParamId::ChorusDepth, "Depth", &pct, live(true)),
+                (ParamId::ChorusMix, "Mix", &off, live(true)),
+            ];
+            fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 3, 0, &k);
+        }
+        FxTab::Sends => {
+            let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
+            let layer = |pg: Page, b: bool| {
+                if on && b {
+                    page_accent(pg, VoiceMode::Natural)
+                } else {
+                    dim
+                }
+            };
+            let k1: [FxKnob; 4] = [
+                (
+                    ParamId::SendVoice,
+                    if series { "Chain" } else { "Voice" },
+                    &pct,
+                    layer(Page::Voice, true),
+                ),
+                (
+                    ParamId::SendCreative,
+                    "Creative",
+                    &pct,
+                    layer(Page::Creative, !series),
+                ),
+                (
+                    ParamId::SendHarmony,
+                    "Harmony",
+                    &pct,
+                    layer(Page::Harmony, !series),
+                ),
+                (
+                    ParamId::SendVocoder,
+                    "Vocoder",
+                    &pct,
+                    layer(Page::Vocoder, !series),
+                ),
+            ];
+            fx_knobs(ui, params, st, r, y1, 4, 0, &k1);
+            let k2: [FxKnob; 1] = [(ParamId::Duck, "Duck", &off, live(true))];
+            fx_knobs(ui, params, st, r, y2, 4, 0, &k2);
+            text(
+                p,
+                pos2(
+                    r.left() + space::L + (r.width() - 2.0 * space::L) / 4.0 + space::S,
+                    y2,
+                ),
+                Align2::LEFT_CENTER,
+                if series {
+                    "Series: one send for the whole chain. Duck lowers the bus while you sing"
+                } else {
+                    "Duck lowers the delay and reverb while you sing"
+                },
+                size::CAPTION,
+                color::TEXT_FAINT,
             );
         }
     }
-    // Delay sync, its note value, ping-pong (row 3, left).
-    let ty = y3 - 24.0;
-    let sr = Rect::from_min_size(
-        pos2(r.left() + space::L, ty),
-        vec2(kw * 1.5 - space::XS, 24.0),
-    );
-    controls::toggle(ui, params, ParamId::DelaySync, sr, "Sync", live(delay));
-    let pr = Rect::from_min_size(
-        pos2(sr.right() + space::XS, ty),
-        vec2(kw * 1.5 - space::S, 24.0),
-    );
-    controls::toggle(
-        ui,
-        params,
-        ParamId::DelayPingPong,
-        pr,
-        "Ping-Pong",
-        live(delay),
-    );
-    let dr = Rect::from_min_size(
-        pos2(r.left() + space::L, ty + 28.0),
-        vec2(kw * 3.0 - space::S, 24.0),
-    );
-    let div = quack_dsp::fx::Division::from_index(params.get_plain(ParamId::DelayDivision));
-    controls::stepper(
-        ui,
-        params,
-        ParamId::DelayDivision,
-        dr,
-        div.name(),
-        live(delay && sync),
-    );
 }
 
 fn held_class(held: u128, class: u8) -> bool {

@@ -30,7 +30,10 @@ use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_m
 use crate::chain::{Chain, Routing, Stage, crossfade};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
-use crate::fx::{Division, Dynamics, DynamicsSettings, Space, SpaceSettings};
+use crate::fx::{
+    Chorus, ChorusSettings, Division, Dynamics, DynamicsSettings, Space, SpaceSettings, Tone,
+    ToneSettings,
+};
 use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
@@ -116,6 +119,8 @@ pub struct Engine {
     /// bus fed by a send per layer, its return level.
     fx_on: bool,
     dynamics: Dynamics,
+    tone: Tone,
+    chorus: Chorus,
     space: Space,
     space_on: bool,
     fx_return: Ramp,
@@ -173,6 +178,8 @@ impl Engine {
             chain: Chain::default(),
             fx_on: false,
             dynamics: Dynamics::default(),
+            tone: Tone::default(),
+            chorus: Chorus::default(),
             space: Space::default(),
             space_on: false,
             fx_return: Ramp::new(0.0),
@@ -223,6 +230,8 @@ impl Engine {
         self.harmony.prepare(sample_rate);
         self.vocoder.prepare(sample_rate, max);
         self.dynamics.prepare(sample_rate);
+        self.tone.prepare(sample_rate);
+        self.chorus.prepare(sample_rate);
         self.space.prepare(sample_rate);
         self.notes.clear();
         self.latency = max;
@@ -282,6 +291,8 @@ impl Engine {
         self.harmony.reset();
         self.vocoder.reset();
         self.dynamics.reset();
+        self.tone.reset();
+        self.chorus.reset();
         self.space.reset();
         self.notes.clear();
         self.apply_all(true);
@@ -497,7 +508,27 @@ impl Engine {
             | ParamId::SendVoice
             | ParamId::SendCreative
             | ParamId::SendHarmony
-            | ParamId::SendVocoder => {
+            | ParamId::SendVocoder
+            | ParamId::DynamicsOn
+            | ParamId::ToneOn
+            | ParamId::DelayOn
+            | ParamId::ReverbOn
+            | ParamId::ChorusOn
+            | ParamId::LowCut
+            | ParamId::Presence
+            | ParamId::Air
+            | ParamId::Drive
+            | ParamId::DelayMod
+            | ParamId::DelayWidth
+            | ParamId::DelayLowCut
+            | ParamId::ReverbSize
+            | ParamId::ReverbMod
+            | ParamId::ReverbLowCut
+            | ParamId::ReverbWidth
+            | ParamId::DelayToReverb
+            | ParamId::ChorusRate
+            | ParamId::ChorusDepth
+            | ParamId::ChorusMix => {
                 self.update_fx(snap);
                 return;
             }
@@ -553,7 +584,27 @@ impl Engine {
         let f = |id: ParamId| v.get(id) as f32;
         let pct = |id: ParamId| f(id) / 100.0;
         let on = v.get(ParamId::FxOn) >= 0.5;
-        self.dynamics.set(if on {
+        let sw = |id: ParamId| on && v.get(id) >= 0.5;
+        self.tone.set(if sw(ParamId::ToneOn) {
+            ToneSettings {
+                low_cut_hz: f(ParamId::LowCut),
+                presence_db: f(ParamId::Presence),
+                air_db: f(ParamId::Air),
+                drive: pct(ParamId::Drive),
+            }
+        } else {
+            ToneSettings::default()
+        });
+        self.chorus.set(ChorusSettings {
+            rate_hz: f(ParamId::ChorusRate),
+            depth: pct(ParamId::ChorusDepth),
+            mix: if sw(ParamId::ChorusOn) {
+                pct(ParamId::ChorusMix)
+            } else {
+                0.0
+            },
+        });
+        self.dynamics.set(if sw(ParamId::DynamicsOn) {
             DynamicsSettings {
                 gate_db: f(ParamId::Gate),
                 deess: pct(ParamId::DeEss),
@@ -570,9 +621,13 @@ impl Engine {
         if on && !self.fx_on {
             // Back on: no tail left over from before.
             self.dynamics.reset();
+            self.tone.reset();
+            self.chorus.reset();
             self.space.reset();
         }
         self.fx_on = on;
+        let delay_on = v.get(ParamId::DelayOn) >= 0.5;
+        let reverb_on = v.get(ParamId::ReverbOn) >= 0.5;
         self.space.set(SpaceSettings {
             sync: v.get(ParamId::DelaySync) >= 0.5,
             division: Division::from_index(v.get(ParamId::DelayDivision)),
@@ -580,12 +635,28 @@ impl Engine {
             feedback: pct(ParamId::DelayFeedback),
             ping_pong: v.get(ParamId::DelayPingPong) >= 0.5,
             delay_tone: pct(ParamId::DelayTone),
-            delay_level: pct(ParamId::DelayLevel),
+            delay_level: if delay_on {
+                pct(ParamId::DelayLevel)
+            } else {
+                0.0
+            },
             decay_s: f(ParamId::ReverbDecay),
             damping: pct(ParamId::ReverbDamping),
             predelay_ms: f(ParamId::ReverbPredelay),
-            reverb_level: pct(ParamId::ReverbLevel),
+            reverb_level: if reverb_on {
+                pct(ParamId::ReverbLevel)
+            } else {
+                0.0
+            },
             duck: pct(ParamId::Duck),
+            delay_mod: pct(ParamId::DelayMod),
+            delay_width: pct(ParamId::DelayWidth),
+            delay_low_cut_hz: f(ParamId::DelayLowCut),
+            reverb_size: pct(ParamId::ReverbSize),
+            reverb_mod: pct(ParamId::ReverbMod),
+            reverb_low_cut_hz: f(ParamId::ReverbLowCut),
+            reverb_width: pct(ParamId::ReverbWidth),
+            delay_to_reverb: pct(ParamId::DelayToReverb),
         });
         let ret = if on { pct(ParamId::FxLevel) } else { 0.0 };
         let sends = [
@@ -1004,7 +1075,9 @@ impl Engine {
             self.retuner.transpose = f64::from(transpose);
             let formant = semitones_to_ratio(formant_st);
             let (in_l, in_r) = if self.fx_on {
-                self.dynamics.tick(voice_l * g_in, voice_r * g_in)
+                let (a, b) = self.tone.pre(voice_l * g_in, voice_r * g_in);
+                let (a, b) = self.dynamics.tick(a, b);
+                self.tone.post(a, b)
             } else {
                 (voice_l * g_in, voice_r * g_in)
             };
@@ -1089,6 +1162,11 @@ impl Engine {
                     let s = self.series(&buses, creative_level, voc_level, vocoding, sc, follow);
                     (s, (s.0 * sends[0], s.1 * sends[0]))
                 }
+            };
+            let (wet_l, wet_r) = if self.fx_on {
+                self.chorus.tick(wet_l, wet_r)
+            } else {
+                (wet_l, wet_r)
             };
             let (wet_l, wet_r) = if self.space_on {
                 // Ducked by the voice as it comes out (lined up with it).

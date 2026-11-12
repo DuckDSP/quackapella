@@ -399,6 +399,20 @@ pub struct SpaceSettings {
     pub reverb_level: f32,
     /// How much the singing voice lowers the bus, 0-1.
     pub duck: f32,
+    /// Tape-like wobble of the delay time, 0-1.
+    pub delay_mod: f32,
+    /// Right side later than the left (not in ping-pong), 0-1.
+    pub delay_width: f32,
+    /// Low cut of the repeats, Hz.
+    pub delay_low_cut_hz: f32,
+    /// Room size 0-1, line modulation 0-1, low cut of the reverb input
+    /// (Hz), stereo width 0-1.
+    pub reverb_size: f32,
+    pub reverb_mod: f32,
+    pub reverb_low_cut_hz: f32,
+    pub reverb_width: f32,
+    /// How much of the delay feeds the reverb, 0-1.
+    pub delay_to_reverb: f32,
 }
 
 impl Default for SpaceSettings {
@@ -416,6 +430,14 @@ impl Default for SpaceSettings {
             predelay_ms: 20.0,
             reverb_level: 0.6,
             duck: 0.0,
+            delay_mod: 0.0,
+            delay_width: 0.0,
+            delay_low_cut_hz: 150.0,
+            reverb_size: 0.5,
+            reverb_mod: 0.2,
+            reverb_low_cut_hz: 100.0,
+            reverb_width: 1.0,
+            delay_to_reverb: 0.0,
         }
     }
 }
@@ -427,8 +449,18 @@ const FDN: usize = 8;
 /// Reverb line lengths (ms), mutually prime-ish.
 const FDN_MS: [f32; FDN] = [29.7, 37.1, 41.1, 43.7, 53.0, 59.9, 67.3, 73.1];
 const DIFFUSER_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
-/// Reverb line length scale, so a short decay is still a room.
-const SIZE: f32 = 1.3;
+/// Reverb line length scale from the size (0-1): 0.6 to 2.2.
+fn size_scale(size: f32) -> f32 {
+    0.6 + 1.6 * size.clamp(0.0, 1.0)
+}
+const SIZE_MAX: f32 = 2.2;
+/// Deepest line modulation, ms.
+const REVERB_MOD_MS: f32 = 0.6;
+/// Deepest delay wobble (wow, flutter), ms.
+const WOW_MS: f32 = 4.0;
+const FLUTTER_MS: f32 = 0.35;
+/// Widest right-side offset of the delay, as a fraction of its time.
+const DELAY_WIDTH: f32 = 0.12;
 
 /// A fixed-length circular buffer.
 #[derive(Debug, Clone, Default)]
@@ -514,6 +546,10 @@ pub struct Space {
     tone_coef: f32,
     low_cut: [f32; 2],
     low_cut_coef: f32,
+    wow: f32,
+    flutter: f32,
+    wow_inc: f32,
+    flutter_inc: f32,
     // Reverb.
     predelay: Ring,
     predelay_len: usize,
@@ -523,6 +559,11 @@ pub struct Space {
     gains: [f32; FDN],
     damp: [f32; FDN],
     damp_coef: f32,
+    base_lens: [f32; FDN],
+    rv_low: f32,
+    rv_low_coef: f32,
+    lfo: f32,
+    lfo_inc: f32,
     // Ducking.
     duck_env: Follower,
 }
@@ -550,14 +591,17 @@ impl Space {
             a.ring.prepare(len + 1);
             a.len = len;
         }
+        let margin = sr * REVERB_MOD_MS / 1000.0 + 4.0;
         for (i, ms) in FDN_MS.iter().enumerate() {
+            self.base_lens[i] = sr * ms / 1000.0;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let len = (sr * ms * SIZE / 1000.0) as usize + 1;
-            self.lines[i].prepare(len + 1);
-            self.lens[i] = len;
+            let max = (self.base_lens[i] * SIZE_MAX + margin) as usize + 2;
+            self.lines[i].prepare(max);
         }
+        self.wow_inc = 2.0 * PI * 0.55 / sr;
+        self.flutter_inc = 2.0 * PI * 5.3 / sr;
+        self.lfo_inc = 2.0 * PI * 0.7 / sr;
         self.delay_glide = coef(sr, 60.0);
-        self.low_cut_coef = coef(sr, 1000.0 / (2.0 * PI * 150.0));
         self.duck_env.set(sr, 10.0, 300.0);
         let s = self.settings;
         self.set(s);
@@ -579,6 +623,7 @@ impl Space {
         self.tone = [0.0; 2];
         self.low_cut = [0.0; 2];
         self.damp = [0.0; FDN];
+        self.rv_low = 0.0;
         self.duck_env.env = 0.0;
         self.delay_len = self.delay_goal;
     }
@@ -592,6 +637,15 @@ impl Space {
         // Damping: 16 kHz down to 2 kHz in the reverb lines.
         let hz = 16_000.0 * (2.0_f32 / 16.0).powf(s.damping.clamp(0.0, 1.0));
         self.damp_coef = coef(sr, 1000.0 / (2.0 * PI * hz));
+        self.low_cut_coef = coef(sr, 1000.0 / (2.0 * PI * s.delay_low_cut_hz.max(10.0)));
+        self.rv_low_coef = coef(sr, 1000.0 / (2.0 * PI * s.reverb_low_cut_hz.max(10.0)));
+        let scale = size_scale(s.reverb_size);
+        for i in 0..FDN {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                self.lens[i] = (self.base_lens[i] * scale) as usize + 1;
+            }
+        }
         let t60 = s.decay_s.max(0.1);
         for i in 0..FDN {
             #[allow(clippy::cast_precision_loss)]
@@ -652,12 +706,25 @@ impl Space {
     pub fn tick(&mut self, l: f32, r: f32, key: f32) -> (f32, f32) {
         let s = self.settings;
         let mut out = (0.0, 0.0);
+        let mut fed = 0.0;
 
         if s.delay_level > 0.0 {
             // The time glides to a new value (tape-like), no click.
             self.delay_len += (self.delay_goal - self.delay_len) * self.delay_glide;
-            let dl = self.delay[0].read_frac(self.delay_len);
-            let dr = self.delay[1].read_frac(self.delay_len);
+            let mut len = self.delay_len;
+            if s.delay_mod > 0.0 {
+                self.wow = (self.wow + self.wow_inc) % (2.0 * PI);
+                self.flutter = (self.flutter + self.flutter_inc) % (2.0 * PI);
+                let ms = WOW_MS * (1.0 + self.wow.sin()) + FLUTTER_MS * self.flutter.sin();
+                len += s.delay_mod * ms * self.sample_rate / 1000.0;
+            }
+            let len_r = if s.ping_pong {
+                len
+            } else {
+                len * (1.0 + DELAY_WIDTH * s.delay_width)
+            };
+            let dl = self.delay[0].read_frac(len);
+            let dr = self.delay[1].read_frac(len_r);
             let fb = s.feedback.clamp(0.0, 0.95);
             let (il, ir) = if s.ping_pong {
                 // The input enters left; the repeats cross sides.
@@ -676,18 +743,42 @@ impl Space {
             self.delay[1].push(push[1]);
             out.0 += dl * s.delay_level;
             out.1 += dr * s.delay_level;
+            fed = 0.5 * (dl + dr) * s.delay_level * s.delay_to_reverb;
         }
 
         if s.reverb_level > 0.0 {
-            self.predelay.push(0.5 * (l + r));
-            let mut x = self.predelay.read(self.predelay_len);
+            self.predelay.push(0.5 * (l + r) + fed);
+            let x = self.predelay.read(self.predelay_len);
+            // Low cut on the way in: no boom in the tail.
+            self.rv_low += (x - self.rv_low) * self.rv_low_coef;
+            let mut x = x - self.rv_low;
             for a in &mut self.diffuser {
                 x = a.tick(x);
             }
             let mut taps = [0.0_f32; FDN];
             let mut sum = 0.0;
+            // Slow line modulation breaks the metallic ringing.
+            let depth = s.reverb_mod * REVERB_MOD_MS * self.sample_rate / 1000.0;
+            let (sn, cs) = if depth > 0.0 {
+                self.lfo = (self.lfo + self.lfo_inc) % (2.0 * PI);
+                (self.lfo.sin() * depth, self.lfo.cos() * depth)
+            } else {
+                (0.0, 0.0)
+            };
             for i in 0..FDN {
-                let y = self.lines[i].read(self.lens[i] - 1);
+                #[allow(clippy::cast_precision_loss)]
+                let base = self.lens[i] as f32;
+                let m = match i % 4 {
+                    0 => sn,
+                    1 => cs,
+                    2 => -sn,
+                    _ => -cs,
+                };
+                let y = if depth > 0.0 {
+                    self.lines[i].read_frac(base + m + depth)
+                } else {
+                    self.lines[i].read(self.lens[i] - 1)
+                };
                 self.damp[i] += (y - self.damp[i]) * self.damp_coef;
                 taps[i] = self.damp[i] * self.gains[i];
                 sum += taps[i];
@@ -706,8 +797,9 @@ impl Space {
                 }
             }
             let g = 0.5 * s.reverb_level;
-            out.0 += wl * g;
-            out.1 += wr * g;
+            let (mid, side) = (0.5 * (wl + wr), 0.5 * (wl - wr) * s.reverb_width);
+            out.0 += (mid + side) * g;
+            out.1 += (mid - side) * g;
         }
 
         if s.duck > 0.0 {
@@ -716,6 +808,200 @@ impl Space {
             out = (out.0 * g, out.1 * g);
         }
         out
+    }
+}
+
+/// Settings of the tone stage (plain values).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneSettings {
+    /// Low cut, Hz (at [`LOW_CUT_OFF_HZ`] or below: off).
+    pub low_cut_hz: f32,
+    /// Presence (bell at 3.5 kHz) and air (shelf from 10 kHz), dB.
+    pub presence_db: f32,
+    pub air_db: f32,
+    /// Soft saturation, 0-1.
+    pub drive: f32,
+}
+
+/// Low cut setting that means "off".
+pub const LOW_CUT_OFF_HZ: f32 = 20.0;
+
+impl Default for ToneSettings {
+    fn default() -> Self {
+        Self {
+            low_cut_hz: LOW_CUT_OFF_HZ,
+            presence_db: 0.0,
+            air_db: 0.0,
+            drive: 0.0,
+        }
+    }
+}
+
+/// Input tone: low cut (before the dynamics), then presence, air and
+/// drive (after them). No latency. Real-time safe.
+#[derive(Debug, Clone, Default)]
+pub struct Tone {
+    sample_rate: f32,
+    settings: ToneSettings,
+    low: [Svf; 2],
+    presence: [Svf; 2],
+    air: [Svf; 2],
+    presence_gain: f32,
+    air_gain: f32,
+}
+
+impl Tone {
+    pub fn prepare(&mut self, sample_rate: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.sample_rate = sample_rate as f32;
+        }
+        let s = self.settings;
+        self.set(s);
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        for f in self
+            .low
+            .iter_mut()
+            .chain(self.presence.iter_mut())
+            .chain(self.air.iter_mut())
+        {
+            f.reset();
+        }
+    }
+
+    pub fn set(&mut self, s: ToneSettings) {
+        self.settings = s;
+        let sr = self.sample_rate.max(1.0);
+        for f in &mut self.low {
+            f.set(sr, s.low_cut_hz, 0.707);
+        }
+        for f in &mut self.presence {
+            f.set(sr, 3500.0, 0.8);
+        }
+        for f in &mut self.air {
+            f.set(sr, 10_000.0, 0.6);
+        }
+        self.presence_gain = from_db(s.presence_db) - 1.0;
+        self.air_gain = from_db(s.air_db) - 1.0;
+    }
+
+    /// The low cut, before the dynamics.
+    #[inline]
+    pub fn pre(&mut self, l: f32, r: f32) -> (f32, f32) {
+        if self.settings.low_cut_hz <= LOW_CUT_OFF_HZ + 0.01 {
+            return (l, r);
+        }
+        (self.low[0].tick(l).2, self.low[1].tick(r).2)
+    }
+
+    /// Presence, air and drive, after the dynamics.
+    #[inline]
+    pub fn post(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let s = self.settings;
+        let mut io = [l, r];
+        for (c, x) in io.iter_mut().enumerate() {
+            if self.presence_gain != 0.0 {
+                let (_, bp, _) = self.presence[c].tick(*x);
+                *x += self.presence_gain * self.presence[c].k * bp;
+            }
+            if self.air_gain != 0.0 {
+                let (_, _, hp) = self.air[c].tick(*x);
+                *x += self.air_gain * hp;
+            }
+            if s.drive > 0.0 {
+                // Peaks rounded off, a little make-up so the voice keeps
+                // its loudness.
+                let d = 1.0 + 7.0 * s.drive;
+                *x = (d * *x).tanh() / d * (1.0 + 0.4 * s.drive);
+            }
+        }
+        (io[0], io[1])
+    }
+}
+
+/// Settings of the chorus (plain values).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChorusSettings {
+    pub rate_hz: f32,
+    /// Depth and mix, 0-1.
+    pub depth: f32,
+    pub mix: f32,
+}
+
+impl Default for ChorusSettings {
+    fn default() -> Self {
+        Self {
+            rate_hz: 0.8,
+            depth: 0.4,
+            mix: 0.0,
+        }
+    }
+}
+
+const CHORUS_BASE_MS: f32 = 11.0;
+const CHORUS_DEPTH_MS: f32 = 6.0;
+
+/// Stereo chorus, two voices per side. The dry sound is not delayed:
+/// no latency. Real-time safe.
+#[derive(Debug, Clone, Default)]
+pub struct Chorus {
+    sample_rate: f32,
+    settings: ChorusSettings,
+    ring: [Ring; 2],
+    phase: f32,
+    inc: f32,
+}
+
+impl Chorus {
+    pub fn prepare(&mut self, sample_rate: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        let sr = sample_rate as f32;
+        self.sample_rate = sr;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let len = (sr * (CHORUS_BASE_MS + CHORUS_DEPTH_MS + 2.0) / 1000.0) as usize + 4;
+        for r in &mut self.ring {
+            r.prepare(len);
+        }
+        let s = self.settings;
+        self.set(s);
+    }
+
+    pub fn reset(&mut self) {
+        for r in &mut self.ring {
+            r.reset();
+        }
+    }
+
+    pub fn set(&mut self, s: ChorusSettings) {
+        self.settings = s;
+        self.inc = 2.0 * PI * s.rate_hz.clamp(0.05, 10.0) / self.sample_rate.max(1.0);
+    }
+
+    #[inline]
+    pub fn tick(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let s = self.settings;
+        if s.mix <= 0.0 {
+            return (l, r);
+        }
+        self.phase = (self.phase + self.inc) % (2.0 * PI);
+        let ms = self.sample_rate / 1000.0;
+        let base = CHORUS_BASE_MS * ms;
+        let depth = 0.5 * CHORUS_DEPTH_MS * ms * s.depth;
+        let (sn, cs) = (self.phase.sin(), self.phase.cos());
+        // Voices in quadrature, mirrored between the sides.
+        let taps = [[sn, -cs], [cs, -sn]];
+        let mut out = [l, r];
+        for (c, x) in [l, r].into_iter().enumerate() {
+            let wet = 0.5
+                * (self.ring[c].read_frac(base + depth * (1.0 + taps[c][0]))
+                    + self.ring[c].read_frac(base * 1.3 + depth * (1.0 + taps[c][1])));
+            self.ring[c].push(x);
+            out[c] = x * (1.0 - 0.4 * s.mix) + wet * 0.8 * s.mix;
+        }
+        (out[0], out[1])
     }
 }
 
@@ -883,5 +1169,90 @@ mod tests {
         let open = run(&mut s, 0.0);
         let ducked = run(&mut s, 1.0);
         assert!(ducked < 0.5 * open, "{ducked} vs {open}");
+    }
+
+    #[test]
+    fn neutral_tone_and_chorus_are_transparent() {
+        let mut t = Tone::default();
+        t.prepare(48_000.0);
+        let mut c = Chorus::default();
+        c.prepare(48_000.0);
+        for x in sine(48_000.0, 330.0, 4800, 0.5) {
+            let (a, b) = t.pre(x, x);
+            let (a, b) = t.post(a, b);
+            let (a, b) = c.tick(a, b);
+            assert!((a - x).abs() < 1e-6 && (b - x).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn tone_cuts_lows_and_lifts_air() {
+        let mut t = Tone::default();
+        t.prepare(48_000.0);
+        t.set(ToneSettings {
+            low_cut_hz: 200.0,
+            air_db: 6.0,
+            ..ToneSettings::default()
+        });
+        let run = |t: &mut Tone, hz: f32| {
+            t.reset();
+            let x = sine(48_000.0, hz, 24_000, 0.1);
+            let y: Vec<f32> = x
+                .iter()
+                .map(|&v| {
+                    let (a, b) = t.pre(v, v);
+                    t.post(a, b).0
+                })
+                .collect();
+            rms(&y[12_000..]) / rms(&x[12_000..])
+        };
+        assert!(run(&mut t, 50.0) < 0.1);
+        let mid = run(&mut t, 1000.0);
+        assert!((mid - 1.0).abs() < 0.1, "mid {mid}");
+        assert!(run(&mut t, 15_000.0) > 1.6);
+    }
+
+    #[test]
+    fn chorus_moves_and_keeps_level() {
+        let mut c = Chorus::default();
+        c.prepare(48_000.0);
+        c.set(ChorusSettings {
+            mix: 1.0,
+            ..ChorusSettings::default()
+        });
+        let x = sine(48_000.0, 440.0, 48_000, 0.3);
+        let y: Vec<f32> = x.iter().map(|&v| c.tick(v, v).0).collect();
+        let g = rms(&y[24_000..]) / rms(&x[24_000..]);
+        assert!(g > 0.5 && g < 1.3, "{g}");
+        assert!(y.iter().zip(&x).any(|(a, b)| (a - b).abs() > 0.01));
+    }
+
+    #[test]
+    fn modulated_reverb_of_every_size_stays_finite() {
+        let mut s = Space::default();
+        s.prepare(48_000.0);
+        for size in [0.0, 0.5, 1.0] {
+            s.set(SpaceSettings {
+                reverb_level: 1.0,
+                reverb_size: size,
+                reverb_mod: 1.0,
+                decay_s: 8.0,
+                delay_level: 1.0,
+                delay_mod: 1.0,
+                delay_width: 1.0,
+                delay_to_reverb: 1.0,
+                feedback: 0.9,
+                ..SpaceSettings::default()
+            });
+            s.reset();
+            let mut peak = 0.0_f32;
+            for i in 0..96_000 {
+                let x = if i < 4800 { 0.8 } else { 0.0 };
+                let (l, r) = s.tick(x, x, 0.0);
+                assert!(l.is_finite() && r.is_finite());
+                peak = peak.max(l.abs());
+            }
+            assert!(peak > 0.01 && peak < 8.0, "size {size}: {peak}");
+        }
     }
 }

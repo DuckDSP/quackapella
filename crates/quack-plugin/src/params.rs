@@ -1484,6 +1484,182 @@ pub struct QuackParams {
     #[param(id = 1212, name = "MIDI Out Source", default = 0)]
     pub midi_out_source: EnumParam<OutSourceParam>,
 
+    // Voice effects: a switch per effect, tone, chorus, more delay and
+    // reverb options.
+    #[param(id = 954, name = "Dynamics On", default = true)]
+    pub dynamics_on: BoolParam,
+
+    #[param(id = 955, name = "Tone On", default = true)]
+    pub tone_on: BoolParam,
+
+    #[param(id = 956, name = "Delay On", default = true)]
+    pub delay_on: BoolParam,
+
+    #[param(id = 957, name = "Reverb On", default = true)]
+    pub reverb_on: BoolParam,
+
+    #[param(id = 958, name = "Chorus On")]
+    pub chorus_on: BoolParam,
+
+    #[param(
+        id = 960,
+        name = "Low Cut",
+        range = "linear(20, 400)",
+        default = 20.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub low_cut: FloatParam,
+
+    #[param(
+        id = 961,
+        name = "Presence",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub presence: FloatParam,
+
+    #[param(
+        id = 962,
+        name = "Air",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub air: FloatParam,
+
+    #[param(
+        id = 963,
+        name = "Drive",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub drive: FloatParam,
+
+    #[param(
+        id = 970,
+        name = "Delay Mod",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_mod: FloatParam,
+
+    #[param(
+        id = 971,
+        name = "Delay Width",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_width: FloatParam,
+
+    #[param(
+        id = 972,
+        name = "Delay Low Cut",
+        range = "linear(20, 1000)",
+        default = 150.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub delay_low_cut: FloatParam,
+
+    #[param(
+        id = 975,
+        name = "Reverb Size",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub reverb_size: FloatParam,
+
+    #[param(
+        id = 976,
+        name = "Reverb Mod",
+        range = "linear(0, 100)",
+        default = 20.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub reverb_mod: FloatParam,
+
+    #[param(
+        id = 977,
+        name = "Reverb Low Cut",
+        range = "linear(20, 1000)",
+        default = 100.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub reverb_low_cut: FloatParam,
+
+    #[param(
+        id = 978,
+        name = "Reverb Width",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub reverb_width: FloatParam,
+
+    #[param(
+        id = 979,
+        name = "Delay to Reverb",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub delay_to_reverb: FloatParam,
+
+    #[param(
+        id = 985,
+        name = "Chorus Rate",
+        range = "linear(0.1, 5)",
+        default = 0.8,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub chorus_rate: FloatParam,
+
+    #[param(
+        id = 986,
+        name = "Chorus Depth",
+        range = "linear(0, 100)",
+        default = 40.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub chorus_depth: FloatParam,
+
+    #[param(
+        id = 987,
+        name = "Chorus Mix",
+        range = "linear(0, 100)",
+        default = 50.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub chorus_mix: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -1796,6 +1972,34 @@ impl QuackParams {
             ParamId::CarrierSub,
             FloatParamReadF64::value(&self.carrier_sub),
         );
+        for (id, p) in [
+            (ParamId::DynamicsOn, &self.dynamics_on),
+            (ParamId::ToneOn, &self.tone_on),
+            (ParamId::DelayOn, &self.delay_on),
+            (ParamId::ReverbOn, &self.reverb_on),
+            (ParamId::ChorusOn, &self.chorus_on),
+        ] {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
+        for (id, p) in [
+            (ParamId::LowCut, &self.low_cut),
+            (ParamId::Presence, &self.presence),
+            (ParamId::Air, &self.air),
+            (ParamId::Drive, &self.drive),
+            (ParamId::DelayMod, &self.delay_mod),
+            (ParamId::DelayWidth, &self.delay_width),
+            (ParamId::DelayLowCut, &self.delay_low_cut),
+            (ParamId::ReverbSize, &self.reverb_size),
+            (ParamId::ReverbMod, &self.reverb_mod),
+            (ParamId::ReverbLowCut, &self.reverb_low_cut),
+            (ParamId::ReverbWidth, &self.reverb_width),
+            (ParamId::DelayToReverb, &self.delay_to_reverb),
+            (ParamId::ChorusRate, &self.chorus_rate),
+            (ParamId::ChorusDepth, &self.chorus_depth),
+            (ParamId::ChorusMix, &self.chorus_mix),
+        ] {
+            v.set(id, FloatParamReadF64::value(p));
+        }
         v
     }
 

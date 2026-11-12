@@ -50,8 +50,8 @@ pub mod pitch;
 pub mod presets;
 pub mod shift;
 pub mod smooth;
-pub mod throat;
 pub mod snapshot;
+pub mod throat;
 pub mod vocoder;
 
 pub use engine::Engine;
