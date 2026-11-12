@@ -455,6 +455,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub mix: FloatParam,
@@ -501,6 +502,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub correction: FloatParam,
@@ -521,6 +523,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 20.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub humanize: FloatParam,
@@ -531,6 +534,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 80.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vibrato: FloatParam,
@@ -599,6 +603,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub formant_follow: FloatParam,
@@ -609,6 +614,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub octave_down: FloatParam,
@@ -619,6 +625,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub sub: FloatParam,
@@ -629,6 +636,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub octave_up: FloatParam,
@@ -642,6 +650,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub robot: FloatParam,
@@ -652,6 +661,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub glitch: FloatParam,
@@ -695,6 +705,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub lead: FloatParam,
@@ -705,6 +716,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 80.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_level: FloatParam,
@@ -715,6 +727,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 60.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub spread: FloatParam,
@@ -725,6 +738,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 30.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_humanize: FloatParam,
@@ -735,6 +749,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 25.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub character: FloatParam,
@@ -745,6 +760,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub expression: FloatParam,
@@ -765,6 +781,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub double: FloatParam,
@@ -791,6 +808,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 80.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vocoder_level: FloatParam,
@@ -821,6 +839,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 50.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub sibilance: FloatParam,
@@ -844,6 +863,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 5.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub carrier_noise: FloatParam,
@@ -895,6 +915,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 50.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vocoder_width: FloatParam,
@@ -905,6 +926,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub vocoder_lofi: FloatParam,
@@ -919,6 +941,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub creative_level: FloatParam,
@@ -935,6 +958,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_1_level: FloatParam,
@@ -945,6 +969,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_2_level: FloatParam,
@@ -955,6 +980,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_3_level: FloatParam,
@@ -965,6 +991,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 100.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub harmony_4_level: FloatParam,
@@ -975,6 +1002,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_1: FloatParam,
@@ -985,6 +1013,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_2: FloatParam,
@@ -995,6 +1024,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_3: FloatParam,
@@ -1005,6 +1035,7 @@ pub struct QuackParams {
         range = "linear(0, 100)",
         default = 0.0,
         unit = "%",
+        format = "fmt_percent",
         smooth = "none"
     )]
     pub macro_4: FloatParam,
@@ -1438,6 +1469,14 @@ pub struct QuackParams {
 }
 
 impl QuackParams {
+    /// Display text of the 0-100 percent parameters. truce's built-in
+    /// `%` unit expects a 0-1 range and multiplies by 100, which made
+    /// hosts show "10000%" (CLAP, VST3).
+    #[allow(clippy::unused_self)]
+    fn fmt_percent(&self, value: f64) -> String {
+        format!("{value:.0}%")
+    }
+
     /// Current host values as the engine's plain values.
     #[must_use]
     pub fn to_values(&self) -> ParamValues {

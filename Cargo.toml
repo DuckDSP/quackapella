@@ -49,3 +49,4 @@ opt-level = 1
 [patch.crates-io]
 truce-au = { path = "vendor/truce-au" }
 truce-egui = { path = "vendor/truce-egui" }
+truce-clap = { path = "vendor/truce-clap" }
