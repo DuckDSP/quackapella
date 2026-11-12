@@ -39,7 +39,18 @@ pub const EXTENSION: &str = "qkpreset";
 pub fn in_preset(id: ParamId) -> bool {
     !matches!(
         id,
-        ParamId::Bypass | ParamId::Voice | ParamId::LowLatency | ParamId::InputGain | ParamId::Key
+        ParamId::Bypass
+            | ParamId::Voice
+            | ParamId::LowLatency
+            | ParamId::InputGain
+            | ParamId::Key
+            | ParamId::Morph
+            | ParamId::MorphOn
+            | ParamId::MorphTime
+            | ParamId::SnapshotKeys
+            | ParamId::MidiOut
+            | ParamId::MidiOutChannel
+            | ParamId::MidiOutSource
     )
 }
 

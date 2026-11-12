@@ -334,6 +334,73 @@ pub enum ChainParam {
     VocoderHarmonyCreative,
 }
 
+/// Notes that recall the snapshots, in `quack_dsp::snapshot::SnapshotKeys` order.
+#[derive(ParamEnum)]
+pub enum SnapshotKeysParam {
+    #[name = "Off"]
+    Off,
+    #[name = "C-1 / C#-1"]
+    Cm1,
+    #[name = "C0 / C#0"]
+    C0,
+    #[name = "C1 / C#1"]
+    C1,
+    #[name = "C7 / C#7"]
+    C7,
+    #[name = "C8 / C#8"]
+    C8,
+}
+
+/// MIDI output channel.
+#[derive(ParamEnum)]
+pub enum ChannelParam {
+    #[name = "1"]
+    Ch1,
+    #[name = "2"]
+    Ch2,
+    #[name = "3"]
+    Ch3,
+    #[name = "4"]
+    Ch4,
+    #[name = "5"]
+    Ch5,
+    #[name = "6"]
+    Ch6,
+    #[name = "7"]
+    Ch7,
+    #[name = "8"]
+    Ch8,
+    #[name = "9"]
+    Ch9,
+    #[name = "10"]
+    Ch10,
+    #[name = "11"]
+    Ch11,
+    #[name = "12"]
+    Ch12,
+    #[name = "13"]
+    Ch13,
+    #[name = "14"]
+    Ch14,
+    #[name = "15"]
+    Ch15,
+    #[name = "16"]
+    Ch16,
+}
+
+/// What the MIDI output plays, in `quack_dsp::midiout::OutSource` order.
+#[derive(ParamEnum)]
+pub enum OutSourceParam {
+    #[name = "Sung"]
+    Sung,
+    #[name = "Sung + Bend"]
+    SungBend,
+    #[name = "Heard"]
+    Heard,
+    #[name = "Heard + Harmony"]
+    HeardHarmony,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -922,6 +989,41 @@ pub struct QuackParams {
     #[param(id = 801, name = "Chain Order", default = 0)]
     pub chain: EnumParam<ChainParam>,
 
+    #[param(
+        id = 1200,
+        name = "Morph",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub morph: FloatParam,
+
+    #[param(id = 1201, name = "Morph On")]
+    pub morph_on: BoolParam,
+
+    #[param(
+        id = 1202,
+        name = "Morph Time",
+        range = "linear(0, 4000)",
+        default = 300.0,
+        unit = "ms",
+        smooth = "none"
+    )]
+    pub morph_time: FloatParam,
+
+    #[param(id = 1203, name = "Snapshot Keys", default = 0)]
+    pub snapshot_keys: EnumParam<SnapshotKeysParam>,
+
+    #[param(id = 1210, name = "MIDI Out")]
+    pub midi_out: BoolParam,
+
+    #[param(id = 1211, name = "MIDI Out Channel", default = 0)]
+    pub midi_out_channel: EnumParam<ChannelParam>,
+
+    #[param(id = 1212, name = "MIDI Out Source", default = 0)]
+    pub midi_out_source: EnumParam<OutSourceParam>,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -1130,6 +1232,25 @@ impl QuackParams {
         {
             v.set(ParamId::Routing, self.routing.value().to_index() as f64);
             v.set(ParamId::Chain, self.chain.value().to_index() as f64);
+            v.set(ParamId::Morph, FloatParamReadF64::value(&self.morph));
+            v.set(ParamId::MorphOn, f64::from(u8::from(self.morph_on.value())));
+            v.set(
+                ParamId::MorphTime,
+                FloatParamReadF64::value(&self.morph_time),
+            );
+            v.set(
+                ParamId::SnapshotKeys,
+                self.snapshot_keys.value().to_index() as f64,
+            );
+            v.set(ParamId::MidiOut, f64::from(u8::from(self.midi_out.value())));
+            v.set(
+                ParamId::MidiOutChannel,
+                self.midi_out_channel.value().to_index() as f64,
+            );
+            v.set(
+                ParamId::MidiOutSource,
+                self.midi_out_source.value().to_index() as f64,
+            );
         }
         v
     }

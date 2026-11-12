@@ -4,20 +4,26 @@
 //! - hand MIDI notes to the engine at their sample offsets;
 //! - copy host buffers into preallocated stereo scratch and back;
 //! - forward lifecycle (sample rate, latency) and publish what the
-//!   editor shows.
+//!   editor shows;
+//! - drive the snapshot morph (it writes parameters) and send the
+//!   MIDI output (host port, and a virtual source on macOS).
 //!
 //! No DSP and no smoothing here: both belong to `quack-dsp`.
 
 use std::sync::Arc;
 
 use quack_dsp::Engine;
+use quack_dsp::ParamId;
+use quack_dsp::midiout::{MidiBuf, OutSource, Reading, Tracker};
 use quack_dsp::params::ParamValues;
+use quack_dsp::snapshot::{Glide, SnapshotKeys, in_snapshot, morph_value};
 use truce::prelude::*;
 use truce_core::events::EventBody;
 
 mod editor;
 pub mod params;
 pub mod shared;
+pub mod vport;
 
 pub use params::{ModeParam, QuackParams};
 
@@ -43,6 +49,23 @@ pub struct QuackDsp {
     /// Side-chain input (the vocoder's external carrier).
     sc_left: Box<[f32; SCRATCH_FRAMES]>,
     sc_right: Box<[f32; SCRATCH_FRAMES]>,
+    sample_rate: f64,
+    morph: Morph,
+    tracker: Tracker,
+    midi: MidiBuf,
+    midi_on: bool,
+    vport: vport::VirtualPort,
+}
+
+/// Where the morph stands (see `quack_dsp::snapshot`).
+#[derive(Debug, Default)]
+struct Morph {
+    /// Morph value last written to the parameters (`None`: write on the
+    /// next block).
+    last: Option<f64>,
+    /// Snapshot generation that was written.
+    generation: u32,
+    glide: Option<Glide>,
 }
 
 impl Default for QuackDsp {
@@ -55,6 +78,12 @@ impl Default for QuackDsp {
             right: Box::new([0.0; SCRATCH_FRAMES]),
             sc_left: Box::new([0.0; SCRATCH_FRAMES]),
             sc_right: Box::new([0.0; SCRATCH_FRAMES]),
+            sample_rate: 48_000.0,
+            morph: Morph::default(),
+            tracker: Tracker::default(),
+            midi: MidiBuf::default(),
+            midi_on: false,
+            vport: vport::VirtualPort::default(),
         }
     }
 }
@@ -70,10 +99,108 @@ impl QuackDsp {
         }
     }
 
+    /// Go to snapshot `slot`: glide the morph there with Morph On,
+    /// recall it at once otherwise.
+    fn go_to(&mut self, slot: usize, params: &QuackParams) {
+        let v = params.to_values();
+        if v.get(ParamId::MorphOn) >= 0.5 {
+            let from = v.get(ParamId::Morph);
+            let to = if slot == 0 { 0.0 } else { 100.0 };
+            let samples = v.get(ParamId::MorphTime) * 1e-3 * self.sample_rate;
+            self.morph.glide = Some(Glide::new(from, to, samples));
+        } else if let Some(snap) = params.control.snapshot(slot) {
+            for id in ParamId::ALL {
+                if in_snapshot(id) {
+                    set_plain(params, id, snap.get(id));
+                }
+            }
+        }
+    }
+
+    /// Once per block, before the engine reads the values: advance a
+    /// glide, and write the morphed parameters when the morph moved.
+    fn update_morph(&mut self, params: &QuackParams, frames: usize) {
+        if let Some(slot) = params.control.take_snapshot_request() {
+            self.go_to(slot, params);
+        }
+        if params.to_values().get(ParamId::MorphOn) < 0.5 {
+            self.morph = Morph::default();
+            return;
+        }
+        if let Some(g) = &mut self.morph.glide {
+            set_plain(params, ParamId::Morph, g.advance(frames));
+            if g.done() {
+                self.morph.glide = None;
+            }
+        }
+        // The macros may move the morph too.
+        let m = params.engine_values().get(ParamId::Morph);
+        let generation = params.control.snapshot_gen();
+        if self.morph.last == Some(m) && self.morph.generation == generation {
+            return;
+        }
+        self.morph.last = Some(m);
+        self.morph.generation = generation;
+        let (Some(a), Some(b)) = (params.control.snapshot(0), params.control.snapshot(1)) else {
+            return;
+        };
+        for id in ParamId::ALL {
+            if in_snapshot(id) && a.get(id) != b.get(id) {
+                set_plain(params, id, morph_value(id, &a, &b, m / 100.0));
+            }
+        }
+    }
+
+    /// After the audio: the MIDI output of this block.
+    fn update_midi_out(&mut self, v: &ParamValues, peak: f32, frames: usize) {
+        self.midi.clear();
+        let on = v.get(ParamId::MidiOut) >= 0.5;
+        if on {
+            let pitch = self.engine.pitch();
+            let tune = self.engine.tune();
+            #[allow(clippy::cast_possible_truncation)]
+            let reading = Reading {
+                sung: pitch.map(|p| p.note()),
+                target: tune.map(|t| t.target),
+                transpose: (v.get(ParamId::Pitch) + v.get(ParamId::Fine) / 100.0) as f32,
+                harmony: self.engine.harmony_notes(),
+                peak,
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let channel = v.get(ParamId::MidiOutChannel) as u8;
+            self.tracker.update(
+                &reading,
+                OutSource::from_index(v.get(ParamId::MidiOutSource)),
+                channel,
+                frames,
+                &mut self.midi,
+            );
+        } else if self.midi_on {
+            self.tracker.all_off(&mut self.midi);
+        }
+        for m in self.midi.as_slice() {
+            self.vport.send(*m);
+        }
+        // Switch the virtual source after the last note-offs went out.
+        self.vport.set_enabled(on);
+        self.midi_on = on;
+    }
+
     /// Apply one MIDI event. Returns whether it moved parameters (a
     /// learned CC or a program change): the caller re-reads them.
     fn handle(&mut self, body: &EventBody, params: &QuackParams) -> bool {
+        let keys = SnapshotKeys::from_index(params.to_values().get(ParamId::SnapshotKeys));
         match *body {
+            // The snapshot notes go no further.
+            EventBody::NoteOn { note, velocity, .. } if keys.slot(note).is_some() => {
+                if velocity > 0
+                    && let Some(slot) = keys.slot(note)
+                {
+                    self.go_to(slot, params);
+                    return true;
+                }
+            }
+            EventBody::NoteOff { note, .. } if keys.slot(note).is_some() => {}
             EventBody::NoteOn {
                 channel,
                 note,
@@ -149,6 +276,38 @@ impl QuackDsp {
     }
 }
 
+/// Write a plain value to a host parameter (from the audio thread, as
+/// MIDI learn does).
+fn set_plain(params: &QuackParams, id: ParamId, plain: f64) {
+    let spec = id.spec();
+    params.set_normalized(spec.host_id, spec.kind.normalize(plain));
+}
+
+/// A MIDI-out message as a host event.
+fn to_event(m: quack_dsp::midiout::Msg) -> Option<EventBody> {
+    let channel = m.status & 15;
+    Some(match m.status & 0xF0 {
+        0x90 => EventBody::NoteOn {
+            group: 0,
+            channel,
+            note: m.data1,
+            velocity: m.data2,
+        },
+        0x80 => EventBody::NoteOff {
+            group: 0,
+            channel,
+            note: m.data1,
+            velocity: m.data2,
+        },
+        0xE0 => EventBody::PitchBend {
+            group: 0,
+            channel,
+            value: u16::from(m.data1) | u16::from(m.data2) << 7,
+        },
+        _ => return None,
+    })
+}
+
 pub struct Quackapella;
 
 impl PluginLogic for Quackapella {
@@ -169,6 +328,12 @@ impl PluginLogic for Quackapella {
             .engine
             .prepare(config.sample_rate, config.max_block_size.max(1));
         state.needs_snap = true;
+        state.sample_rate = config.sample_rate;
+        state.tracker = Tracker::default();
+        state.tracker.set_sample_rate(config.sample_rate);
+        state.midi_on = false;
+        state.morph = Morph::default();
+        state.vport.start();
         #[allow(clippy::cast_possible_truncation)]
         params
             .shared
@@ -194,6 +359,8 @@ impl PluginLogic for Quackapella {
         state
             .engine
             .set_transport(t.tempo, bar, t.playing.then_some(t.position_beats));
+        let total = buffer.num_samples();
+        state.update_morph(params, total);
         // Host values once per (sub-)block: truce splits blocks at
         // sample-accurate parameter events, the engine ramps from here.
         let target = params.engine_values();
@@ -206,7 +373,6 @@ impl PluginLogic for Quackapella {
         }
 
         let (ins, outs) = (buffer.num_input_channels(), buffer.num_output_channels());
-        let total = buffer.num_samples();
         if ins == 0 || outs == 0 {
             for e in events.iter() {
                 if state.handle(&e.body, params) {
@@ -215,6 +381,9 @@ impl PluginLogic for Quackapella {
             }
             return ProcessStatus::Normal;
         }
+        let peak = buffer.input(0)[..total]
+            .iter()
+            .fold(0.0_f32, |m, x| m.max(x.abs()));
         // MIDI at its sample offset: run up to each event, then apply it.
         let mut pos = 0;
         for e in events.iter() {
@@ -230,6 +399,19 @@ impl PluginLogic for Quackapella {
         if pos < total {
             state.run(buffer, pos, total - pos);
         }
+        state.update_midi_out(&params.engine_values(), peak, total);
+        #[allow(clippy::cast_possible_truncation)]
+        let at = total.saturating_sub(1) as u32;
+        for m in state.midi.as_slice() {
+            if let Some(body) = to_event(*m) {
+                context.output_events.push(Event {
+                    sample_offset: at,
+                    port: 0,
+                    body,
+                });
+            }
+        }
+        params.shared.publish_midi_out(state.tracker.sounding());
         params.shared.publish_notes(state.engine.notes().mask());
         #[allow(clippy::cast_possible_truncation)]
         params

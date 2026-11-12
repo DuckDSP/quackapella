@@ -28,6 +28,8 @@
 //! | [`denormal`] | Flush-to-zero while processing [9] |
 //! | [`control`] | Macros, MIDI learn, program changes [8] |
 //! | [`presets`] | Factory library and preset files [8] |
+//! | [`snapshot`] | Snapshots A/B and the morph between them |
+//! | [`midiout`] | Sung notes as MIDI output |
 
 pub mod autotune;
 pub mod chain;
@@ -38,12 +40,14 @@ pub mod engine;
 pub mod harmony;
 pub mod latency;
 pub mod midi;
+pub mod midiout;
 pub mod mode;
 pub mod params;
 pub mod pitch;
 pub mod presets;
 pub mod shift;
 pub mod smooth;
+pub mod snapshot;
 pub mod vocoder;
 
 pub use engine::Engine;

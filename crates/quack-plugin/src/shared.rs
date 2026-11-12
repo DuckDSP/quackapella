@@ -26,6 +26,9 @@ pub struct Shared {
     /// Notes the vocoder's carrier plays (Synth mode).
     vocoder_lo: AtomicU64,
     vocoder_hi: AtomicU64,
+    /// Notes the MIDI output plays.
+    midi_out_lo: AtomicU64,
+    midi_out_hi: AtomicU64,
 }
 
 impl Shared {
@@ -65,6 +68,13 @@ impl Shared {
             .store((mask >> 64) as u64, Ordering::Relaxed);
     }
 
+    pub fn publish_midi_out(&self, mask: u128) {
+        #[allow(clippy::cast_possible_truncation)]
+        self.midi_out_lo.store(mask as u64, Ordering::Relaxed);
+        self.midi_out_hi
+            .store((mask >> 64) as u64, Ordering::Relaxed);
+    }
+
     pub fn publish_frozen(&self, frozen: bool) {
         self.frozen.store(frozen, Ordering::Relaxed);
     }
@@ -99,6 +109,8 @@ impl Shared {
                 | (u128::from(self.harmony_hi.load(Ordering::Relaxed)) << 64),
             vocoder_notes: u128::from(self.vocoder_lo.load(Ordering::Relaxed))
                 | (u128::from(self.vocoder_hi.load(Ordering::Relaxed)) << 64),
+            midi_out_notes: u128::from(self.midi_out_lo.load(Ordering::Relaxed))
+                | (u128::from(self.midi_out_hi.load(Ordering::Relaxed)) << 64),
         }
     }
 }

@@ -270,7 +270,7 @@ pub(crate) fn fader(
         p,
         vpos,
         valign,
-        &format!("{:.0} %", params.get_plain(id)),
+        &format!("{:.0} {}", params.get_plain(id), id.spec().unit),
         size::CAPTION + 1.0,
         color::TEXT,
     );

@@ -43,7 +43,7 @@ use theme::{color, radius, size, space};
 /// Editor size in points at 100 % zoom (the zoom scales it, with the
 /// AUv2 resize patch in `vendor/`).
 pub const BASE_W: u32 = 1040;
-pub const BASE_H: u32 = 820;
+pub const BASE_H: u32 = 904;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -90,6 +90,8 @@ pub struct View {
     pub harmony_notes: u128,
     /// Notes the vocoder's carrier plays, bit n = note n.
     pub vocoder_notes: u128,
+    /// Notes the MIDI output plays, bit n = note n.
+    pub midi_out_notes: u128,
 }
 
 /// Seconds of pitch history in the graph.
@@ -121,6 +123,13 @@ pub struct UiState {
     page: Page,
     /// Preset browser, values of this frame.
     presets: perform::PresetUi,
+    /// Perform row lists open, and where they hang from.
+    keys_menu: bool,
+    channel_menu: bool,
+    source_menu: bool,
+    keys_rect: egui::Rect,
+    channel_rect: egui::Rect,
+    source_rect: egui::Rect,
 }
 
 impl Default for UiState {
@@ -133,6 +142,12 @@ impl Default for UiState {
             scale_menu: false,
             page: Page::Voice,
             presets: perform::PresetUi::default(),
+            keys_menu: false,
+            channel_menu: false,
+            source_menu: false,
+            keys_rect: egui::Rect::NOTHING,
+            channel_rect: egui::Rect::NOTHING,
+            source_rect: egui::Rect::NOTHING,
         }
     }
 }
@@ -331,7 +346,8 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     let row_top = tune_r.bottom() + space::M;
     let foot_h = 26.0;
     let macro_h = 92.0;
-    let row_h = inner.bottom() - foot_h - macro_h - space::M - row_top;
+    let perform_h = 72.0;
+    let row_h = inner.bottom() - foot_h - macro_h - perform_h - 2.0 * space::M - row_top;
     let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(452.0, row_h));
     voice_panel(ui, params, st, voice_r, accent);
     let level_r = Rect::from_min_size(
@@ -403,12 +419,27 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     );
     keyboard(&p, kb, view.held_notes, accent);
 
+    // Perform row: snapshots and morph under the voice and level,
+    // MIDI out under MIDI in.
+    let perform_top = midi_r.bottom() + space::M;
+    let snap_r = Rect::from_min_max(
+        pos2(inner.left(), perform_top),
+        pos2(level_r.right(), perform_top + perform_h),
+    );
+    perform::snapshot_panel(ui, params, st, snap_r);
+    let out_r = Rect::from_min_max(
+        pos2(midi_r.left(), perform_top),
+        pos2(inner.right(), perform_top + perform_h),
+    );
+    perform::midi_out_panel(ui, params, st, view, out_r, accent);
+
     // Macros, program change, zoom.
     let macro_r = Rect::from_min_size(
-        pos2(inner.left(), midi_r.bottom() + space::M),
+        pos2(inner.left(), out_r.bottom() + space::M),
         vec2(inner.width(), macro_h),
     );
     perform::macro_panel(ui, params, st, macro_r, accent);
+    perform::perform_menus(ui, params, st, accent);
 
     // Footer: the DuckDSP mark.
     let mark_h = 14.0;
@@ -1916,6 +1947,7 @@ mod tests {
                 frozen: mode == 2,
                 harmony_notes: if mode == 3 { 1 << 64 } else { 0 },
                 vocoder_notes: 0,
+                midi_out_notes: 0,
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));
