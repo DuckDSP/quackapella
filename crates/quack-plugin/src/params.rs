@@ -310,6 +310,30 @@ pub enum GlitchModeParam {
     Tape,
 }
 
+#[derive(ParamEnum)]
+pub enum RoutingParam {
+    #[name = "Parallel"]
+    Parallel,
+    #[name = "Series"]
+    Series,
+}
+
+#[derive(ParamEnum)]
+pub enum ChainParam {
+    #[name = "Creative > Harmony > Vocoder"]
+    CreativeHarmonyVocoder,
+    #[name = "Harmony > Creative > Vocoder"]
+    HarmonyCreativeVocoder,
+    #[name = "Creative > Vocoder > Harmony"]
+    CreativeVocoderHarmony,
+    #[name = "Harmony > Vocoder > Creative"]
+    HarmonyVocoderCreative,
+    #[name = "Vocoder > Creative > Harmony"]
+    VocoderCreativeHarmony,
+    #[name = "Vocoder > Harmony > Creative"]
+    VocoderHarmonyCreative,
+}
+
 #[derive(Params)]
 pub struct QuackParams {
     #[param(
@@ -892,6 +916,12 @@ pub struct QuackParams {
     )]
     pub macro_4: FloatParam,
 
+    #[param(id = 800, name = "Routing", default = 0)]
+    pub routing: EnumParam<RoutingParam>,
+
+    #[param(id = 801, name = "Chain Order", default = 0)]
+    pub chain: EnumParam<ChainParam>,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -1095,6 +1125,11 @@ impl QuackParams {
             &self.macro_4,
         ]) {
             v.set(id, FloatParamReadF64::value(p));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            v.set(ParamId::Routing, self.routing.value().to_index() as f64);
+            v.set(ParamId::Chain, self.chain.value().to_index() as f64);
         }
         v
     }

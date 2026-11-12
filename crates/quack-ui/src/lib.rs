@@ -27,6 +27,7 @@ pub mod theme;
 
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::autotune::{Scale, Source, scale_mask};
+use quack_dsp::chain::{Chain, Routing, Stage};
 use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
 use quack_dsp::harmony::{
     HarmonyMode, interval_degree, interval_quality, interval_semitones, interval_short,
@@ -485,13 +486,26 @@ fn layers_panel(
     let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
     controls::segmented(ui, params, ParamId::Mode, style_r, &names, &accents);
 
-    // Layer cells.
-    let left = r.left() + space::L;
+    // Routing (parallel or series), then the layer cells, in chain
+    // order in series with a chevron between them (click: swap).
+    let routing_w = 84.0;
+    let route_x = r.left() + space::L;
+    routing_switch(
+        ui,
+        params,
+        pos2(route_x, row1),
+        routing_w,
+        row2 + 28.0 - row1,
+    );
+    let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
+    let chain = Chain::from_index(params.get_plain(ParamId::Chain));
+    let order = layer_order(series, chain);
+    let left = route_x + routing_w + space::M;
     let right = low_r.left() - space::XL;
-    let gap = space::S;
+    let gap = 18.0;
     #[allow(clippy::cast_precision_loss)]
-    let w = (right - left - gap * (Page::ALL.len() - 1) as f32) / Page::ALL.len() as f32;
-    for (i, page) in Page::ALL.into_iter().enumerate() {
+    let w = (right - left - gap * (order.len() - 1) as f32) / order.len() as f32;
+    for (i, page) in order.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let x = left + (w + gap) * i as f32;
         let acc = page_accent(page, style);
@@ -509,6 +523,132 @@ fn layers_panel(
             if on { acc } else { acc.gamma_multiply(0.35) },
             label,
         );
+        if series && i > 0 {
+            let g = Rect::from_min_size(pos2(x - gap, row1), vec2(gap, row2 + 28.0 - row1));
+            chain_link(ui, params, g, chain, i - 1);
+        }
+    }
+}
+
+/// The layers in the order they play: parallel, the fixed order; in
+/// series, the voice then the chain.
+fn layer_order(series: bool, chain: Chain) -> [Page; 4] {
+    if !series {
+        return Page::ALL;
+    }
+    let page = |s: Stage| match s {
+        Stage::Creative => Page::Creative,
+        Stage::Harmony => Page::Harmony,
+        Stage::Vocoder => Page::Vocoder,
+    };
+    [
+        Page::Voice,
+        page(chain.0[0]),
+        page(chain.0[1]),
+        page(chain.0[2]),
+    ]
+}
+
+/// Parallel / Series, stacked.
+fn routing_switch(ui: &egui::Ui, params: &dyn ParamAccess, at: egui::Pos2, w: f32, h: f32) {
+    let p = ui.painter();
+    let r = Rect::from_min_size(at, vec2(w, h));
+    paint::rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lit = params.get_plain(ParamId::Routing).round() as usize;
+    for (i, routing) in Routing::ALL.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let seg = Rect::from_min_size(
+            pos2(r.left(), r.top() + h / 2.0 * i as f32),
+            vec2(w, h / 2.0),
+        );
+        let resp = ui.interact(seg, ui.id().with(("quack-routing", i)), Sense::click());
+        if resp.clicked() && i != lit {
+            #[allow(clippy::cast_precision_loss)]
+            set_once(params, ParamId::Routing, i as f64);
+        }
+        crate::perform::attach(ui, &resp, params, ParamId::Routing);
+        let resp = resp.on_hover_text(match routing {
+            Routing::Parallel => "Every layer is built from the voice, then mixed",
+            Routing::Series => "Each module processes what comes before it",
+        });
+        if i == lit {
+            paint::rounded(
+                p,
+                seg.shrink(2.0),
+                radius::CONTROL - 1,
+                color::QUACK.gamma_multiply(0.22),
+                color::QUACK.gamma_multiply(0.8),
+            );
+        } else if resp.hovered() {
+            paint::rounded(
+                p,
+                seg.shrink(2.0),
+                radius::CONTROL - 1,
+                color::RAISED,
+                color::RAISED,
+            );
+        }
+        let c = if i == lit {
+            color::QUACK
+        } else {
+            color::TEXT_DIM
+        };
+        text(
+            p,
+            seg.center(),
+            Align2::CENTER_CENTER,
+            routing.name(),
+            size::CAPTION,
+            c,
+        );
+    }
+}
+
+/// The chevron between two layers in series. Between two modules it
+/// swaps them (`slot`: the first one's place in the chain); after the
+/// voice it only shows the direction.
+fn chain_link(ui: &egui::Ui, params: &dyn ParamAccess, r: Rect, chain: Chain, slot: usize) {
+    let p = ui.painter();
+    let swappable = slot > 0;
+    let hovered = if swappable {
+        let resp = ui
+            .interact(r, ui.id().with(("quack-chain", slot)), Sense::click())
+            .on_hover_text("Swap these two modules");
+        if resp.clicked() {
+            #[allow(clippy::cast_precision_loss)]
+            set_once(
+                params,
+                ParamId::Chain,
+                chain.swapped(slot - 1).index() as f64,
+            );
+        }
+        resp.hovered()
+    } else {
+        false
+    };
+    let c = if hovered {
+        color::QUACK
+    } else {
+        color::TEXT_FAINT
+    };
+    let mid = r.center();
+    let a = 4.0;
+    let stroke = egui::Stroke::new(if hovered { 2.0_f32 } else { 1.5 }, c);
+    for dy in [-19.0, 19.0] {
+        let y = mid.y + dy;
+        p.line_segment(
+            [pos2(mid.x - a / 2.0, y - a), pos2(mid.x + a / 2.0, y)],
+            stroke,
+        );
+        p.line_segment(
+            [pos2(mid.x + a / 2.0, y), pos2(mid.x - a / 2.0, y + a)],
+            stroke,
+        );
+    }
+    if swappable && hovered {
+        // Arrows both ways: a swap.
+        p.line_segment([pos2(mid.x - 5.0, mid.y), pos2(mid.x + 5.0, mid.y)], stroke);
     }
 }
 

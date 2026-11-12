@@ -50,6 +50,11 @@ pub const MAX_BANDS: usize = 32;
 pub const BAND_CHOICES: [usize; 4] = [8, 16, 24, 32];
 /// Carrier synth polyphony.
 pub const CARRIER_VOICES: usize = 8;
+/// Extra notes the carrier can play besides the keyboard and Follow
+/// (the harmony notes, when the harmonies come after the vocoder).
+pub const EXTRA_NOTES: usize = 4;
+/// Slots of the extra notes among the Follow voices (past any chord).
+const EXTRA_SLOT: usize = 16;
 /// Oscillators per carrier voice (the supersaw uses them all).
 const OSCS: usize = 5;
 /// Lowest and highest band centres (Hz).
@@ -495,6 +500,8 @@ pub struct Vocoder {
     out_delay: DelayLine,
     latency: usize,
     level: f64,
+    /// Extra carrier notes (see [`Vocoder::set_extra_notes`]).
+    extra: [Option<f64>; EXTRA_NOTES],
 }
 
 impl Default for Vocoder {
@@ -537,6 +544,7 @@ impl Default for Vocoder {
             glide_coef: 0.0,
             notes: NoteStack::default(),
             follow_note: None,
+            extra: [None; EXTRA_NOTES],
             bend: 0.0,
             detune_key: f64::NAN,
             detune_ratio: [1.0; OSCS],
@@ -765,9 +773,60 @@ impl Vocoder {
         // The Follow voice gives way to the keyboard.
         if !notes.held().is_empty() {
             for v in &mut self.voices {
-                if v.follow {
+                if v.follow && v.slot < EXTRA_SLOT {
                     v.held = false;
                 }
+            }
+        }
+    }
+
+    /// Extra notes for the carrier, played like Follow voices (MIDI
+    /// note numbers, fractional; `None` = silent). Notes the keyboard
+    /// already plays are skipped. Real-time safe, per sample.
+    pub fn set_extra_notes(&mut self, notes: [Option<f64>; EXTRA_NOTES]) {
+        self.extra = notes;
+    }
+
+    fn extra_voices(&mut self) {
+        let octave = 12.0 * f64::from(self.settings.octave);
+        for k in 0..EXTRA_NOTES {
+            let slot = EXTRA_SLOT + k;
+            let note = self.extra[k].filter(|n| {
+                !self
+                    .notes
+                    .held()
+                    .iter()
+                    .any(|h| (f64::from(h.note) - n).abs() < 0.5)
+            });
+            let at = self
+                .voices
+                .iter()
+                .position(|v| v.follow && v.held && v.slot == slot && v.note.is_some());
+            match (note, at) {
+                (Some(n), Some(i)) => {
+                    let v = &mut self.voices[i];
+                    v.note = Some(n);
+                    v.target_hz = note_hz(n + octave);
+                }
+                (Some(n), None) => {
+                    self.clock += 1;
+                    let i = self.free_voice();
+                    let hz = note_hz(n + octave);
+                    self.voices[i] = Voice {
+                        note: Some(n),
+                        held: true,
+                        follow: true,
+                        slot,
+                        hz,
+                        target_hz: hz,
+                        gain: 0.0,
+                        peak: 0.6,
+                        phase: self.voices[i].phase,
+                        age: self.clock,
+                    };
+                }
+                (None, Some(i)) => self.voices[i].held = false,
+                (None, None) => {}
             }
         }
     }
@@ -912,11 +971,12 @@ impl Vocoder {
         } else {
             self.follow_note = None;
             for v in &mut self.voices {
-                if v.follow {
+                if v.follow && v.slot < EXTRA_SLOT {
                     v.held = false;
                 }
             }
         }
+        self.extra_voices();
         let sr = self.sample_rate;
         let detune = s.detune_cents / 1200.0;
         let oscs = match s.carrier {

@@ -27,6 +27,7 @@
 //! down, a layer is heard alone.
 
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
+use crate::chain::{Chain, Routing, Stage, crossfade};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
 use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
@@ -35,7 +36,7 @@ use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
 use crate::params::{NOTE_PARAMS, ParamId, ParamValues};
 use crate::pitch::{PitchDetector, PitchEstimate, Yin};
-use crate::shift::{LAYERS, Psola, semitones_to_ratio};
+use crate::shift::{Buses, LAYERS, Psola, semitones_to_ratio};
 
 /// Fastest retune in the Natural mode: below it the correction is
 /// heard as an effect, which is the Tune mode's job.
@@ -97,6 +98,9 @@ pub struct Engine {
     vocoder: Vocoder,
     vocoder_level: Ramp,
     double: Ramp,
+    /// Layer routing and, in series, the order of the modules.
+    routing: Routing,
+    chain: Chain,
 }
 
 impl Default for Engine {
@@ -141,6 +145,8 @@ impl Engine {
             vocoder: Vocoder::default(),
             vocoder_level: Ramp::new(0.0),
             double: Ramp::new(0.0),
+            routing: Routing::Parallel,
+            chain: Chain::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -210,9 +216,19 @@ impl Engine {
         }
         self.gate_delay.set_delay(latency);
         self.shifter.set_latency(latency);
-        self.vocoder.set_latency(latency);
+        self.vocoder.set_latency(self.vocoder_latency());
         self.shifter.reset();
         self.prime_gate();
+    }
+
+    /// The vocoder's output alignment: in parallel it lines up with the
+    /// engine's latency; in series its modulator (the chain so far) is
+    /// already that late.
+    fn vocoder_latency(&self) -> usize {
+        match self.routing {
+            Routing::Parallel => self.latency,
+            Routing::Series => 0,
+        }
     }
 
     /// Clears audio state (transport jump, host reset). Real-time safe.
@@ -380,6 +396,25 @@ impl Engine {
             | ParamId::VocoderWidth
             | ParamId::VocoderLofi => {
                 self.update_vocoder(snap);
+                return;
+            }
+            ParamId::Routing | ParamId::Chain => {
+                let routing = Routing::from_index(f64::from(v));
+                let routing = if id == ParamId::Routing {
+                    routing
+                } else {
+                    self.routing
+                };
+                if id == ParamId::Chain {
+                    self.chain = Chain::from_index(f64::from(v));
+                }
+                if routing != self.routing {
+                    // The vocoder's input moves: start it clean.
+                    self.routing = routing;
+                    self.vocoder.set_latency(self.vocoder_latency());
+                    self.vocoder.reset();
+                    self.glitch.reset();
+                }
                 return;
             }
             ParamId::Voice => {
@@ -740,7 +775,6 @@ impl Engine {
     ) {
         debug_assert_eq!(left.len(), right.len());
         let _ftz = crate::denormal::NoDenormals::new();
-        let [dl, dr] = &mut self.dry;
         #[allow(clippy::cast_possible_truncation)]
         let sr = self.sample_rate as f32;
         for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
@@ -759,7 +793,7 @@ impl Engine {
             let (in_l, in_r) = (*l * g_in, *r * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
-            let (dry_l, dry_r) = (dl.tick(*l), dr.tick(*r));
+            let (dry_l, dry_r) = (self.dry[0].tick(*l), self.dry[1].tick(*r));
             let g_out = g_out * self.gate_delay.tick(self.gate.tick());
             self.shifter.set_layers([
                 self.layers[0].tick(),
@@ -789,38 +823,93 @@ impl Engine {
             let buses = self
                 .shifter
                 .tick_buses(in_l, in_r, period, &mut steer, formant);
-            // The glitch cuts the creative layer only.
-            let [cl, cr] = buses.creative;
-            let (cl, cr) = self.glitch.tick(cl, cr);
-            let wet_l = buses.lead[0] + buses.harmony[0] + cl * creative_level;
-            let wet_r = buses.lead[1] + buses.harmony[1] + cr * creative_level;
-            // Vocoder or talkbox, on top of the lead and harmonies.
             let voc_level = self.vocoder_level.tick();
-            let (wet_l, wet_r) =
-                if voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off {
-                    let sc = sidechain.map_or(0.0, |(a, b)| {
-                        0.5 * sanitize(
-                            a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0),
-                        )
-                    });
-                    let follow = self
-                        .retuner
-                        .reading()
-                        .map(|t| t.out)
-                        .or_else(|| self.detector.estimate().map(|e| e.note()))
-                        .map(|n| f64::from(n + transpose));
-                    let dry = 0.5 * (dry_l + dry_r) * g_in;
-                    let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
-                    let (vl, vr) = self.vocoder.widen(v);
-                    (wet_l + vl, wet_r + vr)
-                } else {
-                    (wet_l, wet_r)
-                };
+            let vocoding = voc_level > 0.0 || self.vocoder.settings.mode != VocoderMode::Off;
+            let sc = sidechain.map_or(0.0, |(a, b)| {
+                0.5 * sanitize(a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0))
+            });
+            let follow = self
+                .retuner
+                .reading()
+                .map(|t| t.out)
+                .or_else(|| self.detector.estimate().map(|e| e.note()))
+                .map(|n| f64::from(n + transpose));
+            let (wet_l, wet_r) = match self.routing {
+                Routing::Parallel => {
+                    // The glitch cuts the creative layer only.
+                    let [cl, cr] = buses.creative;
+                    let (cl, cr) = self.glitch.tick(cl, cr);
+                    let wet_l = buses.lead[0] + buses.harmony[0] + cl * creative_level;
+                    let wet_r = buses.lead[1] + buses.harmony[1] + cr * creative_level;
+                    // Vocoder or talkbox, on top of the lead and harmonies.
+                    if vocoding {
+                        let dry = 0.5 * (dry_l + dry_r) * g_in;
+                        let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
+                        let (vl, vr) = self.vocoder.widen(v);
+                        (wet_l + vl, wet_r + vr)
+                    } else {
+                        (wet_l, wet_r)
+                    }
+                }
+                Routing::Series => {
+                    self.series(&buses, creative_level, voc_level, vocoding, sc, follow)
+                }
+            };
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
             *r = out_r + (dry_r - out_r) * byp;
         }
+    }
+
+    /// One sample of the series chain (see [`crate::chain`]): the
+    /// voice and Creative's pitch layers at the source, then each module
+    /// on what the previous ones made.
+    fn series(
+        &mut self,
+        buses: &Buses,
+        creative_level: f32,
+        voc_level: f32,
+        vocoding: bool,
+        sidechain: f32,
+        follow: Option<f64>,
+    ) -> (f32, f32) {
+        let [cl, cr] = buses.creative;
+        let mut s = (
+            buses.lead[0] + cl * creative_level,
+            buses.lead[1] + cr * creative_level,
+        );
+        // Harmonies after the vocoder: its internal carrier sings them
+        // (the vocoder's pitch is its carrier's), and what passes by the
+        // vocoder gets them as they are.
+        let carried = vocoding
+            && self.vocoder.settings.carrier != Carrier::Sidechain
+            && self.chain.before(Stage::Vocoder, Stage::Harmony);
+        self.vocoder.set_extra_notes(if carried {
+            self.harmony.sung_notes()
+        } else {
+            [None; crate::vocoder::EXTRA_NOTES]
+        });
+        let mut pass = 1.0;
+        for stage in self.chain.0 {
+            match stage {
+                Stage::Creative => s = self.glitch.tick(s.0, s.1),
+                Stage::Harmony => {
+                    let g = if carried { pass } else { 1.0 };
+                    s = (s.0 + buses.harmony[0] * g, s.1 + buses.harmony[1] * g);
+                }
+                Stage::Vocoder if vocoding => {
+                    let m = 0.5 * (s.0 + s.1);
+                    let v = self.vocoder.tick(m, m, sidechain, follow);
+                    let (vl, vr) = self.vocoder.widen(v);
+                    let (d, w) = crossfade(voc_level);
+                    pass = d;
+                    s = (s.0 * d + vl * w, s.1 * d + vr * w);
+                }
+                Stage::Vocoder => {}
+            }
+        }
+        s
     }
 }
 
@@ -1177,6 +1266,77 @@ mod tests {
         let mut e = Engine::new();
         e.set_all(&v, true);
         assert_eq!(e.harmony.settings.mode, HarmonyMode::Off);
+    }
+
+    /// A sung A3 (220 Hz), half a second.
+    fn vowel() -> Vec<f32> {
+        #[allow(clippy::cast_precision_loss)]
+        (0..24_000)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin())
+            .collect()
+    }
+
+    #[test]
+    fn series_without_modules_is_the_parallel_voice() {
+        let x = vowel();
+        let mut out = Vec::new();
+        for routing in [0.0, 1.0] {
+            let mut v = ParamValues::default();
+            v.set(ParamId::Routing, routing);
+            v.set(ParamId::Chain, 3.0);
+            let mut e = Engine::new();
+            e.set_all(&v, true);
+            let (mut l, mut r) = (x.clone(), x.clone());
+            e.process(&mut l, &mut r);
+            out.push(l);
+        }
+        assert_eq!(out[0], out[1]);
+    }
+
+    #[test]
+    fn series_keeps_the_latency_in_every_order() {
+        let mut e = Engine::new();
+        let lat = e.latency_samples();
+        for chain in 0..Chain::COUNT {
+            let mut v = harmony_only(2.0, 4);
+            v.set(ParamId::Lead, 100.0);
+            v.set(ParamId::VocoderOn, 1.0);
+            v.set(ParamId::CreativeOn, 1.0);
+            v.set(ParamId::Routing, 1.0);
+            v.set(ParamId::Chain, f64::from(chain));
+            e.set_all(&v, true);
+            assert_eq!(e.latency_samples(), lat);
+            let (mut l, mut r) = (vowel(), vowel());
+            e.process(&mut l, &mut r);
+            assert!(l.iter().all(|s| s.is_finite() && s.abs() < 4.0));
+        }
+    }
+
+    #[test]
+    fn harmony_after_the_vocoder_plays_on_its_carrier() {
+        // A major third over the voice, the carrier following the voice.
+        let run = |chain: f64| {
+            let mut v = harmony_only(1.0, 4);
+            v.set(ParamId::Lead, 100.0);
+            v.set(ParamId::VocoderOn, 1.0);
+            v.set(ParamId::Vocoder, 0.0);
+            v.set(ParamId::CarrierFollow, 1.0);
+            v.set(ParamId::Routing, 1.0);
+            v.set(ParamId::Chain, chain);
+            let mut e = Engine::new();
+            e.set_all(&v, true);
+            let (mut l, mut r) = (vowel(), vowel());
+            e.process(&mut l, &mut r);
+            e.vocoder_notes()
+        };
+        // Creative > Harmony > Vocoder: the carrier sings the voice only.
+        let before = run(0.0);
+        assert_ne!(before & (1 << 57), 0);
+        assert_eq!(before & (1 << 61), 0);
+        // Creative > Vocoder > Harmony: and the third (C#4).
+        let after = run(2.0);
+        assert_ne!(after & (1 << 57), 0);
+        assert_ne!(after & (1 << 61), 0);
     }
 
     #[test]
