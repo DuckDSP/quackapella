@@ -211,7 +211,8 @@ pub fn page_accent(page: Page, style: VoiceMode) -> Color32 {
     match page {
         Page::Voice => mode_accent(style),
         Page::Creative => color::CREATIVE,
-        Page::Harmony | Page::Vocoder => color::SYNTH,
+        Page::Harmony => color::SYNTH,
+        Page::Vocoder => color::VOCODER,
     }
 }
 
@@ -939,6 +940,22 @@ fn harmony_panel(
             if intervals_on { accent } else { dim },
             &interval,
             &label,
+        );
+        // The voice's own level, under it.
+        let fr = Rect::from_center_size(
+            pos2(cx, row1 + knob_d * 0.5 + 38.0),
+            vec2(kw - space::S, 22.0),
+        );
+        let level = quack_dsp::params::HARMONY_LEVEL_PARAMS[i];
+        let live = intervals_on && semis != 0;
+        controls::fader(
+            ui,
+            params,
+            st,
+            level,
+            fr,
+            if live { accent } else { dim },
+            "",
         );
     }
     let pct = |v: f64| format!("{v:.0}");

@@ -413,9 +413,10 @@ pub struct Steer<'a> {
 }
 
 impl Steer<'_> {
+    /// The lead's ratio (the autotune's), and the robot's phrase note
+    /// kept for the creative copy.
     fn lead_ratio(&mut self, period: f64, dt: f64) -> f64 {
         let ratio = self.retuner.voiced(period, dt);
-        let transpose = self.retuner.transpose;
         let r = &mut *self.robot;
         let gap = std::mem::take(&mut r.gap_s);
         if r.amount <= 0.0 || period <= 0.0 {
@@ -427,12 +428,7 @@ impl Steer<'_> {
         if r.phrase.is_none() || gap > ROBOT_PHRASE_GAP_S {
             r.phrase = Some(out.round());
         }
-        let target = match r.note {
-            Some(n) => n + transpose,
-            None => r.phrase.unwrap_or(out),
-        };
-        let robot = ((target - sung) / 12.0).exp2();
-        ratio.powf(1.0 - r.amount) * robot.powf(r.amount)
+        ratio
     }
 }
 
@@ -454,6 +450,21 @@ impl PitchControl for Steer<'_> {
 
     fn voice(&mut self, v: usize, dt: f64) -> Option<f64> {
         self.harmony.voice_note(v, dt)
+    }
+
+    /// The robot sings the creative copy: the held MIDI note (with the
+    /// transposition) or one note per phrase, blended with the lead's
+    /// by its amount.
+    fn copy(&mut self, lead: f64, _dt: f64) -> f64 {
+        let r = &*self.robot;
+        if r.amount <= 0.0 {
+            return lead;
+        }
+        let target = match r.note {
+            Some(n) => n + self.retuner.transpose,
+            None => r.phrase.unwrap_or(lead),
+        };
+        lead + (target - lead) * r.amount
     }
 }
 
@@ -560,21 +571,26 @@ mod tests {
             robot: &mut r,
             harmony: &mut h,
         };
-        // Glide from A3 (220 Hz) up to C4: the output stays on A3.
+        // The copy's pitch for a grain of `period`, in Hz.
+        let sing = |s: &mut Steer, period: f64, dt: f64| {
+            let ratio = s.voiced(period, dt);
+            let lead = crate::pitch::hz_to_midi_f64(48_000.0 / period) + 12.0 * ratio.log2();
+            440.0 * ((s.copy(lead, dt) - 69.0) / 12.0).exp2()
+        };
+        // Glide from A3 (220 Hz) up to C4: the copy stays on A3.
         for k in 0..200 {
             let hz = 220.0 * (f64::from(k) / 200.0 * 3.0 / 12.0).exp2();
-            let period = 48_000.0 / hz;
-            let out = 48_000.0 / period * s.voiced(period, 1.0 / hz);
+            let out = sing(&mut s, 48_000.0 / hz, 1.0 / hz);
             assert!((out - 220.0).abs() < 0.5, "{out}");
         }
         // A pause, then a new phrase on E4.
         s.unvoiced(0.1);
         let period = 48_000.0 / 329.63;
-        let out = 329.63 * s.voiced(period, 0.003);
+        let out = sing(&mut s, period, 0.003);
         assert!((out - 329.63).abs() < 0.5, "{out}");
         // A held MIDI note wins.
         s.robot.note = Some(60.0);
-        let out = 329.63 * s.voiced(period, 0.003);
+        let out = sing(&mut s, period, 0.003);
         assert!((out - 261.63).abs() < 0.5, "{out}");
     }
 }

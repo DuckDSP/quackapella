@@ -20,10 +20,11 @@
 //! are built on the same analysis grains.
 //!
 //! Layers: the lead (correction and transposition, level *Lead*), the
-//! creative effects (on the lead itself: octave layers, formant follow,
-//! freeze, robot, glitch; their depth scaled by *Creative Level*), the
-//! harmonies and the vocoder. Each has its own switch and level, and
-//! they all play together.
+//! creative layer (its own signal: a copy of the lead with the robot,
+//! formant follow and glitch, plus the octave layers and the freeze;
+//! level *Creative Level*), the harmonies and the vocoder. Each has its
+//! own switch and level, and they all play together: with the lead
+//! down, a layer is heard alone.
 
 use crate::autotune::{Retuner, Scale, Source, TuneReading, TuneSettings, scale_mask};
 use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
@@ -80,6 +81,10 @@ pub struct Engine {
     /// freeze, robot, glitch. All at rest with the layer off.
     layers: [Ramp; LAYERS],
     follow: Ramp,
+    /// The creative layer's level, and its copy of the lead (on while
+    /// the robot, formant follow or glitch is used).
+    creative_level: Ramp,
+    copy: Ramp,
     freeze: bool,
     robot: Robot,
     glitch: Glitch,
@@ -125,6 +130,8 @@ impl Engine {
             gate_delay: DelayLine::default(),
             layers: [Ramp::new(0.0), Ramp::new(0.0), Ramp::new(0.0)],
             follow: Ramp::new(0.0),
+            creative_level: Ramp::new(0.0),
+            copy: Ramp::new(0.0),
             freeze: false,
             robot: Robot::default(),
             glitch: Glitch::default(),
@@ -344,7 +351,11 @@ impl Engine {
             | ParamId::Glide
             | ParamId::Double
             | ParamId::CloseVoicing
-            | ParamId::Latch => {
+            | ParamId::Latch
+            | ParamId::HarmonyLevel1
+            | ParamId::HarmonyLevel2
+            | ParamId::HarmonyLevel3
+            | ParamId::HarmonyLevel4 => {
                 self.update_harmony(snap);
                 self.update_vocoder(snap);
                 return;
@@ -410,19 +421,31 @@ impl Engine {
         self.values.get(ParamId::CreativeOn) >= 0.5
     }
 
-    /// Creative effects from the parameters: their depth times the
-    /// layer's level, nothing with the layer off.
+    /// Creative effects from the parameters, nothing with the layer
+    /// off. The layer's level scales its whole output.
     fn update_creative(&mut self, snap: bool) {
         let on = self.creative();
         let v = &self.values;
         #[allow(clippy::cast_possible_truncation)]
-        let depth = if on {
+        let pct = |id: ParamId| if on { (v.get(id) / 100.0) as f32 } else { 0.0 };
+        #[allow(clippy::cast_possible_truncation)]
+        let level = if on {
             (v.get(ParamId::CreativeLevel) / 100.0) as f32
         } else {
             0.0
         };
-        #[allow(clippy::cast_possible_truncation)]
-        let pct = |id: ParamId| (v.get(id) / 100.0) as f32 * depth;
+        // The copy of the lead carries the effects that transform it.
+        let copy = [ParamId::Robot, ParamId::FormantFollow, ParamId::Glitch]
+            .iter()
+            .any(|id| pct(*id) > 0.0);
+        let copy = if copy { 1.0 } else { 0.0 };
+        if snap {
+            self.creative_level.snap(level);
+            self.copy.snap(copy);
+        } else {
+            self.creative_level.set(level);
+            self.copy.set(copy);
+        }
         let targets = [
             pct(ParamId::OctaveDown),
             pct(ParamId::Sub),
@@ -480,6 +503,14 @@ impl Engine {
         let s = &mut self.harmony.settings;
         s.mode = mode;
         s.intervals = intervals;
+        #[allow(clippy::cast_possible_truncation)]
+        for (g, id) in s
+            .voice_gain
+            .iter_mut()
+            .zip(crate::params::HARMONY_LEVEL_PARAMS)
+        {
+            *g = (v.get(id) / 100.0) as f32;
+        }
         s.scale = scale_mask(key, scale);
         s.chord = crate::autotune::held_mask(&self.notes);
         s.expression = pct(ParamId::Expression);
@@ -736,6 +767,8 @@ impl Engine {
                 self.layers[2].tick(),
             ]);
             self.shifter.set_formant_follow(self.follow.tick());
+            self.shifter.set_copy(self.copy.tick());
+            let creative_level = self.creative_level.tick();
             // A held MIDI note plays the frozen grain (Pitch on top).
             #[allow(clippy::cast_possible_truncation)]
             let freeze_hz = self
@@ -747,15 +780,20 @@ impl Engine {
             let level = self.harmony_level.tick();
             let double = self.double.tick();
             let voices = self.harmony.tick(level, double);
-            self.shifter.set_voices(voices, lead, 1.0);
+            self.shifter.set_voices(voices, lead, level);
             let mut steer = Steer {
                 retuner: &mut self.retuner,
                 robot: &mut self.robot,
                 harmony: &mut self.harmony,
             };
-            let (wet_l, wet_r) = self
+            let buses = self
                 .shifter
-                .tick_with(in_l, in_r, period, &mut steer, formant);
+                .tick_buses(in_l, in_r, period, &mut steer, formant);
+            // The glitch cuts the creative layer only.
+            let [cl, cr] = buses.creative;
+            let (cl, cr) = self.glitch.tick(cl, cr);
+            let wet_l = buses.lead[0] + buses.harmony[0] + cl * creative_level;
+            let wet_r = buses.lead[1] + buses.harmony[1] + cr * creative_level;
             // Vocoder or talkbox, on top of the lead and harmonies.
             let voc_level = self.vocoder_level.tick();
             let (wet_l, wet_r) =
@@ -778,7 +816,6 @@ impl Engine {
                 } else {
                     (wet_l, wet_r)
                 };
-            let (wet_l, wet_r) = self.glitch.tick(wet_l, wet_r);
             let out_l = (dry_l + (wet_l - dry_l) * mix) * g_out;
             let out_r = (dry_r + (wet_r - dry_r) * mix) * g_out;
             *l = out_l + (dry_l - out_l) * byp;
@@ -1192,6 +1229,67 @@ mod tests {
         assert!(l.iter().chain(&r).all(|s| s.is_finite() && s.abs() < 4.0));
         assert_ne!(e.harmony_notes(), 0);
         assert_ne!(e.vocoder_notes() & (1 << 48), 0);
+    }
+
+    /// RMS of the engine's left output over the second half of `x`.
+    fn rms_of(v: &ParamValues, x: &[f32]) -> f32 {
+        let mut e = Engine::new();
+        e.set_all(v, true);
+        let (mut l, mut r) = (x.to_vec(), x.to_vec());
+        e.process(&mut l, &mut r);
+        let half = &l[l.len() / 2..];
+        #[allow(clippy::cast_precision_loss)]
+        let n = half.len() as f32;
+        (half.iter().map(|s| s * s).sum::<f32>() / n).sqrt()
+    }
+
+    #[test]
+    fn each_layer_is_heard_alone() {
+        #[allow(clippy::cast_precision_loss)]
+        let vowel: Vec<f32> = (0..24_000)
+            .map(|i| {
+                let t = i as f32 / 48_000.0;
+                0.3 * (std::f32::consts::TAU * 220.0 * t).sin()
+                    + 0.1 * (std::f32::consts::TAU * 440.0 * t).sin()
+            })
+            .collect();
+        let mut seed: u32 = 1;
+        let noise: Vec<f32> = (0..24_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                #[allow(clippy::cast_precision_loss)]
+                let u = (seed >> 8) as f32 / (1u32 << 24) as f32;
+                0.2 * (2.0 * u - 1.0)
+            })
+            .collect();
+        let mut v = ParamValues::default();
+        v.set(ParamId::Lead, 0.0);
+        assert!(rms_of(&v, &vowel) < 1e-4, "lead down: silence");
+        // Creative alone: its copy of the lead (robot) is heard.
+        let mut c = v;
+        c.set(ParamId::CreativeOn, 1.0);
+        c.set(ParamId::Robot, 100.0);
+        let got = rms_of(&c, &vowel);
+        assert!(got > 0.1, "creative alone: {got}");
+        // The creative level scales it.
+        c.set(ParamId::CreativeLevel, 50.0);
+        let half = rms_of(&c, &vowel);
+        assert!((half / got - 0.5).abs() < 0.05, "{half} vs {got}");
+        // Harmonies alone keep the consonants (noise is never sung).
+        let mut h = v;
+        h.set(ParamId::HarmonyOn, 1.0);
+        h.set(ParamId::Harmony, 1.0);
+        let got = rms_of(&h, &noise);
+        assert!(got > 0.05, "consonants with the harmonies: {got}");
+        // A voice's own level.
+        let mut h = v;
+        h.set(ParamId::HarmonyOn, 1.0);
+        h.set(ParamId::Harmony, 1.0);
+        h.set(ParamId::Harmony2, crate::harmony::interval_index(0));
+        let full = rms_of(&h, &vowel);
+        h.set(ParamId::HarmonyLevel1, 0.0);
+        let muted = rms_of(&h, &vowel);
+        assert!(full > 0.05 && muted < 0.1 * full, "{full} {muted}");
     }
 
     #[test]

@@ -105,6 +105,41 @@ enum Stream {
     Frozen,
     /// A harmony voice (index into the voices).
     Voice(u8),
+    /// The creative copy of the lead: its own marks, robot pitch and
+    /// formant follow (see [`Psola::set_copy`]).
+    Copy,
+}
+
+/// Voice streams with their own synthesis marks: the harmony voices,
+/// then the creative copy of the lead.
+const STREAMS: usize = MAX_VOICES + 1;
+/// Index of the creative copy among the streams.
+const COPY: usize = MAX_VOICES;
+
+/// The shifter's output by layer, before the engine's layer levels
+/// (the lead's and the harmonies' levels are applied, see
+/// [`Psola::set_voices`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Buses {
+    /// The lead (correction and transposition), its consonants at the
+    /// level of the loudest layer that sings.
+    pub lead: [f32; 2],
+    /// The creative layer: the copy of the lead (robot, formant
+    /// follow), the octave layers and the freeze. Unscaled.
+    pub creative: [f32; 2],
+    /// The harmony voices and the doublers.
+    pub harmony: [f32; 2],
+}
+
+impl Buses {
+    /// Everything together.
+    #[must_use]
+    pub fn sum(&self) -> (f32, f32) {
+        (
+            self.lead[0] + self.creative[0] + self.harmony[0],
+            self.lead[1] + self.creative[1] + self.harmony[1],
+        )
+    }
 }
 
 /// A harmony voice's own synthesis marks, on the lead's analysis.
@@ -161,6 +196,11 @@ pub trait PitchControl {
     fn voice(&mut self, _v: usize, _dt: f64) -> Option<f64> {
         None
     }
+    /// The creative copy's note for a grain, from the lead's latest
+    /// note (`lead`, fractional MIDI note): the lead's by default.
+    fn copy(&mut self, lead: f64, _dt: f64) -> f64 {
+        lead
+    }
 }
 
 impl PitchControl for f32 {
@@ -207,6 +247,8 @@ struct Grain {
     k: usize,
     right_known: bool,
     stream: Stream,
+    /// A voiced grain (unvoiced ones are the consonants and breaths).
+    voiced: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -285,13 +327,18 @@ pub struct Psola {
     /// Freeze pitch: a played note (Hz), or the transposition now.
     freeze_hz: Option<f32>,
     freeze_transpose: f64,
-    /// Harmony voices: their marks and, per sample, their mix.
-    voices: [VoiceStream; MAX_VOICES],
+    /// Harmony voices then the creative copy: their marks and, per
+    /// sample, the harmonies' mix.
+    voices: [VoiceStream; STREAMS],
     voice_mix: [VoiceMix; MAX_VOICES],
-    /// Level of the lead (main voice, layers, freeze) and of the
-    /// harmonies.
+    /// Level of the lead, and of the harmonies (already in their mix:
+    /// here for the consonants).
     lead_gain: f32,
     harmony_gain: f32,
+    /// Level of the creative copy, 0 (off) to 1.
+    copy_gain: f32,
+    /// The lead's latest note (fractional MIDI note), NaN before any.
+    lead_note: f64,
 }
 
 impl Psola {
@@ -381,7 +428,14 @@ impl Psola {
         self.main_ratio = 1.0;
         self.frozen.state = FreezeState::Off;
         self.frozen.fade = 0.0;
-        self.voices = [VoiceStream::default(); MAX_VOICES];
+        self.voices = [VoiceStream::default(); STREAMS];
+        self.lead_note = f64::NAN;
+    }
+
+    /// Level of the creative copy of the lead (0 = no copy), already
+    /// smoothed by the caller. Real-time safe.
+    pub fn set_copy(&mut self, gain: f32) {
+        self.copy_gain = gain.clamp(0.0, 1.0);
     }
 
     /// Levels of the layers (see [`LAYER_RATIOS`]), 0 to 1, already
@@ -393,8 +447,10 @@ impl Psola {
     }
 
     /// Harmony voices for this sample (from
-    /// [`crate::harmony::Harmonizer::tick`]), and the levels of the lead
-    /// and of the harmonies. Real-time safe.
+    /// [`crate::harmony::Harmonizer::tick`]), the lead's level and the
+    /// harmonies' (already in their mix; the consonants, which the
+    /// harmonies do not sing, come at the louder of the two). Real-time
+    /// safe.
     pub fn set_voices(&mut self, mix: &[VoiceMix; MAX_VOICES], lead: f32, harmony: f32) {
         self.voice_mix = *mix;
         self.lead_gain = lead;
@@ -491,6 +547,20 @@ impl Psola {
         pitch: &mut impl PitchControl,
         formant_ratio: f32,
     ) -> (f32, f32) {
+        self.tick_buses(left, right, period, pitch, formant_ratio)
+            .sum()
+    }
+
+    /// [`Psola::tick_with`], each layer apart.
+    #[inline]
+    pub fn tick_buses(
+        &mut self,
+        left: f32,
+        right: f32,
+        period: Option<f32>,
+        pitch: &mut impl PitchControl,
+        formant_ratio: f32,
+    ) -> Buses {
         let n = self.n;
         let i = self.in_index(n);
         self.input[0][i] = left;
@@ -539,14 +609,16 @@ impl Psola {
         out
     }
 
-    /// Output sample `c`: the sum of the grains sounding there.
+    /// Output sample `c`: the grains sounding there, by layer.
     #[inline]
-    fn render(&mut self, c: f64) -> (f32, f32) {
+    fn render(&mut self, c: f64) -> Buses {
         // Never read input that is not recorded yet (the Hermite reads
         // two samples past the index).
         #[allow(clippy::cast_precision_loss)]
         let newest = (self.n - 2) as f64;
         let (mut l, mut r) = (0.0f32, 0.0f32);
+        let (mut ul, mut ur) = (0.0f32, 0.0f32);
+        let (mut cl, mut cr) = (0.0f32, 0.0f32);
         let (mut fl, mut fz) = (0.0f32, 0.0f32);
         let (mut hl, mut hr) = (0.0f32, 0.0f32);
         let mut i = 0;
@@ -581,45 +653,72 @@ impl Psola {
             };
             #[allow(clippy::cast_possible_truncation)]
             let w = w as f32 * g.gain;
+            if g.stream == Stream::Frozen {
+                let src = g.a + d * g.fr;
+                fl += w * read_buf(&self.frozen.buf[0], src);
+                fz += w * read_buf(&self.frozen.buf[1], src);
+                i += 1;
+                continue;
+            }
+            let src = (g.a + d * g.fr).min(newest);
+            let (x, y) = (self.read(0, src), self.read(1, src));
             match g.stream {
-                Stream::Frozen => {
-                    let src = g.a + d * g.fr;
-                    fl += w * read_buf(&self.frozen.buf[0], src);
-                    fz += w * read_buf(&self.frozen.buf[1], src);
-                }
                 Stream::Voice(v) => {
                     let [gl, gr] = self.voice_mix[usize::from(v)].gain;
-                    let src = (g.a + d * g.fr).min(newest);
-                    hl += w * gl * self.read(0, src);
-                    hr += w * gr * self.read(1, src);
+                    hl += w * gl * x;
+                    hr += w * gr * y;
                 }
-                stream => {
-                    let w = match stream {
-                        Stream::Layer(j) => w * self.layer_level[usize::from(j)],
-                        _ => w,
-                    };
-                    let src = (g.a + d * g.fr).min(newest);
-                    l += w * self.read(0, src);
-                    r += w * self.read(1, src);
+                Stream::Layer(j) => {
+                    let w = w * self.layer_level[usize::from(j)];
+                    cl += w * x;
+                    cr += w * y;
+                }
+                Stream::Copy => {
+                    let w = w * self.copy_gain;
+                    cl += w * x;
+                    cr += w * y;
+                }
+                _ if g.voiced => {
+                    l += w * x;
+                    r += w * y;
+                }
+                _ => {
+                    ul += w * x;
+                    ur += w * y;
                 }
             }
             i += 1;
         }
-        let power: f32 = 1.0 + self.layer_level.iter().map(|g| g * g).sum::<f32>();
+        let power: f32 =
+            self.copy_gain * self.copy_gain + self.layer_level.iter().map(|g| g * g).sum::<f32>();
         if power > 1.0 {
             // Layers stack up without pushing the level (or clipping):
-            // the sum keeps about the main voice's loudness.
+            // the sum keeps about one voice's loudness.
             let k = power.sqrt().recip();
-            l *= k;
-            r *= k;
+            cl *= k;
+            cr *= k;
         }
         let f = self.frozen.fade;
         if f > 0.0 {
-            l += f * (fl - l);
-            r += f * (fz - r);
+            cl += f * (fl - cl);
+            cr += f * (fz - cr);
         }
-        let (g, h) = (self.lead_gain, self.harmony_gain);
-        (g * l + h * hl, g * r + h * hr)
+        // Consonants and breaths are never transposed: the harmonies
+        // have none of their own, so they come with the lead at the
+        // louder of the two levels (a harmony heard alone keeps its
+        // words).
+        let harmonies = self.voice_mix.iter().any(|m| m.active);
+        let g = self.lead_gain;
+        let u = if harmonies {
+            g.max(self.harmony_gain)
+        } else {
+            g
+        };
+        Buses {
+            lead: [g * l + u * ul, g * r + u * ur],
+            creative: [cl, cr],
+            harmony: [hl, hr],
+        }
     }
 
     #[inline]
@@ -815,6 +914,8 @@ impl Psola {
             };
             let pr = pitch.voiced(own, dt).clamp(1.0 / max, max);
             self.main_ratio = pr;
+            self.lead_note =
+                crate::pitch::hz_to_midi_f64(self.sample_rate / own) + 12.0 * pr.log2();
             (pr.powf(self.voicing), right, k + 1 < self.count)
         } else {
             pitch.unvoiced(dt);
@@ -829,15 +930,9 @@ impl Psola {
             };
             (1.0, right.min(room), true)
         };
-        // Formants following the pitch (chipmunk, monster): the grain is
-        // read faster or slower. Its rise keeps its length (it has
-        // started), so only the right half widens or narrows.
-        let (fr, hr) = if m.voiced {
-            let f = self.followed(fr, ratio);
-            (f, hr / f)
-        } else {
-            (fr, hr)
-        };
+        // The lead keeps its formants (Formant moves them): following
+        // the pitch is the creative copy's.
+        let hr = if m.voiced { hr / fr } else { hr };
         // More grains per second going up, fewer going down: keep the
         // loudness where it was (same for narrower or wider grains).
         let gain = if m.voiced { (fr / ratio).sqrt() } else { 1.0 };
@@ -866,6 +961,7 @@ impl Psola {
                 k,
                 right_known,
                 stream: Stream::Main,
+                voiced: m.voiced,
             };
             self.grains[self.active] = g;
             self.active += 1;
@@ -949,6 +1045,7 @@ impl Psola {
                 k,
                 right_known,
                 stream: Stream::Layer(j as u8),
+                voiced: true,
             };
             self.push_grain(g);
             if mult > 1.0 {
@@ -1052,23 +1149,33 @@ impl Psola {
                 k: 0,
                 right_known: true,
                 stream: Stream::Frozen,
+                voiced: true,
             });
             self.frozen.next_s = s + p / ratio;
         }
     }
 
-    /// The harmony voices' grains due by output sample `c`. Each voice
-    /// has its own synthesis marks, spaced by its own period, and takes
-    /// the lead's analysis grain nearest in time (a few milliseconds
-    /// later with Humanize): the singer's grains, so the singer's
-    /// formants, at the voice's pitch. Like the lead it waits for a mark
-    /// that is not placed yet, so it never needs more latency.
+    /// The harmony voices' grains due by output sample `c`, and the
+    /// creative copy's. Each stream has its own synthesis marks, spaced
+    /// by its own period, and takes the lead's analysis grain nearest in
+    /// time (a few milliseconds later with Humanize): the singer's
+    /// grains, so the singer's formants, at the stream's pitch. Like the
+    /// lead it waits for a mark that is not placed yet, so it never
+    /// needs more latency. The harmonies sing the voiced grains only;
+    /// the copy also plays the consonants, untransposed, like the lead.
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn run_voices(&mut self, c: f64, pitch: &mut impl PitchControl, formant_ratio: f64) {
         let max = f64::from(MAX_PITCH_RATIO);
-        for v in 0..MAX_VOICES {
-            let mix = self.voice_mix[v];
-            if !mix.active {
+        let max_fr = f64::from(MAX_FORMANT_RATIO);
+        for v in 0..STREAMS {
+            let copy = v == COPY;
+            let (active, formant, lag) = if copy {
+                (self.copy_gain > 0.0, 1.0, 0.0)
+            } else {
+                let mix = self.voice_mix[v];
+                (mix.active, mix.formant, mix.lag)
+            };
+            if !active {
                 self.voices[v].on = false;
                 continue;
             }
@@ -1081,17 +1188,14 @@ impl Psola {
                     voicing: 0.0,
                 };
             }
-            let fr0 = (formant_ratio * mix.formant).clamp(
-                1.0 / f64::from(MAX_FORMANT_RATIO),
-                f64::from(MAX_FORMANT_RATIO),
-            );
+            let fr0 = (formant_ratio * formant).clamp(1.0 / max_fr, max_fr);
             for _ in 0..8 {
                 let vs = self.voices[v];
                 let s = match vs.last {
                     Some((ls, k, ratio)) if k + MARKS > self.count => ls + self.right(k) / ratio,
                     _ => vs.next_s,
                 };
-                let target = s - self.offset - mix.lag;
+                let target = s - self.offset - lag;
                 let Some(k) = self.nearest_mark(target) else {
                     break;
                 };
@@ -1125,24 +1229,69 @@ impl Psola {
                         f64::from(m.period)
                     };
                     let sung = crate::pitch::hz_to_midi_f64(self.sample_rate / own);
-                    if let Some(note) = pitch.voice(v, dt) {
+                    let note = if copy {
+                        let lead = if self.lead_note.is_finite() {
+                            self.lead_note
+                        } else {
+                            sung
+                        };
+                        Some(pitch.copy(lead, dt))
+                    } else {
+                        pitch.voice(v, dt)
+                    };
+                    if let Some(note) = note {
                         ratio = (((note - sung) / 12.0).exp2()).clamp(1.0 / max, max);
-                        let fr = self.followed(fr0, ratio);
-                        if voicing > 0.0 {
+                        // The copy glides in with the voicing like the
+                        // lead; the harmonies fade in with it.
+                        let (ratio_g, fr, gain) = if copy {
+                            let r = ratio.powf(voicing);
+                            let fr = self.followed(fr0, r);
+                            (r, fr, (fr / r).sqrt())
+                        } else {
+                            (ratio, fr0, (fr0 / ratio).sqrt() * voicing)
+                        };
+                        ratio = ratio_g;
+                        if gain > 0.0 {
                             self.push_grain(Grain {
                                 s,
                                 a: m.pos as f64,
                                 hl,
                                 hr: right / fr,
                                 fr,
-                                gain: ((fr / ratio).sqrt() * voicing) as f32,
+                                gain: gain as f32,
                                 attack: self.attack,
                                 k,
                                 right_known: k + 1 < self.count,
-                                stream: Stream::Voice(v as u8),
+                                stream: if copy {
+                                    Stream::Copy
+                                } else {
+                                    Stream::Voice(v as u8)
+                                },
+                                voiced: true,
                             });
                         }
                     }
+                } else if copy {
+                    // A consonant: at the analysis spacing, untransposed,
+                    // never read past the recorded input (as the lead's).
+                    let room = if fr0 > 1.0 {
+                        ((s - m.pos as f64 + self.latency as f64 - 3.0) / (fr0 - 1.0)).max(1.0)
+                    } else {
+                        f64::MAX
+                    };
+                    self.push_grain(Grain {
+                        s,
+                        a: m.pos as f64,
+                        hl,
+                        hr: right.min(room),
+                        fr: fr0,
+                        gain: 1.0,
+                        attack: 1.0,
+                        k,
+                        right_known: true,
+                        stream: Stream::Copy,
+                        voiced: false,
+                    });
                 }
                 self.voices[v] = VoiceStream {
                     on: true,
@@ -1378,8 +1527,11 @@ mod tests {
     ) -> Vec<f32> {
         let mut det = Yin::new(SR);
         let mut ps = Psola::new(SR, LAT);
+        // The creative layer alone: its copy of the lead, layers, freeze.
         ps.set_layers(layers);
         ps.set_formant_follow(follow);
+        ps.set_voices(&[VoiceMix::default(); MAX_VOICES], 0.0, 0.0);
+        ps.set_copy(1.0);
         let pr = semitones_to_ratio(pitch_st);
         x.iter()
             .enumerate()
@@ -1465,6 +1617,8 @@ mod tests {
         let x = vowel(220.0, 0.6);
         let mut det = Yin::new(SR);
         let mut ps = Psola::new(SR, LAT);
+        // The freeze alone (the creative layer, the lead down).
+        ps.set_voices(&[VoiceMix::default(); MAX_VOICES], 0.0, 0.0);
         let y: Vec<f32> = x
             .iter()
             .enumerate()

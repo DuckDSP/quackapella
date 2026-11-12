@@ -506,6 +506,7 @@ pub const FACTORY: &[Factory] = &[
         values: vals!(
             Mode = TUNE,
             CreativeOn = ON,
+            Lead = 0.0,
             Retune = 0.0,
             Humanize = 0.0,
             Vibrato = 0.0,
@@ -519,6 +520,7 @@ pub const FACTORY: &[Factory] = &[
         values: vals!(
             Mode = TUNE,
             CreativeOn = ON,
+            Lead = 0.0,
             Correction = 0.0,
             Glitch = 30.0,
             GlitchMode = GLITCH_STUTTER,
@@ -532,6 +534,7 @@ pub const FACTORY: &[Factory] = &[
         values: vals!(
             Mode = TUNE,
             CreativeOn = ON,
+            Lead = 0.0,
             Correction = 0.0,
             Glitch = 25.0,
             GlitchMode = GLITCH_TAPE,
@@ -545,6 +548,7 @@ pub const FACTORY: &[Factory] = &[
         values: vals!(
             Mode = TUNE,
             CreativeOn = ON,
+            Lead = 0.0,
             Correction = 0.0,
             Glitch = 25.0,
             GlitchMode = GLITCH_REVERSE,
@@ -558,6 +562,7 @@ pub const FACTORY: &[Factory] = &[
         values: vals!(
             Mode = TUNE,
             CreativeOn = ON,
+            Lead = 0.0,
             Source = SRC_MIDI,
             Retune = 0.0,
             FormantFollow = 50.0

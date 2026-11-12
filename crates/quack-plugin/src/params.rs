@@ -813,6 +813,46 @@ pub struct QuackParams {
     pub vocoder_on: BoolParam,
 
     #[param(
+        id = 416,
+        name = "Harmony 1 Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_1_level: FloatParam,
+
+    #[param(
+        id = 417,
+        name = "Harmony 2 Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_2_level: FloatParam,
+
+    #[param(
+        id = 418,
+        name = "Harmony 3 Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_3_level: FloatParam,
+
+    #[param(
+        id = 419,
+        name = "Harmony 4 Level",
+        range = "linear(0, 100)",
+        default = 100.0,
+        unit = "%",
+        smooth = "none"
+    )]
+    pub harmony_4_level: FloatParam,
+
+    #[param(
         id = 700,
         name = "Macro 1",
         range = "linear(0, 100)",
@@ -1040,6 +1080,14 @@ impl QuackParams {
             ParamId::CreativeLevel,
             FloatParamReadF64::value(&self.creative_level),
         );
+        for (id, p) in quack_dsp::params::HARMONY_LEVEL_PARAMS.into_iter().zip([
+            &self.harmony_1_level,
+            &self.harmony_2_level,
+            &self.harmony_3_level,
+            &self.harmony_4_level,
+        ]) {
+            v.set(id, FloatParamReadF64::value(p));
+        }
         for (id, p) in quack_dsp::params::MACRO_PARAMS.into_iter().zip([
             &self.macro_1,
             &self.macro_2,

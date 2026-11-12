@@ -179,13 +179,17 @@ pub enum ParamId {
     CreativeLevel,
     HarmonyOn,
     VocoderOn,
+    HarmonyLevel1,
+    HarmonyLevel2,
+    HarmonyLevel3,
+    HarmonyLevel4,
     Macro1,
     Macro2,
     Macro3,
     Macro4,
 }
 
-pub const PARAM_COUNT: usize = 82;
+pub const PARAM_COUNT: usize = 86;
 
 /// The four macro knobs (see [`crate::control`]).
 pub const MACRO_PARAMS: [ParamId; 4] = [
@@ -193,6 +197,14 @@ pub const MACRO_PARAMS: [ParamId; 4] = [
     ParamId::Macro2,
     ParamId::Macro3,
     ParamId::Macro4,
+];
+
+/// Level of each harmony interval voice.
+pub const HARMONY_LEVEL_PARAMS: [ParamId; 4] = [
+    ParamId::HarmonyLevel1,
+    ParamId::HarmonyLevel2,
+    ParamId::HarmonyLevel3,
+    ParamId::HarmonyLevel4,
 ];
 
 /// The twelve note switches of the autotune, C first.
@@ -958,6 +970,50 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
         kind: ParamKind::Bool { default: false },
     },
     ParamSpec {
+        key: "harmony_1_level",
+        host_id: 416,
+        name: "Harmony 1 Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_2_level",
+        host_id: 417,
+        name: "Harmony 2 Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_3_level",
+        host_id: 418,
+        name: "Harmony 3 Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
+        key: "harmony_4_level",
+        host_id: 419,
+        name: "Harmony 4 Level",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 100.0,
+        },
+    },
+    ParamSpec {
         key: "macro_1",
         host_id: 700,
         name: "Macro 1",
@@ -1083,6 +1139,10 @@ impl ParamId {
         Self::CreativeLevel,
         Self::HarmonyOn,
         Self::VocoderOn,
+        Self::HarmonyLevel1,
+        Self::HarmonyLevel2,
+        Self::HarmonyLevel3,
+        Self::HarmonyLevel4,
         Self::Macro1,
         Self::Macro2,
         Self::Macro3,

@@ -249,6 +249,8 @@ pub struct HarmonySettings {
     pub mode: HarmonyMode,
     /// Intervals of the interval voices, semitones (0 = off).
     pub intervals: [i32; INTERVAL_VOICES],
+    /// Level of each interval voice, 0 to 1.
+    pub voice_gain: [f32; INTERVAL_VOICES],
     /// Pitch classes the intervals count in (the engine passes the
     /// major scale of the key when the autotune is chromatic: thirds
     /// must be thirds).
@@ -276,6 +278,7 @@ impl Default for HarmonySettings {
         Self {
             mode: HarmonyMode::Off,
             intervals: [0; INTERVAL_VOICES],
+            voice_gain: [1.0; INTERVAL_VOICES],
             scale: 0xFFF,
             chord: 0,
             expression: 1.0,
@@ -719,6 +722,17 @@ impl Harmonizer {
         #[allow(clippy::cast_precision_loss)]
         let dt = f64::from(WANDER_EVERY) / self.sample_rate;
         let mut power = 0.0f32;
+        let intervals = matches!(
+            st.mode,
+            HarmonyMode::Fixed | HarmonyMode::Scale | HarmonyMode::Chord
+        );
+        let own = |i: usize| {
+            if intervals && i < INTERVAL_VOICES {
+                st.voice_gain[i]
+            } else {
+                1.0
+            }
+        };
         for (i, s) in self.slots.iter_mut().enumerate() {
             let doubler = i >= MIDI_VOICES;
             let on = s.gate && (doubler || st.mode != HarmonyMode::Off);
@@ -739,7 +753,7 @@ impl Harmonizer {
                 s.drift.tick(&mut self.rng, dt);
             }
             if !doubler {
-                let g = s.env * s.velocity;
+                let g = s.env * s.velocity * own(i);
                 power += g * g;
             }
         }
@@ -760,7 +774,7 @@ impl Harmonizer {
                 // Two takes, each a little under the lead.
                 s.env * double * std::f32::consts::FRAC_1_SQRT_2
             } else {
-                s.env * s.velocity * norm * level
+                s.env * s.velocity * own(i) * norm * level
             };
             let (pan, cached) = &mut self.pan_cache[i];
             if *pan != s.pan {

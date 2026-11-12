@@ -252,18 +252,24 @@ pub(crate) fn fader(
         );
     }
     let mid = r.center().y;
-    text(
-        p,
-        pos2(r.left() + 10.0, mid),
-        Align2::LEFT_CENTER,
-        label,
-        size::CAPTION,
-        color::TEXT_DIM,
-    );
+    // Without a label, the value sits in the middle.
+    let (vpos, valign) = if label.is_empty() {
+        (pos2(r.center().x, mid), Align2::CENTER_CENTER)
+    } else {
+        text(
+            p,
+            pos2(r.left() + 10.0, mid),
+            Align2::LEFT_CENTER,
+            label,
+            size::CAPTION,
+            color::TEXT_DIM,
+        );
+        (pos2(r.right() - 10.0, mid), Align2::RIGHT_CENTER)
+    };
     crate::paint::value(
         p,
-        pos2(r.right() - 10.0, mid),
-        Align2::RIGHT_CENTER,
+        vpos,
+        valign,
         &format!("{:.0} %", params.get_plain(id)),
         size::CAPTION + 1.0,
         color::TEXT,
