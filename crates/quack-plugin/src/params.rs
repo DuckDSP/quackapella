@@ -2022,6 +2022,36 @@ pub struct QuackParams {
     )]
     pub exciter_freq: FloatParam,
 
+    #[param(
+        id = 1317,
+        name = "EQ Bell 1 Dyn",
+        range = "linear(0, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_bell_1_dyn: FloatParam,
+
+    #[param(
+        id = 1318,
+        name = "EQ Bell 2 Dyn",
+        range = "linear(0, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_bell_2_dyn: FloatParam,
+
+    #[param(
+        id = 1319,
+        name = "EQ Bell 3 Dyn",
+        range = "linear(0, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_bell_3_dyn: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -2408,6 +2438,9 @@ impl QuackParams {
             (ParamId::EqHighShelfGain, &self.eq_high_shelf_gain),
             (ParamId::ExciterAmount, &self.exciter_amount),
             (ParamId::ExciterFreq, &self.exciter_freq),
+            (ParamId::EqBell1Dyn, &self.eq_bell_1_dyn),
+            (ParamId::EqBell2Dyn, &self.eq_bell_2_dyn),
+            (ParamId::EqBell3Dyn, &self.eq_bell_3_dyn),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }

@@ -481,6 +481,29 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   alors affichée en points blancs sur les boutons et Apply la rejoue.
   Un réglage fait à la main n'est pas écrasé.
 
+### Bandes dynamiques de l'EQ de sortie
+
+Chaque cloche de l'EQ de sortie a un réglage **Dyn Cut** (0 à 12 dB,
+ids 1317 à 1319, 0 par défaut : rien ne change pour les presets
+existants). La bande n'est creusée que lorsqu'elle enfle au-dessus de
+sa part habituelle du son (une note qui gonfle dans le bas, une voyelle
+dure), et laissée telle quelle le reste du temps.
+
+- Pas de seuil à régler : le détecteur compare la bande au signal
+  entier, puis ce rapport à sa propre moyenne sur 1,5 s. La coupe suit
+  la voix quel que soit son niveau. Marge de 1 dB, pente 1,5, attaque
+  5 ms, relâchement 90 ms.
+- La coupe vaut `entrée − profondeur · bande` (filtre à variable d'état
+  alimenté par l'entrée) : exacte au centre, stable à toute profondeur,
+  **aucune latence** (pas d'anticipation). À 0 la bande ne coûte rien.
+- Sur le graphe, une tige sous la poignée montre jusqu'où la coupe peut
+  aller, et un trait épais ce qu'elle retire à l'instant.
+- L'assistant mesure, pendant l'écoute, de combien chaque zone (bas
+  médiums, médiums, présence) dépasse sa part habituelle sur ses
+  moments forts. Au-delà de 3 dB il règle le Dyn Cut de la cloche
+  concernée (6 dB au plus, dosé par Clarity) et le dit (« uneven lows »,
+  « uneven highs »).
+
 ## Quackapella Link (plugin compagnon)
 
 Un second plugin (`crates/quack-link-plugin`, AU `aufx` `Qklk`, sans

@@ -1197,6 +1197,9 @@ pub struct EqSettings {
     pub low_shelf_db: f32,
     /// Bells: frequency (Hz), gain (dB) and Q.
     pub bells: [(f32, f32, f32); EQ_BELLS],
+    /// Each bell's dynamic cut, dB: how far it may duck its band when
+    /// that band swells over its usual share of the sound (0: off).
+    pub dynamic: [f32; EQ_BELLS],
     pub high_shelf_hz: f32,
     pub high_shelf_db: f32,
 }
@@ -1208,6 +1211,7 @@ impl Default for EqSettings {
             low_shelf_hz: 150.0,
             low_shelf_db: 0.0,
             bells: [(300.0, 0.0, 1.0), (1500.0, 0.0, 1.0), (4000.0, 0.0, 1.0)],
+            dynamic: [0.0; EQ_BELLS],
             high_shelf_hz: 9000.0,
             high_shelf_db: 0.0,
         }
@@ -1348,7 +1352,121 @@ impl EqCurve {
     }
 }
 
-/// Output EQ, after the layers: low cut, low shelf, three bells, high
+/// Samples between two readings of a dynamic band's detector.
+const DYN_EVERY: u8 = 16;
+/// A band has to pass its usual share by this much before it is cut, dB.
+const DYN_MARGIN_DB: f32 = 1.0;
+/// dB cut per dB over the margin.
+const DYN_SLOPE: f32 = 1.5;
+/// Under this level (two channels summed) nothing is learnt or cut.
+const DYN_FLOOR: f32 = 2e-3;
+
+/// A bell's dynamic cut: the band is ducked when it swells over its
+/// usual share of the sound (a boomy low note, a hard vowel), and left
+/// alone the rest of the time.
+///
+/// No threshold to set: the detector compares the band with the whole
+/// signal, and that ratio with its own average over the last seconds,
+/// so the cut follows the voice whatever its level. The cut is
+/// `in − depth · band`, with the band from a state-variable filter
+/// fed by the input: exact at the centre, stable at any depth, and no
+/// latency (no look-ahead).
+#[derive(Debug, Clone, Copy, Default)]
+struct DynBand {
+    range_db: f32,
+    filter: [Svf; 2],
+    /// Envelopes of the band and of the whole signal.
+    band: f32,
+    wide: f32,
+    /// The band's usual share, dB (`None` until some signal came).
+    usual_db: Option<f32>,
+    /// Depth aimed at and reached (0-1), and the cut it makes, dB.
+    target: f32,
+    depth: f32,
+    cut_db: f32,
+    count: u8,
+    attack: f32,
+    release: f32,
+    slow: f32,
+    glide: f32,
+}
+
+impl DynBand {
+    fn set(&mut self, sample_rate: f32, hz: f32, q: f32, range_db: f32, on: bool) {
+        let range_db = if on { range_db.clamp(0.0, 24.0) } else { 0.0 };
+        if range_db <= 0.0 && self.range_db > 0.0 {
+            self.reset();
+        }
+        self.range_db = range_db;
+        for f in &mut self.filter {
+            f.set(sample_rate, hz, q.clamp(0.5, 4.0));
+        }
+        self.attack = coef(sample_rate, 5.0);
+        self.release = coef(sample_rate, 90.0);
+        // The usual share is read every `DYN_EVERY` samples.
+        self.slow = coef(sample_rate / f32::from(DYN_EVERY), 1500.0);
+        self.glide = coef(sample_rate, 8.0);
+    }
+
+    fn reset(&mut self) {
+        for f in &mut self.filter {
+            f.reset();
+        }
+        self.band = 0.0;
+        self.wide = 0.0;
+        self.usual_db = None;
+        self.target = 0.0;
+        self.depth = 0.0;
+        self.cut_db = 0.0;
+        self.count = 0;
+    }
+
+    #[inline]
+    fn tick(&mut self, io: &mut [f32; 2]) {
+        if self.range_db <= 0.0 {
+            return;
+        }
+        let k = self.filter[0].k;
+        let b = [
+            k * self.filter[0].tick(io[0]).1,
+            k * self.filter[1].tick(io[1]).1,
+        ];
+        let follow = |env: &mut f32, x: f32, up: f32, down: f32| {
+            *env += (x - *env) * if x > *env { up } else { down };
+        };
+        follow(
+            &mut self.band,
+            b[0].abs() + b[1].abs(),
+            self.attack,
+            self.release,
+        );
+        follow(
+            &mut self.wide,
+            io[0].abs() + io[1].abs(),
+            self.attack,
+            self.release,
+        );
+        self.count += 1;
+        if self.count >= DYN_EVERY {
+            self.count = 0;
+            self.cut_db = if self.wide > DYN_FLOOR {
+                let share = 20.0 * (self.band.max(1e-9) / self.wide).log10();
+                let usual = self.usual_db.get_or_insert(share);
+                *usual += (share - *usual) * self.slow;
+                ((share - *usual - DYN_MARGIN_DB) * DYN_SLOPE).clamp(0.0, self.range_db)
+            } else {
+                0.0
+            };
+            self.target = 1.0 - 10.0_f32.powf(-self.cut_db / 20.0);
+        }
+        self.depth += (self.target - self.depth) * self.glide;
+        io[0] -= self.depth * b[0];
+        io[1] -= self.depth * b[1];
+    }
+}
+
+/// Output EQ, after the layers: low cut, low shelf, three bells (each
+/// with an optional dynamic cut, see [`DynBand`]), high
 /// shelf. Minimum phase, no latency. A flat band costs nothing.
 /// Real-time safe.
 #[derive(Debug, Clone)]
@@ -1357,6 +1475,7 @@ pub struct Eq {
     settings: EqSettings,
     sections: [EqSection; EQ_BANDS],
     state: [[Svf; 2]; EQ_BANDS],
+    dynamic: [DynBand; EQ_BELLS],
     on: bool,
 }
 
@@ -1367,6 +1486,7 @@ impl Default for Eq {
             settings: EqSettings::default(),
             sections: [EqSection::FLAT; EQ_BANDS],
             state: [[Svf::default(); 2]; EQ_BANDS],
+            dynamic: [DynBand::default(); EQ_BELLS],
             on: false,
         }
     }
@@ -1387,11 +1507,29 @@ impl Eq {
         for f in self.state.iter_mut().flatten() {
             f.reset();
         }
+        for d in &mut self.dynamic {
+            d.reset();
+        }
+    }
+
+    /// What each bell's dynamic cut takes off right now, dB (≥ 0).
+    #[must_use]
+    pub fn dynamic_cut_db(&self) -> [f32; EQ_BELLS] {
+        std::array::from_fn(|i| {
+            if self.on && self.dynamic[i].range_db > 0.0 {
+                self.dynamic[i].cut_db
+            } else {
+                0.0
+            }
+        })
     }
 
     pub fn set(&mut self, s: EqSettings, on: bool) {
         self.settings = s;
         self.on = on;
+        for (d, ((hz, _, q), range)) in self.dynamic.iter_mut().zip(s.bells.iter().zip(s.dynamic)) {
+            d.set(self.sample_rate, *hz, *q, range, on);
+        }
         self.sections = EqCurve::new(&s, self.sample_rate).sections;
         for (sec, state) in self.sections.iter().zip(self.state.iter_mut()) {
             for f in state {
@@ -1424,6 +1562,9 @@ impl Eq {
                     sec.m0 * *x + sec.m1 * bp + sec.m2 * lp
                 };
             }
+        }
+        for d in &mut self.dynamic {
+            d.tick(&mut io);
         }
         (io[0], io[1])
     }
@@ -1669,6 +1810,74 @@ mod tests {
         );
     }
 
+    /// A steady 1 kHz tone and a 300 Hz one that is soft for 3 s, then
+    /// swells for 0.4 s. Returns the output of the soft part's last
+    /// half second and of the swell (its first 100 ms left out).
+    fn swell_through(dynamic: f32) -> (Vec<f32>, Vec<f32>, f32) {
+        let sr = 48_000.0;
+        let (soft, loud) = (144_000, 19_200);
+        let mut eq = Eq::default();
+        eq.prepare(f64::from(sr));
+        eq.set(
+            EqSettings {
+                bells: [(300.0, 0.0, 1.0), (1000.0, 0.0, 1.0), (4000.0, 0.0, 1.0)],
+                dynamic: [dynamic, 0.0, 0.0],
+                ..EqSettings::default()
+            },
+            true,
+        );
+        let mid = sine(sr, 1000.0, soft + loud, 0.2);
+        let low = sine(sr, 300.0, soft + loud, 1.0);
+        let mut out = Vec::with_capacity(soft + loud);
+        let mut cut = 0.0_f32;
+        for i in 0..soft + loud {
+            let x = mid[i] + low[i] * if i < soft { 0.05 } else { 0.3 };
+            out.push(eq.tick(x, x).0);
+            if i >= soft {
+                cut = cut.max(eq.dynamic_cut_db()[0]);
+            }
+        }
+        (
+            out[soft - 24_000..soft].to_vec(),
+            out[soft + 4800..].to_vec(),
+            cut,
+        )
+    }
+
+    #[test]
+    fn dynamic_band_cuts_a_swell_and_leaves_the_rest() {
+        let sr = 48_000.0;
+        let db = |x: &[f32], hz: f32| 20.0 * tone_level(x, sr, hz).log10();
+        let (soft_off, loud_off, none) = swell_through(0.0);
+        let (soft_on, loud_on, cut) = swell_through(9.0);
+        assert!(none == 0.0);
+        // The usual level passes as it came.
+        assert!(
+            (db(&soft_on, 300.0) - db(&soft_off, 300.0)).abs() < 0.3,
+            "{} {}",
+            db(&soft_on, 300.0),
+            db(&soft_off, 300.0)
+        );
+        // The swell is pulled down, by no more than the range, and the
+        // meter says so.
+        let less = db(&loud_off, 300.0) - db(&loud_on, 300.0);
+        assert!((5.0..=9.2).contains(&less), "{less}");
+        assert!((5.0..=9.0).contains(&cut), "{cut}");
+        // The rest of the sound is not touched.
+        assert!((db(&loud_on, 1000.0) - db(&loud_off, 1000.0)).abs() < 0.6);
+    }
+
+    #[test]
+    fn dynamic_band_at_zero_changes_nothing() {
+        let x = sine(48_000.0, 300.0, 4800, 0.5);
+        let mut eq = Eq::default();
+        eq.prepare(48_000.0);
+        eq.set(EqSettings::default(), true);
+        for v in x {
+            assert!(eq.tick(v, -v) == (v, -v));
+        }
+    }
+
     #[test]
     fn eq_plays_the_curve_it_draws() {
         let sr = 48_000.0;
@@ -1679,6 +1888,7 @@ mod tests {
             bells: [(300.0, -6.0, 1.4), (2500.0, 5.0, 0.8), (6000.0, -3.0, 3.0)],
             high_shelf_hz: 9000.0,
             high_shelf_db: 6.0,
+            dynamic: [0.0; EQ_BELLS],
         };
         let curve = EqCurve::new(&s, sr);
         // The bell reaches its gain at its centre.

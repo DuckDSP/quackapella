@@ -375,6 +375,13 @@ const REFERENCE_HZ: f32 = 185.0;
 const PRESENCE: (f32, f32) = (2500.0, 5000.0);
 const AIR: (f32, f32) = (8000.0, 14_000.0);
 const SIBILANT: (f32, f32) = (4000.0, 12_000.0);
+/// Where the voice is watched for swells (a boomy note, a hard vowel):
+/// low mids, mids, presence. One per bell of the output EQ.
+const SWELL: [(f32, f32); 3] = [(160.0, 450.0), (700.0, 2500.0), (2500.0, 5500.0)];
+/// A zone has to swell by more than this before its bell gets a
+/// dynamic cut, dB; and the most a proposal gives it.
+const SWELL_OK_DB: f32 = 3.0;
+const SWELL_MAX_DB: f32 = 6.0;
 
 /// The rest of the song, as far as the assistant could hear it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -417,6 +424,9 @@ pub struct Analysis {
     pub voiced_s: f32,
     /// The sibilants at the output, against the sung parts there (dB).
     pub out_sibilance: Option<f32>,
+    /// How far each zone of [`SWELL`] rises over its usual share of
+    /// the sound on its strong moments (about one frame in ten), dB.
+    pub swell: [f32; 3],
     /// The listen was made with the proposal playing: the output is
     /// the proposal's, and its sibilants are the output de-esser's to
     /// tame. Set by who runs the listens.
@@ -543,6 +553,8 @@ pub fn eq_in_force(get: &dyn Fn(ParamId) -> f64, sample_rate: f32) -> [f32; BAND
             low_shelf_hz: f(ParamId::EqLowShelfFreq),
             low_shelf_db: f(ParamId::EqLowShelfGain),
             bells: EQ_BELL_PARAMS.map(bell),
+            // The static curve: a dynamic cut comes and goes.
+            dynamic: [0.0; 3],
             high_shelf_hz: f(ParamId::EqHighShelfFreq),
             high_shelf_db: f(ParamId::EqHighShelfGain),
         },
@@ -613,6 +625,9 @@ pub struct Listener {
     quiet_frames: u32,
     /// Sung notes in semitone bins (MIDI numbers).
     notes: [u32; 128],
+    /// Each swell zone's share of the layers' sound, dB: sum and sum
+    /// of squares over the sung frames.
+    share: [(f64, f64); 3],
     frames: u32,
 }
 
@@ -682,6 +697,7 @@ impl Listener {
             quiet_levels: [0; 100],
             quiet_frames: 0,
             notes: [0; 128],
+            share: [(0.0, 0.0); 3],
             frames: 0,
         }
     }
@@ -799,6 +815,18 @@ impl Listener {
             add(&mut self.sung_in, &bands);
             add(&mut self.sung_lay, &lay);
             add(&mut self.sung_out, &out);
+            let whole = lay.iter().sum::<f64>().max(1e-30);
+            for (acc, zone) in self.share.iter_mut().zip(SWELL) {
+                let part: f64 = lay
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| (zone.0..zone.1).contains(&band_hz(*i)))
+                    .map(|(_, p)| *p)
+                    .sum();
+                let db = 10.0 * (part / whole).max(1e-6).log10();
+                acc.0 += db;
+                acc.1 += db * db;
+            }
             // The mix counts where it plays (over about -60 dBFS).
             if side.iter().sum::<f64>() > MIX_FLOOR {
                 add(&mut self.sung_side, &side);
@@ -940,6 +968,12 @@ impl Listener {
                 (self.sib_out_sum / f64::from(self.sib_frames.max(1))
                     - self.sung_out_sum / f64::from(self.sung_frames.max(1))) as f32
             }),
+            #[allow(clippy::cast_possible_truncation)]
+            swell: self.share.map(|(sum, sq)| {
+                let mean = sum / n;
+                // The strong tenth sits 1.3 deviations over the mean.
+                (1.3 * (sq / n - mean * mean).max(0.0).sqrt()) as f32
+            }),
             checked: false,
         })
     }
@@ -970,7 +1004,10 @@ impl Amounts {
 }
 
 /// Every parameter a proposal may set (what Undo has to remember).
-pub const PARAMS: [ParamId; 56] = [
+pub const PARAMS: [ParamId; 59] = [
+    ParamId::EqBell1Dyn,
+    ParamId::EqBell2Dyn,
+    ParamId::EqBell3Dyn,
     ParamId::FxOn,
     ParamId::ToneOn,
     ParamId::LowCut,
@@ -1105,6 +1142,8 @@ struct Plan {
     resonance: Option<(f32, f32)>,
     presence: f32,
     air: f32,
+    /// Dynamic cut of the three bells (mud, resonance, presence), dB.
+    dynamic: [f32; 3],
     exciter: f32,
     /// The lead voice's reverb and delay sends, %; `None`: the space
     /// is left alone.
@@ -1198,7 +1237,28 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
         .resonance()
         .map(|(hz, over)| (hz, -((over - 2.0).min(5.0) * amount)))
         .filter(|(_, db)| *db <= -1.0);
+    // A zone that swells on some notes gets a dynamic cut on its bell:
+    // the bell's own gain stays for the tone, the cut works only then.
+    let duck = |zone: usize| {
+        let over = (a.swell[zone] - SWELL_OK_DB + 1.0) * amount;
+        if a.swell[zone] > SWELL_OK_DB && over >= 1.0 {
+            over.min(SWELL_MAX_DB)
+        } else {
+            0.0
+        }
+    };
+    let dynamic = [
+        duck(0),
+        resonance.map_or(0.0, |(hz, _)| {
+            SWELL
+                .iter()
+                .position(|z| (z.0..z.1).contains(&hz))
+                .map_or(0.0, duck)
+        }),
+        duck(2),
+    ];
     Plan {
+        dynamic,
         low_cut,
         gate,
         deess,
@@ -1292,6 +1352,9 @@ pub fn propose(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Propo
         (ParamId::EqHighShelfFreq, f64::from(p.air_hz)),
         (ParamId::EqHighShelfGain, half(p.air)),
     ]);
+    for (id, db) in crate::params::EQ_DYN_PARAMS.iter().zip(p.dynamic) {
+        c.push((*id, half(db)));
+    }
     c.push((ParamId::ExciterAmount, f64::from(p.exciter)));
     // The output: a little glue for the voice and its layers, a ceiling
     // under full scale, and the de-esser once the output was heard.
@@ -1413,6 +1476,16 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<
         tone.push("little air".to_owned());
     } else if air > 2.5 {
         tone.push("bright".to_owned());
+    }
+    // The swells last, and only while the line stays short.
+    for (db, word) in [
+        (p.dynamic[0], "uneven lows"),
+        (p.dynamic[2], "uneven highs"),
+    ] {
+        let len: usize = tone.iter().map(|t| t.len() + 2).sum();
+        if db > 0.0 && len + word.len() <= 47 {
+            tone.push(word.to_owned());
+        }
     }
     out.push(if tone.is_empty() {
         format!("Tone close to the {} target.", style.name())
@@ -1714,5 +1787,41 @@ mod tests {
         assert!(bass.mud_hz < 250.0 && soprano.mud_hz > 380.0);
         assert!(bass.presence_hz >= 3000.0 && soprano.presence_hz <= 4300.0);
         assert!(bass.air_hz >= 8000.0 && soprano.air_hz <= 11_000.0);
+    }
+
+    #[test]
+    fn a_zone_that_swells_gets_a_dynamic_cut() {
+        let steady = sing(48_000.0, 146.8, -9.0, 12.0, 0.2, 0.001)
+            .finish(&[0.0; BANDS])
+            .expect("analysis");
+        // A steady vowel does not swell.
+        assert!(
+            steady.swell.iter().all(|s| *s < SWELL_OK_DB),
+            "{:?}",
+            steady.swell
+        );
+        let full = Amounts {
+            clarity: 1.0,
+            control: 1.0,
+            space: 0.0,
+        };
+        let dyn_of = |a: &Analysis, clarity: f32| {
+            let p = propose(a, Style::default(), Amounts { clarity, ..full }, 120.0);
+            crate::params::EQ_DYN_PARAMS.map(|id| p.get(id).expect("set"))
+        };
+        assert!(dyn_of(&steady, 1.0) == [0.0; 3]);
+        let boomy = Analysis {
+            swell: [5.5, 1.0, 9.0],
+            ..steady
+        };
+        let d = dyn_of(&boomy, 1.0);
+        assert!(
+            (d[0] - 3.5).abs() < 1e-6 && d[2] == f64::from(SWELL_MAX_DB),
+            "{d:?}"
+        );
+        // Clarity doses it, down to nothing.
+        assert!(dyn_of(&boomy, 0.5)[0] < d[0] && dyn_of(&boomy, 0.0) == [0.0; 3]);
+        let said = describe(&boomy, Style::default(), full, 120.0);
+        assert!(said[1].contains("uneven"), "{}", said[1]);
     }
 }

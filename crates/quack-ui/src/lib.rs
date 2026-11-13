@@ -101,6 +101,8 @@ pub struct View {
     /// The same, for the output dynamics.
     pub out_comp_db: f32,
     pub out_deess_db: f32,
+    /// What each bell of the output EQ cuts dynamically, dB (≥ 0).
+    pub eq_dyn_db: [f32; 3],
     /// Notes the MIDI output plays, bit n = note n.
     pub midi_out_notes: u128,
     /// A Quackapella Link sends the mix, the carrier (in that order).
@@ -1690,6 +1692,11 @@ impl UiState {
     }
 
     /// The engine's analysis taps, for the EQ graph's spectrum.
+    /// Show this band of the output EQ on the EQ tab's knobs.
+    pub fn select_eq_band(&mut self, band: usize) {
+        self.eq.band = band;
+    }
+
     pub fn set_taps(&mut self, taps: quack_dsp::tap::Taps) {
         self.eq.taps = Some(taps);
     }
@@ -2662,6 +2669,7 @@ mod tests {
                 deess_db: -1.0,
                 out_comp_db: 0.0,
                 out_deess_db: 0.0,
+                eq_dyn_db: [0.0; 3],
                 midi_out_notes: 0,
                 link: [false; 2],
             };
