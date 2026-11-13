@@ -59,6 +59,7 @@ pub fn build(params: Arc<QuackParams>) -> Box<dyn Editor> {
         st: UiState::default(),
         ctx: None,
     };
+    session.st.set_taps(shared.taps.clone());
     let mut themed = false;
     // Zoom applied to egui and the window (percent).
     let mut zoom_applied: Option<u16> = None;

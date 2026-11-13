@@ -1861,6 +1861,167 @@ pub struct QuackParams {
     )]
     pub delay_duck: FloatParam,
 
+    #[param(id = 1300, name = "EQ On", default = true)]
+    pub eq_on: BoolParam,
+
+    #[param(
+        id = 1301,
+        name = "EQ Low Cut",
+        range = "linear(20, 400)",
+        default = 20.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub eq_low_cut: FloatParam,
+
+    #[param(
+        id = 1302,
+        name = "EQ Low Shelf Freq",
+        range = "linear(40, 600)",
+        default = 150.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub eq_low_shelf_freq: FloatParam,
+
+    #[param(
+        id = 1303,
+        name = "EQ Low Shelf Gain",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_low_shelf_gain: FloatParam,
+
+    #[param(
+        id = 1304,
+        name = "EQ Bell 1 Freq",
+        range = "linear(60, 16000)",
+        default = 300.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub eq_bell_1_freq: FloatParam,
+
+    #[param(
+        id = 1305,
+        name = "EQ Bell 1 Gain",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_bell_1_gain: FloatParam,
+
+    #[param(
+        id = 1306,
+        name = "EQ Bell 1 Q",
+        range = "linear(0.3, 8)",
+        default = 1.0,
+        smooth = "none"
+    )]
+    pub eq_bell_1_q: FloatParam,
+
+    #[param(
+        id = 1307,
+        name = "EQ Bell 2 Freq",
+        range = "linear(60, 16000)",
+        default = 1500.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub eq_bell_2_freq: FloatParam,
+
+    #[param(
+        id = 1308,
+        name = "EQ Bell 2 Gain",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_bell_2_gain: FloatParam,
+
+    #[param(
+        id = 1309,
+        name = "EQ Bell 2 Q",
+        range = "linear(0.3, 8)",
+        default = 1.0,
+        smooth = "none"
+    )]
+    pub eq_bell_2_q: FloatParam,
+
+    #[param(
+        id = 1310,
+        name = "EQ Bell 3 Freq",
+        range = "linear(60, 16000)",
+        default = 4000.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub eq_bell_3_freq: FloatParam,
+
+    #[param(
+        id = 1311,
+        name = "EQ Bell 3 Gain",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_bell_3_gain: FloatParam,
+
+    #[param(
+        id = 1312,
+        name = "EQ Bell 3 Q",
+        range = "linear(0.3, 8)",
+        default = 1.0,
+        smooth = "none"
+    )]
+    pub eq_bell_3_q: FloatParam,
+
+    #[param(
+        id = 1313,
+        name = "EQ High Shelf Freq",
+        range = "linear(2000, 16000)",
+        default = 9000.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub eq_high_shelf_freq: FloatParam,
+
+    #[param(
+        id = 1314,
+        name = "EQ High Shelf Gain",
+        range = "linear(-12, 12)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub eq_high_shelf_gain: FloatParam,
+
+    #[param(
+        id = 1315,
+        name = "Exciter",
+        range = "linear(0, 100)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub exciter_amount: FloatParam,
+
+    #[param(
+        id = 1316,
+        name = "Exciter Freq",
+        range = "linear(1500, 8000)",
+        default = 3500.0,
+        unit = "Hz",
+        smooth = "none"
+    )]
+    pub exciter_freq: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -2204,6 +2365,7 @@ impl QuackParams {
             (ParamId::OutputOn, &self.output_on),
             (ParamId::KeepInKey, &self.keep_in_key),
             (ParamId::DriveOn, &self.drive_on),
+            (ParamId::EqOn, &self.eq_on),
         ] {
             v.set(id, f64::from(u8::from(p.value())));
         }
@@ -2230,6 +2392,22 @@ impl QuackParams {
             (ParamId::HarmonyDrive, &self.harmony_drive),
             (ParamId::VocoderDrive, &self.vocoder_drive),
             (ParamId::DelayDuck, &self.delay_duck),
+            (ParamId::EqLowCut, &self.eq_low_cut),
+            (ParamId::EqLowShelfFreq, &self.eq_low_shelf_freq),
+            (ParamId::EqLowShelfGain, &self.eq_low_shelf_gain),
+            (ParamId::EqBell1Freq, &self.eq_bell_1_freq),
+            (ParamId::EqBell1Gain, &self.eq_bell_1_gain),
+            (ParamId::EqBell1Q, &self.eq_bell_1_q),
+            (ParamId::EqBell2Freq, &self.eq_bell_2_freq),
+            (ParamId::EqBell2Gain, &self.eq_bell_2_gain),
+            (ParamId::EqBell2Q, &self.eq_bell_2_q),
+            (ParamId::EqBell3Freq, &self.eq_bell_3_freq),
+            (ParamId::EqBell3Gain, &self.eq_bell_3_gain),
+            (ParamId::EqBell3Q, &self.eq_bell_3_q),
+            (ParamId::EqHighShelfFreq, &self.eq_high_shelf_freq),
+            (ParamId::EqHighShelfGain, &self.eq_high_shelf_gain),
+            (ParamId::ExciterAmount, &self.exciter_amount),
+            (ParamId::ExciterFreq, &self.exciter_freq),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }

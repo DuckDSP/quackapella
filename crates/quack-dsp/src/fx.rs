@@ -4,6 +4,8 @@
 //!   and compressor. Every layer (lead, harmonies, vocoder modulator)
 //!   then gets a clean and even voice, and the pitch detector and the
 //!   vocoder's envelopes a steadier level.
+//! - [`Eq`] and [`Exciter`], after the layers and before the output
+//!   dynamics: the colour of the transformed sound.
 //! - [`Space`], on sends: each layer has its own send to a shared bus
 //!   with a tempo-synced delay and a reverb. *Duck* lowers that bus
 //!   while the voice sings and lets the tails come back in the gaps.
@@ -1180,6 +1182,352 @@ impl Distortion {
     }
 }
 
+/// Bells of the output EQ.
+pub const EQ_BELLS: usize = 3;
+/// Its bands: low cut, low shelf, the bells, high shelf.
+pub const EQ_BANDS: usize = EQ_BELLS + 3;
+const SHELF_Q: f32 = 0.707;
+
+/// Settings of the output EQ (plain values).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqSettings {
+    /// Low cut, Hz (at [`LOW_CUT_OFF_HZ`] or below: off).
+    pub low_cut_hz: f32,
+    pub low_shelf_hz: f32,
+    pub low_shelf_db: f32,
+    /// Bells: frequency (Hz), gain (dB) and Q.
+    pub bells: [(f32, f32, f32); EQ_BELLS],
+    pub high_shelf_hz: f32,
+    pub high_shelf_db: f32,
+}
+
+impl Default for EqSettings {
+    fn default() -> Self {
+        Self {
+            low_cut_hz: LOW_CUT_OFF_HZ,
+            low_shelf_hz: 150.0,
+            low_shelf_db: 0.0,
+            bells: [(300.0, 0.0, 1.0), (1500.0, 0.0, 1.0), (4000.0, 0.0, 1.0)],
+            high_shelf_hz: 9000.0,
+            high_shelf_db: 0.0,
+        }
+    }
+}
+
+/// One band of the EQ: a state-variable filter and the mix of its
+/// outputs (`m0·in + m1·band + m2·low`, or the high-pass output).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqSection {
+    g: f32,
+    k: f32,
+    m0: f32,
+    m1: f32,
+    m2: f32,
+    high_pass: bool,
+    /// Off: the band passes the signal untouched.
+    pub active: bool,
+}
+
+impl EqSection {
+    const FLAT: Self = Self {
+        g: 1.0,
+        k: 1.0,
+        m0: 1.0,
+        m1: 0.0,
+        m2: 0.0,
+        high_pass: false,
+        active: false,
+    };
+
+    fn warp(sample_rate: f32, hz: f32) -> f32 {
+        (PI * hz.clamp(10.0, 0.45 * sample_rate) / sample_rate).tan()
+    }
+
+    fn low_cut(sample_rate: f32, hz: f32) -> Self {
+        Self {
+            g: Self::warp(sample_rate, hz),
+            k: 1.0 / SHELF_Q,
+            high_pass: true,
+            active: hz > LOW_CUT_OFF_HZ + 0.01,
+            ..Self::FLAT
+        }
+    }
+
+    fn bell(sample_rate: f32, hz: f32, db: f32, q: f32) -> Self {
+        let a = 10.0_f32.powf(db / 40.0);
+        let k = 1.0 / (q.max(0.05) * a);
+        Self {
+            g: Self::warp(sample_rate, hz),
+            k,
+            m0: 1.0,
+            m1: k * (a * a - 1.0),
+            m2: 0.0,
+            high_pass: false,
+            active: db.abs() > 0.01,
+        }
+    }
+
+    fn low_shelf(sample_rate: f32, hz: f32, db: f32) -> Self {
+        let a = 10.0_f32.powf(db / 40.0);
+        let k = 1.0 / SHELF_Q;
+        Self {
+            g: Self::warp(sample_rate, hz) / a.sqrt(),
+            k,
+            m0: 1.0,
+            m1: k * (a - 1.0),
+            m2: a * a - 1.0,
+            high_pass: false,
+            active: db.abs() > 0.01,
+        }
+    }
+
+    fn high_shelf(sample_rate: f32, hz: f32, db: f32) -> Self {
+        let a = 10.0_f32.powf(db / 40.0);
+        let k = 1.0 / SHELF_Q;
+        Self {
+            g: Self::warp(sample_rate, hz) * a.sqrt(),
+            k,
+            m0: a * a,
+            m1: k * (1.0 - a) * a,
+            m2: 1.0 - a * a,
+            high_pass: false,
+            active: db.abs() > 0.01,
+        }
+    }
+
+    /// The band's gain at `hz`, in dB (what the filter does, frequency
+    /// warping included).
+    #[must_use]
+    pub fn gain_db(&self, sample_rate: f32, hz: f32) -> f32 {
+        if !self.active {
+            return 0.0;
+        }
+        let w = (PI * hz.clamp(1.0, 0.49 * sample_rate) / sample_rate).tan() / self.g;
+        let den = (1.0 - w * w).powi(2) + (self.k * w).powi(2);
+        let num = if self.high_pass {
+            w.powi(4)
+        } else {
+            (self.m0 * (1.0 - w * w) + self.m2).powi(2) + (w * (self.m0 * self.k + self.m1)).powi(2)
+        };
+        10.0 * (num / den.max(1e-20)).max(1e-12).log10()
+    }
+}
+
+/// The EQ's curve for a set of values: what [`Eq`] plays and what the
+/// editor draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqCurve {
+    pub sections: [EqSection; EQ_BANDS],
+    sample_rate: f32,
+}
+
+impl EqCurve {
+    #[must_use]
+    pub fn new(s: &EqSettings, sample_rate: f32) -> Self {
+        let sr = sample_rate.max(1.0);
+        let mut sections = [EqSection::FLAT; EQ_BANDS];
+        sections[0] = EqSection::low_cut(sr, s.low_cut_hz);
+        sections[1] = EqSection::low_shelf(sr, s.low_shelf_hz, s.low_shelf_db);
+        for (i, (hz, db, q)) in s.bells.into_iter().enumerate() {
+            sections[2 + i] = EqSection::bell(sr, hz, db, q);
+        }
+        sections[EQ_BANDS - 1] = EqSection::high_shelf(sr, s.high_shelf_hz, s.high_shelf_db);
+        Self {
+            sections,
+            sample_rate: sr,
+        }
+    }
+
+    /// Gain of the whole EQ at `hz`, in dB.
+    #[must_use]
+    pub fn gain_db(&self, hz: f32) -> f32 {
+        self.sections
+            .iter()
+            .map(|s| s.gain_db(self.sample_rate, hz))
+            .sum()
+    }
+}
+
+/// Output EQ, after the layers: low cut, low shelf, three bells, high
+/// shelf. Minimum phase, no latency. A flat band costs nothing.
+/// Real-time safe.
+#[derive(Debug, Clone)]
+pub struct Eq {
+    sample_rate: f32,
+    settings: EqSettings,
+    sections: [EqSection; EQ_BANDS],
+    state: [[Svf; 2]; EQ_BANDS],
+    on: bool,
+}
+
+impl Default for Eq {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48_000.0,
+            settings: EqSettings::default(),
+            sections: [EqSection::FLAT; EQ_BANDS],
+            state: [[Svf::default(); 2]; EQ_BANDS],
+            on: false,
+        }
+    }
+}
+
+impl Eq {
+    pub fn prepare(&mut self, sample_rate: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.sample_rate = sample_rate as f32;
+        }
+        let (s, on) = (self.settings, self.on);
+        self.set(s, on);
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        for f in self.state.iter_mut().flatten() {
+            f.reset();
+        }
+    }
+
+    pub fn set(&mut self, s: EqSettings, on: bool) {
+        self.settings = s;
+        self.on = on;
+        self.sections = EqCurve::new(&s, self.sample_rate).sections;
+        for (sec, state) in self.sections.iter().zip(self.state.iter_mut()) {
+            for f in state {
+                f.g = sec.g;
+                f.k = sec.k;
+                f.a1 = 1.0 / (1.0 + sec.g * (sec.g + sec.k));
+                if !sec.active || !on {
+                    // Nothing left over for when the band comes back.
+                    f.reset();
+                }
+            }
+        }
+    }
+
+    #[inline]
+    pub fn tick(&mut self, l: f32, r: f32) -> (f32, f32) {
+        if !self.on {
+            return (l, r);
+        }
+        let mut io = [l, r];
+        for (sec, state) in self.sections.iter().zip(self.state.iter_mut()) {
+            if !sec.active {
+                continue;
+            }
+            for (x, f) in io.iter_mut().zip(state.iter_mut()) {
+                let (lp, bp, hp) = f.tick(*x);
+                *x = if sec.high_pass {
+                    hp
+                } else {
+                    sec.m0 * *x + sec.m1 * bp + sec.m2 * lp
+                };
+            }
+        }
+        (io[0], io[1])
+    }
+}
+
+/// Settings of the exciter (plain values).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExciterSettings {
+    /// 0-1; at 0 the exciter is out of the path.
+    pub amount: f32,
+    /// Where the harmonics start, Hz.
+    pub hz: f32,
+}
+
+impl Default for ExciterSettings {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            hz: 3500.0,
+        }
+    }
+}
+
+/// Top of the band the harmonics are made from: above it they would
+/// fold back under the sample rate's half.
+const EXCITER_TOP_HZ: f32 = 9000.0;
+
+/// Exciter, after the EQ: new harmonics above `hz`, made from the band
+/// just over it and added to the sound. Where an EQ can only raise what
+/// is there (and the hiss with it), this makes top end a dull take
+/// lacks. The harmonics follow the level of the band, so soft and loud
+/// phrases get the same share. In parallel, no latency. Real-time safe.
+#[derive(Debug, Clone, Default)]
+pub struct Exciter {
+    sample_rate: f32,
+    settings: ExciterSettings,
+    pre: [Svf; 2],
+    band: [Svf; 2],
+    post: [Svf; 2],
+    env: [Follower; 2],
+    gain: f32,
+}
+
+impl Exciter {
+    pub fn prepare(&mut self, sample_rate: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.sample_rate = sample_rate as f32;
+        }
+        let s = self.settings;
+        self.set(s);
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        for f in self
+            .pre
+            .iter_mut()
+            .chain(self.band.iter_mut())
+            .chain(self.post.iter_mut())
+        {
+            f.reset();
+        }
+        for e in &mut self.env {
+            e.env = 0.0;
+        }
+    }
+
+    pub fn set(&mut self, s: ExciterSettings) {
+        let was_on = self.settings.amount > 0.0;
+        self.settings = s;
+        let sr = self.sample_rate.max(1.0);
+        for c in 0..2 {
+            self.pre[c].set(sr, s.hz, 0.707);
+            self.band[c].set(sr, EXCITER_TOP_HZ.max(s.hz * 1.5), 0.707);
+            self.post[c].set(sr, s.hz, 0.707);
+            self.env[c].set(sr, 1.0, 60.0);
+        }
+        self.gain = 0.5 * s.amount.clamp(0.0, 1.0);
+        if s.amount > 0.0 && !was_on {
+            self.reset();
+        }
+    }
+
+    #[inline]
+    pub fn tick(&mut self, l: f32, r: f32) -> (f32, f32) {
+        if self.gain <= 0.0 {
+            return (l, r);
+        }
+        let mut io = [l, r];
+        for (c, x) in io.iter_mut().enumerate() {
+            let high = self.pre[c].tick(*x).2;
+            let band = self.band[c].tick(high).0;
+            let env = self.env[c].tick(band);
+            // Shaped at a constant drive, then back at the band's level.
+            let u = (band / env.max(1e-4)).clamp(-1.5, 1.5);
+            let shaped = env * (0.5 * u.abs() + 0.5 * (2.0 * u).tanh());
+            // Without the DC and the difference tones under the band.
+            *x += self.gain * self.post[c].tick(shaped).2;
+        }
+        (io[0], io[1])
+    }
+}
+
 /// Settings of the output dynamics (plain values, 0-1 amounts).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputSettings {
@@ -1286,6 +1634,115 @@ mod tests {
     fn rms(x: &[f32]) -> f32 {
         #[allow(clippy::cast_precision_loss)]
         (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// Level of `hz` in `x` (amplitude of that sine).
+    fn tone_level(x: &[f32], sr: f32, hz: f32) -> f32 {
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for (i, v) in x.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let ph = 2.0 * std::f64::consts::PI * f64::from(hz) * i as f64 / f64::from(sr);
+            re += f64::from(*v) * ph.cos();
+            im += f64::from(*v) * ph.sin();
+        }
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let a = (2.0 * (re * re + im * im).sqrt() / x.len() as f64) as f32;
+        a
+    }
+
+    #[test]
+    fn flat_eq_is_transparent() {
+        let mut eq = Eq::default();
+        eq.prepare(48_000.0);
+        eq.set(EqSettings::default(), true);
+        for x in sine(48_000.0, 220.0, 4800, 0.5) {
+            let (l, r) = eq.tick(x, -x);
+            assert!((l - x).abs() < 1e-7 && (r + x).abs() < 1e-7);
+        }
+        assert!(
+            EqCurve::new(&EqSettings::default(), 48_000.0)
+                .gain_db(1000.0)
+                .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn eq_plays_the_curve_it_draws() {
+        let sr = 48_000.0;
+        let s = EqSettings {
+            low_cut_hz: 90.0,
+            low_shelf_hz: 200.0,
+            low_shelf_db: -4.0,
+            bells: [(300.0, -6.0, 1.4), (2500.0, 5.0, 0.8), (6000.0, -3.0, 3.0)],
+            high_shelf_hz: 9000.0,
+            high_shelf_db: 6.0,
+        };
+        let curve = EqCurve::new(&s, sr);
+        // The bell reaches its gain at its centre.
+        let alone = EqSettings {
+            bells: [(300.0, 0.0, 1.0), (2500.0, 5.0, 0.8), (4000.0, 0.0, 1.0)],
+            ..EqSettings::default()
+        };
+        assert!((EqCurve::new(&alone, sr).gain_db(2500.0) - 5.0).abs() < 0.05);
+        // The shelves reach theirs far from the corner.
+        let shelf = EqSettings {
+            high_shelf_db: 6.0,
+            low_shelf_db: -4.0,
+            ..EqSettings::default()
+        };
+        let c = EqCurve::new(&shelf, sr);
+        assert!((c.gain_db(20_000.0) - 6.0).abs() < 0.3);
+        assert!((c.gain_db(20.0) + 4.0).abs() < 0.3);
+        for hz in [60.0, 150.0, 300.0, 1000.0, 2500.0, 6000.0, 12_000.0] {
+            let mut eq = Eq::default();
+            eq.prepare(f64::from(sr));
+            eq.set(s, true);
+            let x = sine(sr, hz, 48_000, 0.25);
+            let y: Vec<f32> = x.iter().map(|v| eq.tick(*v, *v).0).collect();
+            let played = to_db(rms(&y[24_000..]) / rms(&x[24_000..]));
+            assert!(
+                (played - curve.gain_db(hz)).abs() < 0.2,
+                "{hz} Hz: plays {played} dB, draws {} dB",
+                curve.gain_db(hz)
+            );
+        }
+    }
+
+    #[test]
+    fn exciter_adds_harmonics_and_only_when_on() {
+        let sr = 48_000.0;
+        let x = sine(sr, 4000.0, 24_000, 0.25);
+        let mut ex = Exciter::default();
+        ex.prepare(f64::from(sr));
+        for v in &x {
+            let (l, _) = ex.tick(*v, *v);
+            assert!((l - v).abs() < 1e-9);
+        }
+        ex.set(ExciterSettings {
+            amount: 1.0,
+            hz: 3000.0,
+        });
+        let y: Vec<f32> = x.iter().map(|v| ex.tick(*v, *v).0).collect();
+        let tail = &y[12_000..];
+        let second = tone_level(tail, sr, 8000.0);
+        let third = tone_level(tail, sr, 12_000.0);
+        assert!(second > 0.01 && third > 0.003, "{second} {third}");
+        assert!(tail.iter().all(|v| v.abs() < 0.6));
+        // Nothing under the band: a low note makes no harmonics.
+        let low = sine(sr, 200.0, 24_000, 0.25);
+        let z: Vec<f32> = low.iter().map(|v| ex.tick(*v, *v).0).collect();
+        assert!(tone_level(&z[12_000..], sr, 400.0) < 0.002);
+        // The same share soft or loud.
+        let mut soft = Exciter::default();
+        soft.prepare(f64::from(sr));
+        soft.set(ExciterSettings {
+            amount: 1.0,
+            hz: 3000.0,
+        });
+        let q: Vec<f32> = x.iter().map(|v| soft.tick(0.1 * v, 0.1 * v).0).collect();
+        let ratio = tone_level(&q[12_000..], sr, 8000.0) / second;
+        assert!((ratio - 0.1).abs() < 0.02, "{ratio}");
     }
 
     #[test]

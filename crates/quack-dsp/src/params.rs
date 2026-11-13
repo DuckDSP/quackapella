@@ -9,7 +9,8 @@
 //! autotune, `400..` harmonizer, `500..` vocoder, `600..` Manipulator
 //! style effects, `700..` macros, `800..` layer routing, `900..` voice effects
 //! (dynamics, delay, reverb), `1000..` vocoder enrichments, `1100..`
-//! throat and harmony humanize, `1200..` snapshots and MIDI out.
+//! throat and harmony humanize, `1200..` snapshots and MIDI out, `1300..`
+//! output EQ, exciter and (later) the mixing assistant.
 
 /// How a parameter maps between plain and normalized (0..1) values.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -279,9 +280,26 @@ pub enum ParamId {
     HarmonyDrive,
     VocoderDrive,
     DelayDuck,
+    EqOn,
+    EqLowCut,
+    EqLowShelfFreq,
+    EqLowShelfGain,
+    EqBell1Freq,
+    EqBell1Gain,
+    EqBell1Q,
+    EqBell2Freq,
+    EqBell2Gain,
+    EqBell2Q,
+    EqBell3Freq,
+    EqBell3Gain,
+    EqBell3Q,
+    EqHighShelfFreq,
+    EqHighShelfGain,
+    ExciterAmount,
+    ExciterFreq,
 }
 
-pub const PARAM_COUNT: usize = 176;
+pub const PARAM_COUNT: usize = 193;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -289,6 +307,25 @@ pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
     ParamId::HarmonyPan2,
     ParamId::HarmonyPan3,
     ParamId::HarmonyPan4,
+];
+
+/// The bells of the output EQ: frequency, gain, Q.
+pub const EQ_BELL_PARAMS: [[ParamId; 3]; 3] = [
+    [
+        ParamId::EqBell1Freq,
+        ParamId::EqBell1Gain,
+        ParamId::EqBell1Q,
+    ],
+    [
+        ParamId::EqBell2Freq,
+        ParamId::EqBell2Gain,
+        ParamId::EqBell2Q,
+    ],
+    [
+        ParamId::EqBell3Freq,
+        ParamId::EqBell3Gain,
+        ParamId::EqBell3Q,
+    ],
 ];
 
 /// The four macro knobs (see [`crate::control`]).
@@ -350,7 +387,7 @@ pub const NOTE_PARAMS: [ParamId; 12] = [
     ParamId::NoteB,
 ];
 
-const SPECS: [ParamSpec; PARAM_COUNT] = [
+static SPECS: [ParamSpec; PARAM_COUNT] = [
     ParamSpec {
         key: "input_gain",
         host_id: 0,
@@ -2111,6 +2148,189 @@ const SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "eq_on",
+        host_id: 1300,
+        name: "EQ On",
+        unit: "",
+        kind: ParamKind::Bool { default: true },
+    },
+    ParamSpec {
+        key: "eq_low_cut",
+        host_id: 1301,
+        name: "EQ Low Cut",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 20.0,
+            max: 400.0,
+            default: 20.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_low_shelf_freq",
+        host_id: 1302,
+        name: "EQ Low Shelf Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 40.0,
+            max: 600.0,
+            default: 150.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_low_shelf_gain",
+        host_id: 1303,
+        name: "EQ Low Shelf Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_1_freq",
+        host_id: 1304,
+        name: "EQ Bell 1 Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 60.0,
+            max: 16000.0,
+            default: 300.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_1_gain",
+        host_id: 1305,
+        name: "EQ Bell 1 Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_1_q",
+        host_id: 1306,
+        name: "EQ Bell 1 Q",
+        unit: "",
+        kind: ParamKind::Float {
+            min: 0.3,
+            max: 8.0,
+            default: 1.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_2_freq",
+        host_id: 1307,
+        name: "EQ Bell 2 Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 60.0,
+            max: 16000.0,
+            default: 1500.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_2_gain",
+        host_id: 1308,
+        name: "EQ Bell 2 Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_2_q",
+        host_id: 1309,
+        name: "EQ Bell 2 Q",
+        unit: "",
+        kind: ParamKind::Float {
+            min: 0.3,
+            max: 8.0,
+            default: 1.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_3_freq",
+        host_id: 1310,
+        name: "EQ Bell 3 Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 60.0,
+            max: 16000.0,
+            default: 4000.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_3_gain",
+        host_id: 1311,
+        name: "EQ Bell 3 Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_3_q",
+        host_id: 1312,
+        name: "EQ Bell 3 Q",
+        unit: "",
+        kind: ParamKind::Float {
+            min: 0.3,
+            max: 8.0,
+            default: 1.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_high_shelf_freq",
+        host_id: 1313,
+        name: "EQ High Shelf Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 2000.0,
+            max: 16000.0,
+            default: 9000.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_high_shelf_gain",
+        host_id: 1314,
+        name: "EQ High Shelf Gain",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "exciter_amount",
+        host_id: 1315,
+        name: "Exciter",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "exciter_freq",
+        host_id: 1316,
+        name: "Exciter Freq",
+        unit: "Hz",
+        kind: ParamKind::Float {
+            min: 1500.0,
+            max: 8000.0,
+            default: 3500.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -2291,6 +2511,23 @@ impl ParamId {
         Self::HarmonyDrive,
         Self::VocoderDrive,
         Self::DelayDuck,
+        Self::EqOn,
+        Self::EqLowCut,
+        Self::EqLowShelfFreq,
+        Self::EqLowShelfGain,
+        Self::EqBell1Freq,
+        Self::EqBell1Gain,
+        Self::EqBell1Q,
+        Self::EqBell2Freq,
+        Self::EqBell2Gain,
+        Self::EqBell2Q,
+        Self::EqBell3Freq,
+        Self::EqBell3Gain,
+        Self::EqBell3Q,
+        Self::EqHighShelfFreq,
+        Self::EqHighShelfGain,
+        Self::ExciterAmount,
+        Self::ExciterFreq,
     ];
 
     #[must_use]

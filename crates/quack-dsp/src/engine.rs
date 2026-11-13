@@ -32,7 +32,8 @@ use crate::creative::{Glitch, GlitchMode, GlitchRate, Robot, Steer};
 use crate::db_to_gain;
 use crate::fx::{
     Chorus, ChorusSettings, Distortion, Division, DriveSettings, DriveStyle, Dynamics,
-    DynamicsSettings, Output, OutputSettings, Space, SpaceSettings, Tone, ToneSettings,
+    DynamicsSettings, Eq, EqSettings, Exciter, ExciterSettings, Output, OutputSettings, Space,
+    SpaceSettings, Tone, ToneSettings,
 };
 use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
@@ -46,6 +47,7 @@ use crate::shift::{Buses, LAYERS, Psola, semitones_to_ratio};
 /// heard as an effect, which is the Tune mode's job.
 pub const NATURAL_MIN_RETUNE_S: f64 = 0.03;
 use crate::smooth::Ramp;
+use crate::tap::Taps;
 use crate::throat::{self, Throat};
 use crate::vocoder::{Carrier, FollowChord, Vocoder, VocoderMode, bands_from_index};
 
@@ -133,6 +135,13 @@ pub struct Engine {
     drives: [Distortion; 4],
     drive_on: bool,
     output: Output,
+    /// Colour of the transformed sound: EQ and exciter after the
+    /// layers, before the delay and reverb returns and the output
+    /// dynamics.
+    eq: Eq,
+    exciter: Exciter,
+    /// Analysis taps for the editor (off the audio path).
+    taps: Taps,
     /// Transposition before the correction (the voice stays in key).
     keep_in_key: bool,
 }
@@ -200,6 +209,9 @@ impl Engine {
             drives: Default::default(),
             drive_on: false,
             output: Output::default(),
+            eq: Eq::default(),
+            exciter: Exciter::default(),
+            taps: Taps::default(),
             keep_in_key: false,
         };
         e.prepare(48_000.0, 512);
@@ -256,6 +268,8 @@ impl Engine {
             d.prepare(sample_rate);
         }
         self.output.prepare(sample_rate);
+        self.eq.prepare(sample_rate);
+        self.exciter.prepare(sample_rate);
         self.space.prepare(sample_rate);
         self.notes.clear();
         self.latency = max;
@@ -321,6 +335,8 @@ impl Engine {
             d.reset();
         }
         self.output.reset();
+        self.eq.reset();
+        self.exciter.reset();
         self.space.reset();
         self.notes.clear();
         self.apply_all(true);
@@ -579,7 +595,24 @@ impl Engine {
             | ParamId::VoiceDrive
             | ParamId::CreativeDrive
             | ParamId::HarmonyDrive
-            | ParamId::VocoderDrive => {
+            | ParamId::VocoderDrive
+            | ParamId::EqOn
+            | ParamId::EqLowCut
+            | ParamId::EqLowShelfFreq
+            | ParamId::EqLowShelfGain
+            | ParamId::EqBell1Freq
+            | ParamId::EqBell1Gain
+            | ParamId::EqBell1Q
+            | ParamId::EqBell2Freq
+            | ParamId::EqBell2Gain
+            | ParamId::EqBell2Q
+            | ParamId::EqBell3Freq
+            | ParamId::EqBell3Gain
+            | ParamId::EqBell3Q
+            | ParamId::EqHighShelfFreq
+            | ParamId::EqHighShelfGain
+            | ParamId::ExciterAmount
+            | ParamId::ExciterFreq => {
                 self.update_fx(snap);
                 return;
             }
@@ -659,6 +692,27 @@ impl Engine {
             d.set(drive);
         }
         self.drive_on = sw(ParamId::DriveOn);
+        let bell = |ids: [ParamId; 3]| (f(ids[0]), f(ids[1]), f(ids[2]));
+        let eq_on = sw(ParamId::EqOn);
+        self.eq.set(
+            EqSettings {
+                low_cut_hz: f(ParamId::EqLowCut),
+                low_shelf_hz: f(ParamId::EqLowShelfFreq),
+                low_shelf_db: f(ParamId::EqLowShelfGain),
+                bells: crate::params::EQ_BELL_PARAMS.map(bell),
+                high_shelf_hz: f(ParamId::EqHighShelfFreq),
+                high_shelf_db: f(ParamId::EqHighShelfGain),
+            },
+            eq_on,
+        );
+        self.exciter.set(ExciterSettings {
+            amount: if eq_on {
+                pct(ParamId::ExciterAmount)
+            } else {
+                0.0
+            },
+            hz: f(ParamId::ExciterFreq),
+        });
         self.output.set(
             OutputSettings {
                 deess: pct(ParamId::OutDeEss),
@@ -690,6 +744,8 @@ impl Engine {
                 d.reset();
             }
             self.output.reset();
+            self.eq.reset();
+            self.exciter.reset();
             self.space.reset();
         }
         self.fx_on = on;
@@ -760,6 +816,17 @@ impl Engine {
     #[must_use]
     pub fn fx_reduction_db(&self) -> (f32, f32) {
         self.dynamics.reduction_db()
+    }
+
+    /// The analysis taps (shared rings, see [`crate::tap`]).
+    #[must_use]
+    pub fn taps(&self) -> Taps {
+        self.taps.clone()
+    }
+
+    /// Write the taps into rings the editor already holds.
+    pub fn set_taps(&mut self, taps: Taps) {
+        self.taps = taps;
     }
 
     /// Gain reduction of the output compressor and de-esser, in dB (≤ 0).
@@ -1164,6 +1231,7 @@ impl Engine {
             } else {
                 (voice_l * g_in, voice_r * g_in)
             };
+            self.taps.input.push(0.5 * (voice_l + voice_r) * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (self.dry[0].tick(voice_l), self.dry[1].tick(voice_r));
@@ -1261,6 +1329,15 @@ impl Engine {
                     .tick_send(bus.wet.0, bus.wet.1, bus.chorus.0, bus.chorus.1)
             } else {
                 bus.wet
+            };
+            // What the layers made, for the editor's spectrum, then its
+            // colour: EQ and exciter.
+            self.taps.layers.push(0.5 * (wet_l + wet_r));
+            let (wet_l, wet_r) = if fx {
+                let (a, b) = self.eq.tick(wet_l, wet_r);
+                self.exciter.tick(a, b)
+            } else {
+                (wet_l, wet_r)
             };
             let (wet_l, wet_r) = if self.space_on {
                 // Ducked by the voice as it comes out (lined up with it).

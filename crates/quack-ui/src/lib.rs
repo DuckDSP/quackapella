@@ -20,6 +20,7 @@
 
 mod brand;
 mod controls;
+mod eq;
 pub mod library;
 mod paint;
 pub mod perform;
@@ -133,6 +134,8 @@ pub struct UiState {
     presets: perform::PresetUi,
     /// Effect shown on the FX page.
     fx_tab: FxTab,
+    /// The output EQ's graph: selected band, drag, spectrum.
+    eq: eq::EqUi,
     /// Vocoder page's tab: 0 voice and effects, 1 carrier.
     vocoder_tab: usize,
     /// Perform row lists open, and where they hang from.
@@ -158,6 +161,7 @@ impl Default for UiState {
             mix_layer: Page::Voice,
             presets: perform::PresetUi::default(),
             fx_tab: FxTab::default(),
+            eq: eq::EqUi::default(),
             vocoder_tab: 0,
             keys_menu: false,
             voice_menu: false,
@@ -246,6 +250,7 @@ impl UiState {
         if let Some((id, _)) = self.drag.take() {
             params.end_edit(id);
         }
+        eq::end_drag(params, self);
     }
 }
 
@@ -361,8 +366,16 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     // Tune panel and pitch graph.
     let mid_top = mode_r.bottom() + space::M;
     let mid_h = 318.0;
-    let tune_r = Rect::from_min_size(pos2(inner.left(), mid_top), vec2(452.0, mid_h));
-    tune_panel(ui, params, st, view, tune_r, accent, mode);
+    // The FX page gives its eight tabs a little more room.
+    let tune_w = if st.page == Page::Fx { 420.0 } else { 452.0 };
+    let tune_r = Rect::from_min_size(pos2(inner.left(), mid_top), vec2(tune_w, mid_h));
+    if st.page == Page::Fx {
+        // The FX page takes the whole row: the output EQ's graph where
+        // the tune panel is on the layers' pages.
+        eq::graph_panel(ui, params, st, view, tune_r, color::FX);
+    } else {
+        tune_panel(ui, params, st, view, tune_r, accent, mode);
+    }
     let graph_r = Rect::from_min_max(
         pos2(tune_r.right() + space::M, mid_top),
         pos2(inner.right(), mid_top + mid_h),
@@ -440,7 +453,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     perform::preset_bar(ui, params, st, bar_r);
 
     // Safety net: a drag cut short (window lost focus) ends its edit.
-    if st.drag.is_some() && !ui.input(|i| i.pointer.any_down()) {
+    if (st.drag.is_some() || st.eq.dragging()) && !ui.input(|i| i.pointer.any_down()) {
         st.end_open_edits(params);
     }
 }
@@ -1584,17 +1597,20 @@ pub enum FxTab {
     Input,
     Drive,
     Chorus,
+    /// Output EQ and exciter (after the chorus, before the returns).
+    Eq,
     Delay,
     Reverb,
     Output,
 }
 
 impl FxTab {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Tone,
         Self::Input,
         Self::Drive,
         Self::Chorus,
+        Self::Eq,
         Self::Delay,
         Self::Reverb,
         Self::Output,
@@ -1607,6 +1623,7 @@ impl FxTab {
             Self::Input => "Input",
             Self::Drive => "Drive",
             Self::Chorus => "Chorus",
+            Self::Eq => "EQ",
             Self::Delay => "Delay",
             Self::Reverb => "Reverb",
             Self::Output => "Output",
@@ -1621,6 +1638,7 @@ impl FxTab {
             Self::Input => Some(ParamId::DynamicsOn),
             Self::Drive => Some(ParamId::DriveOn),
             Self::Chorus => Some(ParamId::ChorusOn),
+            Self::Eq => Some(ParamId::EqOn),
             Self::Delay => Some(ParamId::DelayOn),
             Self::Reverb => Some(ParamId::ReverbOn),
             Self::Output => Some(ParamId::OutputOn),
@@ -1634,6 +1652,7 @@ impl FxTab {
             Self::Input => "Gate, de-esser and compressor on the input",
             Self::Drive => "Each layer's amount is in the mixer below",
             Self::Chorus => "Each layer's amount is in the mixer below",
+            Self::Eq => "EQ and exciter on the transformed sound, after the layers",
             Self::Delay => "Each layer's send is in the mixer below",
             Self::Reverb => "Each layer's send is in the mixer below",
             Self::Output => "De-esser, compressor and limiter on the whole sound",
@@ -1651,6 +1670,11 @@ impl UiState {
 
     pub fn set_fx_tab(&mut self, tab: FxTab) {
         self.fx_tab = tab;
+    }
+
+    /// The engine's analysis taps, for the EQ graph's spectrum.
+    pub fn set_taps(&mut self, taps: quack_dsp::tap::Taps) {
+        self.eq.taps = Some(taps);
     }
 }
 
@@ -1718,8 +1742,16 @@ fn fx_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, a
         paint::rounded(p, cell, radius::CONTROL, fill, stroke);
         text(
             p,
-            name_r.center() - vec2(1.0, 0.0),
-            Align2::CENTER_CENTER,
+            if tab.switch().is_some() {
+                name_r.left_center()
+            } else {
+                name_r.center()
+            },
+            if tab.switch().is_some() {
+                Align2::LEFT_CENTER
+            } else {
+                Align2::CENTER_CENTER
+            },
             tab.name(),
             size::CAPTION - 1.0,
             if shown {
@@ -1737,7 +1769,7 @@ fn fx_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, a
                 set_once(params, id, if on { 0.0 } else { 1.0 });
             }
             crate::perform::attach(ui, &presp, params, id);
-            let dot = dot_r.center() + vec2(2.5, 0.0);
+            let dot = dot_r.center() + vec2(0.5, 0.0);
             let ring = if presp.hovered() {
                 color::TEXT_DIM
             } else {
@@ -1940,6 +1972,7 @@ fn fx_panel(
             ];
             fx_knobs(ui, params, st, r, (y1 + y2) / 2.0, 4, 1, &k);
         }
+        FxTab::Eq => eq::tab(ui, params, st, r, y1, y2, live(true), dim),
         FxTab::Delay => {
             let sync = params.get_plain(ParamId::DelaySync) >= 0.5;
             let ping = params.get_plain(ParamId::DelayPingPong) >= 0.5;

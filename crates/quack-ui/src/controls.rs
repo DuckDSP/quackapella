@@ -88,8 +88,45 @@ pub(crate) fn knob_named(
     fmt: &dyn Fn(f64) -> String,
     label: &str,
 ) {
+    knob_tapered(
+        ui, params, st, id, centre, size_pt, floor, accent, fmt, label, false,
+    );
+}
+
+/// [`knob_named`], with a logarithmic travel when `log` is set (for
+/// frequencies: an octave is the same turn everywhere). The parameter
+/// itself stays linear for the host.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn knob_tapered(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    id: ParamId,
+    centre: egui::Pos2,
+    size_pt: f32,
+    floor: f64,
+    accent: Color32,
+    fmt: &dyn Fn(f64) -> String,
+    label: &str,
+    log: bool,
+) {
     let spec = id.spec();
     let kind = spec.kind;
+    let log = log && kind.min() > 0.0;
+    let norm = |plain: f64| {
+        if log {
+            log_norm(kind.min(), kind.max(), plain)
+        } else {
+            kind.normalize(plain)
+        }
+    };
+    let denorm = |n: f64| {
+        if log {
+            kind.sanitize(log_denorm(kind.min(), kind.max(), n))
+        } else {
+            kind.denormalize(n)
+        }
+    };
     let raw = params.get_plain(id);
     let plain = raw.max(floor);
     let area = Rect::from_center_size(centre, vec2(size_pt, size_pt));
@@ -101,7 +138,7 @@ pub(crate) fn knob_named(
 
     if resp.drag_started() {
         params.begin_edit(id);
-        st.drag = Some((id, kind.normalize(plain)));
+        st.drag = Some((id, norm(plain)));
     }
     if resp.dragged()
         && let Some((d, n0)) = st.drag
@@ -118,7 +155,7 @@ pub(crate) fn knob_named(
         };
         let moved = (now.x - from.x) - (now.y - from.y);
         let n = (n0 + f64::from(moved / KNOB_TRAVEL) * fine).clamp(0.0, 1.0);
-        let target = kind.denormalize(n).max(floor);
+        let target = denorm(n).max(floor);
         if target != raw {
             params.set_plain(id, target);
         }
@@ -132,8 +169,8 @@ pub(crate) fn knob_named(
     } else if resp.hovered() && st.drag.is_none() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
-            let n = kind.normalize(plain) + f64::from(scroll.signum()) * WHEEL_STEP;
-            set_once(params, id, kind.denormalize(n).max(floor));
+            let n = norm(plain) + f64::from(scroll.signum()) * WHEEL_STEP;
+            set_once(params, id, denorm(n).max(floor));
         }
     }
     if resp.hovered() {
@@ -143,12 +180,12 @@ pub(crate) fn knob_named(
 
     let p = ui.painter();
     #[allow(clippy::cast_possible_truncation)]
-    let t = kind.normalize(params.get_plain(id).max(floor)) as f32;
+    let t = norm(params.get_plain(id).max(floor)) as f32;
     paint_knob(p, centre, size_pt, t, accent);
     // Macro modulation: where the macros take the value.
     if params.control().is_some_and(|c| c.modulated(id)) {
         #[allow(clippy::cast_possible_truncation)]
-        let m = kind.normalize(st.presets.modded.get(id).max(floor)) as f32;
+        let m = norm(st.presets.modded.get(id).max(floor)) as f32;
         crate::paint::mod_arc(p, centre, size_pt, t, m, accent);
     }
     knob_value(
@@ -166,6 +203,18 @@ pub(crate) fn knob_named(
         size::CAPTION,
         color::TEXT_DIM,
     );
+}
+
+/// Place of `plain` on a logarithmic travel from `min` to `max` (0-1).
+#[must_use]
+pub(crate) fn log_norm(min: f64, max: f64, plain: f64) -> f64 {
+    ((plain.clamp(min, max) / min).ln() / (max / min).ln()).clamp(0.0, 1.0)
+}
+
+/// Inverse of [`log_norm`].
+#[must_use]
+pub(crate) fn log_denorm(min: f64, max: f64, n: f64) -> f64 {
+    min * (max / min).powf(n.clamp(0.0, 1.0))
 }
 
 /// Horizontal level fader: the fill shows the value, `label` on the
