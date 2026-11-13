@@ -74,6 +74,9 @@ pub(crate) struct AssistUi {
     /// Style, amounts and tempo of the proposal last put on the
     /// parameters: a change of any is heard at once.
     played: Option<(Style, [f32; 3], u32)>,
+    /// Style and amounts the output was last checked with: once they
+    /// move, the check is stale and Check asks for another.
+    checked_with: Option<(Style, [f32; 3])>,
 }
 
 impl Default for AssistUi {
@@ -96,6 +99,7 @@ impl Default for AssistUi {
             hints: Vec::new(),
             amount_drag: None,
             played: None,
+            checked_with: None,
         }
     }
 }
@@ -114,6 +118,7 @@ impl AssistUi {
         self.analysis = Some(analysis);
         // As after Undo: shown, not played.
         self.played = Some((style, self.amounts, tempo));
+        self.checked_with = Some((style, self.amounts));
     }
 
     fn amounts(&self) -> Amounts {
@@ -123,6 +128,12 @@ impl AssistUi {
             control,
             space,
         }
+    }
+
+    /// The style or an amount moved since the output was checked.
+    fn stale(&self) -> bool {
+        self.analysis.as_ref().is_some_and(|a| a.checked)
+            && self.checked_with != Some((self.style, self.amounts))
     }
 
     /// Seconds of singing the listen in progress asks for.
@@ -138,7 +149,9 @@ impl AssistUi {
     /// the host's. After a first listen the check at the output
     /// follows by itself (`settle` tap samples later); the check's own
     /// end says what it changed.
-    fn stop(&mut self, eq_db: &[f32; BANDS], tempo: f32, settle: usize) {
+    /// `deessing`: the output de-esser was at work, so the sibilants
+    /// measured there are no lower bound on what it has to tame.
+    fn stop(&mut self, eq_db: &[f32; BANDS], tempo: f32, settle: usize, deessing: bool) {
         let Some(l) = self.listener.take() else {
             return;
         };
@@ -146,6 +159,15 @@ impl AssistUi {
         match (l.finish(eq_db), checking) {
             (Some(mut a), true) => {
                 a.checked = true;
+                if let (true, Some(first)) = (deessing, &self.analysis)
+                    && first.checked
+                {
+                    a.out_sibilance = match (a.out_sibilance, first.out_sibilance) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        (x, y) => x.or(y),
+                    };
+                }
+                self.checked_with = Some((self.style, self.amounts));
                 self.verdict = match &self.analysis {
                     Some(first) => verdict(first, &a, self.style, self.amounts(), tempo),
                     None => String::new(),
@@ -161,6 +183,7 @@ impl AssistUi {
                 self.played = None;
                 self.note = "";
                 self.verdict.clear();
+                self.checked_with = None;
                 self.check_from = Some(self.seen.wrapping_add(settle));
             }
             (None, false) => self.note = "Not enough singing heard. Try again.",
@@ -272,7 +295,8 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
             FULL_VOICED_S
         };
         if l.voiced_seconds() >= wanted || l.seconds() >= LISTEN_MAX_S {
-            a.stop(&eq_now(params, view), view.tempo, settle);
+            let deessing = params.get_plain(ParamId::OutDeEss) >= 1.0;
+            a.stop(&eq_now(params, view), view.tempo, settle, deessing);
         }
     }
     a.hints.clear();
@@ -426,6 +450,8 @@ pub(crate) fn assistant_panel(
         "Listening"
     } else if st.assist.comparing {
         "Hearing: before"
+    } else if st.assist.stale() {
+        "Changed: check again"
     } else if !st.assist.verdict.is_empty() {
         st.assist.verdict.as_str()
     } else if st.assist.before.is_some() {
@@ -545,7 +571,8 @@ pub(crate) fn assistant_panel(
         }
     }
 
-    // Clarity, Control and Space, then Listen, Apply, Compare, Undo.
+    // Clarity, Control and Space, then Listen, Check and Apply over
+    // Compare and Undo.
     let cy = r.bottom() - 58.0;
     for which in 0..3 {
         #[allow(clippy::cast_precision_loss)]
@@ -555,21 +582,18 @@ pub(crate) fn assistant_panel(
     let bw = 95.0;
     let bx = r.right() - space::L - 2.0 * bw - 6.0;
     #[allow(clippy::cast_precision_loss)]
-    let slot = |i: usize| {
-        Rect::from_min_size(
-            pos2(
-                bx + (bw + 6.0) * (i % 2) as f32,
-                cy - 30.0 + 34.0 * (i / 2) as f32,
-            ),
-            vec2(bw, 28.0),
-        )
-    };
+    let slot =
+        |i: usize| Rect::from_min_size(pos2(bx + (bw + 6.0) * i as f32, cy + 4.0), vec2(bw, 28.0));
+    let tw = (2.0 * bw - 6.0) / 3.0;
+    #[allow(clippy::cast_precision_loss)]
+    let top =
+        |i: usize| Rect::from_min_size(pos2(bx + (tw + 6.0) * i as f32, cy - 30.0), vec2(tw, 28.0));
     let a = &mut st.assist;
     let has_taps = st.eq.taps.is_some();
     if button(
         ui,
         "listen",
-        slot(0),
+        top(0),
         if listening { "Stop" } else { "Listen" },
         has_taps,
         listening,
@@ -578,7 +602,8 @@ pub(crate) fn assistant_panel(
         if listening {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let settle = (view.sample_rate.max(8000.0) * SETTLE_S) as usize;
-            a.stop(&eq_now(params, view), view.tempo, settle);
+            let deessing = params.get_plain(ParamId::OutDeEss) >= 1.0;
+            a.stop(&eq_now(params, view), view.tempo, settle, deessing);
         } else if let Some(taps) = &st.eq.taps {
             let sr = if view.sample_rate > 0.0 {
                 view.sample_rate
@@ -593,8 +618,18 @@ pub(crate) fn assistant_panel(
             a.verdict.clear();
         }
     }
+    // Another check at the output: lit when the style or an amount
+    // moved since the last one, or when it was skipped.
+    let can_check = has_taps && !listening && !a.comparing && a.analysis.is_some();
+    let due = can_check && (a.stale() || a.analysis.as_ref().is_some_and(|an| !an.checked));
+    if button(ui, "check", top(1), "Check", can_check, due, accent)
+        && let Some(taps) = &st.eq.taps
+    {
+        a.check_from = Some(taps.input.written());
+        a.verdict.clear();
+    }
     let can_apply = !listening && !a.comparing && !a.hints.is_empty();
-    if button(ui, "apply", slot(1), "Apply", can_apply, false, accent) {
+    if button(ui, "apply", top(2), "Apply", can_apply, false, accent) {
         if a.before.is_none() {
             a.before = Some(snapshot(params));
         }
@@ -605,7 +640,7 @@ pub(crate) fn assistant_panel(
     if button(
         ui,
         "compare",
-        slot(2),
+        slot(0),
         "Compare",
         applied,
         a.comparing,
@@ -620,7 +655,7 @@ pub(crate) fn assistant_panel(
         }
         a.comparing = !a.comparing;
     }
-    if button(ui, "undo", slot(3), "Undo", applied, false, accent)
+    if button(ui, "undo", slot(1), "Undo", applied, false, accent)
         && let Some(before) = a.before.take()
     {
         set_all(params, &before);

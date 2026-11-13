@@ -447,6 +447,9 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   reverb. L'éditeur enchaîne cette vérification tout seul après la
   première écoute (0,7 s pour laisser la proposition s'installer, puis
   4 s de chant), avec un message, et affiche ce qu'elle a changé.
+  Quand le style ou une dose bouge ensuite, l'éditeur affiche
+  « Changed: check again » et le bouton Check, allumé, refait la seule
+  vérification (4 s de chant) sans refaire le diagnostic de la voix.
 - **Sortie** : le compresseur de sortie est dosé par style
   (`Style::glue`, avec Control), le plafond mis à -1 dB, et le
   de-esseur de sortie réglé à la vérification d'après les sifflantes
