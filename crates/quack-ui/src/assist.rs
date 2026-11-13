@@ -35,6 +35,10 @@ use crate::{ParamAccess, UiState, View, set_once};
 const AMOUNT_DEFAULT: f32 = 0.7;
 /// A listen gives up after this long without enough singing, seconds.
 const LISTEN_MAX_S: f32 = 30.0;
+/// Singing the check at the output asks for, and how long the
+/// proposal is left to settle before it starts, seconds.
+const CHECK_VOICED_S: f32 = 4.0;
+const SETTLE_S: f64 = 0.7;
 
 /// What the assistant keeps between frames (not saved with the
 /// session: a listen belongs to the moment).
@@ -49,6 +53,13 @@ pub(crate) struct AssistUi {
     listener: Option<Listener>,
     seen: usize,
     scratch: [Vec<f32>; 4],
+    /// The listen in progress is the check at the output, which follows
+    /// the first one by itself; `check_from` is the tap position it
+    /// waits for (the proposal has to be playing first).
+    checking: bool,
+    check_from: Option<usize>,
+    /// What the check changed, in a few words.
+    verdict: String,
     /// Why the last listen gave nothing.
     note: &'static str,
     analysis: Option<Analysis>,
@@ -74,6 +85,9 @@ impl Default for AssistUi {
             listener: None,
             seen: 0,
             scratch: std::array::from_fn(|_| vec![0.0; TAP_LEN]),
+            checking: false,
+            check_from: None,
+            verdict: String::new(),
             note: "",
             analysis: None,
             before: None,
@@ -111,18 +125,79 @@ impl AssistUi {
         }
     }
 
-    /// End the listen; `eq_db` is the EQ in force while it ran.
-    fn stop(&mut self, eq_db: &[f32; BANDS]) {
-        if let Some(l) = self.listener.take() {
-            match l.finish(eq_db) {
-                Some(a) => {
-                    self.analysis = Some(a);
-                    self.played = None;
-                    self.note = "";
-                }
-                None => self.note = "Not enough singing heard. Try again.",
-            }
+    /// Seconds of singing the listen in progress asks for.
+    fn wanted(&self) -> f32 {
+        if self.checking {
+            CHECK_VOICED_S
+        } else {
+            FULL_VOICED_S
         }
+    }
+
+    /// End the listen; `eq_db` is the EQ in force while it ran, `tempo`
+    /// the host's. After a first listen the check at the output
+    /// follows by itself (`settle` tap samples later); the check's own
+    /// end says what it changed.
+    fn stop(&mut self, eq_db: &[f32; BANDS], tempo: f32, settle: usize) {
+        let Some(l) = self.listener.take() else {
+            return;
+        };
+        let checking = std::mem::take(&mut self.checking);
+        match (l.finish(eq_db), checking) {
+            (Some(mut a), true) => {
+                a.checked = true;
+                self.verdict = match &self.analysis {
+                    Some(first) => verdict(first, &a, self.style, self.amounts(), tempo),
+                    None => String::new(),
+                };
+                self.analysis = Some(a);
+                self.played = None;
+            }
+            // Not enough singing for the check: the first diagnosis
+            // stands.
+            (None, true) => "Check skipped".clone_into(&mut self.verdict),
+            (Some(a), false) => {
+                self.analysis = Some(a);
+                self.played = None;
+                self.note = "";
+                self.verdict.clear();
+                self.check_from = Some(self.seen.wrapping_add(settle));
+            }
+            (None, false) => self.note = "Not enough singing heard. Try again.",
+        }
+    }
+}
+
+/// What the check at the output changed in the EQ and the output
+/// de-esser, in a few words.
+fn verdict(
+    first: &Analysis,
+    checked: &Analysis,
+    style: Style,
+    amounts: Amounts,
+    tempo: f32,
+) -> String {
+    let before = propose(first, style, amounts, tempo);
+    let after = propose(checked, style, amounts, tempo);
+    let mut parts: Vec<String> = Vec::new();
+    for (id, name) in [
+        (quack_dsp::params::EQ_BELL_PARAMS[0][1], "low mids"),
+        (quack_dsp::params::EQ_BELL_PARAMS[2][1], "presence"),
+        (ParamId::EqHighShelfGain, "air"),
+    ] {
+        let d = after.get(id).unwrap_or(0.0) - before.get(id).unwrap_or(0.0);
+        if d.abs() >= 0.5 {
+            parts.push(format!("{name} {d:+.1}"));
+        }
+    }
+    if after.get(ParamId::OutDeEss).unwrap_or(0.0) >= 1.0 {
+        parts.push("de-ess".to_owned());
+    }
+    if parts.is_empty() {
+        "Checked: all good".to_owned()
+    } else {
+        parts.truncate(2);
+        format!("Checked: {}", parts.join(", "))
     }
 }
 
@@ -156,6 +231,18 @@ fn set_all(params: &dyn ParamAccess, values: &[(ParamId, f64)]) {
 /// work out what is still to apply.
 pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
     let UiState { assist: a, eq, .. } = st;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let settle = (view.sample_rate.max(8000.0) * SETTLE_S) as usize;
+    // The check at the output starts by itself once the proposal of
+    // the first listen has been playing for a moment.
+    if let (Some(from), Some(taps), None) = (a.check_from, &eq.taps, &a.listener)
+        && taps.input.written().wrapping_sub(from) < usize::MAX / 2
+    {
+        a.check_from = None;
+        a.listener = Some(Listener::new(view.sample_rate.max(8000.0)));
+        a.seen = taps.input.written();
+        a.checking = true;
+    }
     if let (Some(l), Some(taps)) = (&mut a.listener, &eq.taps) {
         let written = taps.input.written();
         let n = written.wrapping_sub(a.seen).min(TAP_LEN);
@@ -179,8 +266,13 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
             },
             view.pitch_hz,
         );
-        if l.voiced_seconds() >= FULL_VOICED_S || l.seconds() >= LISTEN_MAX_S {
-            a.stop(&eq_now(params, view));
+        let wanted = if a.checking {
+            CHECK_VOICED_S
+        } else {
+            FULL_VOICED_S
+        };
+        if l.voiced_seconds() >= wanted || l.seconds() >= LISTEN_MAX_S {
+            a.stop(&eq_now(params, view), view.tempo, settle);
         }
     }
     a.hints.clear();
@@ -328,10 +420,14 @@ pub(crate) fn assistant_panel(
     let listening = st.assist.listener.is_some();
 
     // What is heard through the plugin right now.
-    let state = if listening {
+    let state = if st.assist.checking {
+        "Checking the output"
+    } else if listening {
         "Listening"
     } else if st.assist.comparing {
         "Hearing: before"
+    } else if !st.assist.verdict.is_empty() {
+        st.assist.verdict.as_str()
     } else if st.assist.before.is_some() {
         "Hearing: after"
     } else {
@@ -386,27 +482,42 @@ pub(crate) fn assistant_panel(
         );
     };
     if let Some(l) = &st.assist.listener {
-        line(0, "Sing a phrase or two, as in the song.", color::TEXT);
+        let wanted = st.assist.wanted();
+        if st.assist.checking {
+            line(0, "Checking the result at the output.", color::TEXT);
+            line(
+                2,
+                "Keep singing: the EQ and the output are refined",
+                color::TEXT_DIM,
+            );
+            line(
+                3,
+                "for what the exciter and the reverb add.",
+                color::TEXT_DIM,
+            );
+        } else {
+            line(0, "Sing a phrase or two, as in the song.", color::TEXT);
+        }
         line(
             1,
             &format!(
-                "{:.1} s of singing heard, {FULL_VOICED_S:.0} s wanted.",
+                "{:.1} s of singing heard, {wanted:.0} s wanted.",
                 l.voiced_seconds()
             ),
             color::TEXT_DIM,
         );
         let bar = Rect::from_min_size(
-            pos2(box_r.left() + space::M, box_r.top() + 58.0),
+            pos2(box_r.left() + space::M, box_r.bottom() - 34.0),
             vec2(box_r.width() - 2.0 * space::M, 6.0),
         );
         rounded(p, bar, 3, color::RAISED, color::RAISED);
-        let done = (l.voiced_seconds() / FULL_VOICED_S).clamp(0.0, 1.0);
+        let done = (l.voiced_seconds() / wanted).clamp(0.0, 1.0);
         if done > 0.0 {
             let fill = Rect::from_min_size(bar.min, vec2(bar.width() * done, bar.height()));
             rounded(p, fill, 3, accent, accent);
         }
-        if l.voiced_seconds() >= MIN_VOICED_S {
-            line(4, "Stop now for a quick diagnosis.", color::TEXT_FAINT);
+        if l.voiced_seconds() >= MIN_VOICED_S && !st.assist.checking {
+            line(2, "Stop now for a quick diagnosis.", color::TEXT_FAINT);
         }
     } else if let Some(an) = &st.assist.analysis {
         for (i, s) in describe(an, st.assist.style, st.assist.amounts(), view.tempo)
@@ -465,7 +576,9 @@ pub(crate) fn assistant_panel(
         accent,
     ) {
         if listening {
-            a.stop(&eq_now(params, view));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let settle = (view.sample_rate.max(8000.0) * SETTLE_S) as usize;
+            a.stop(&eq_now(params, view), view.tempo, settle);
         } else if let Some(taps) = &st.eq.taps {
             let sr = if view.sample_rate > 0.0 {
                 view.sample_rate
@@ -475,6 +588,9 @@ pub(crate) fn assistant_panel(
             a.listener = Some(Listener::new(sr));
             a.seen = taps.input.written();
             a.note = "";
+            a.checking = false;
+            a.check_from = None;
+            a.verdict.clear();
         }
     }
     let can_apply = !listening && !a.comparing && !a.hints.is_empty();

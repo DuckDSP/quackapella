@@ -314,6 +314,8 @@ fn editor_captures() {
                     soft_db: -27.0,
                     noise_db: Some(-59.0),
                     voiced_s: 7.2,
+                    out_sibilance: Some(-6.0),
+                    checked: true,
                 },
                 quack_dsp::assist::Style::Pop,
                 96,

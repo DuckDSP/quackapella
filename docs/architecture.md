@@ -444,7 +444,13 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   chaîne ajoute après les couches, EQ mis à part (`Analysis::colour`,
   relatif aux médiums, borné à ±6 dB). Une deuxième écoute, proposition
   en place, corrige donc l'EQ de ce qu'apportent l'exciter et la
-  reverb.
+  reverb. L'éditeur enchaîne cette vérification tout seul après la
+  première écoute (0,7 s pour laisser la proposition s'installer, puis
+  4 s de chant), avec un message, et affiche ce qu'elle a changé.
+- **Sortie** : le compresseur de sortie est dosé par style
+  (`Style::glue`, avec Control), le plafond mis à -1 dB, et le
+  de-esseur de sortie réglé à la vérification d'après les sifflantes
+  mesurées en sortie (`Analysis::out_sibilance`).
 - **Écoute du mix** : une quatrième prise (`Taps::side`) lit l'entrée
   sidechain. Quand elle est libre (ni Voice from Sidechain, ni porteuse
   externe du vocodeur), c'est le mix : s'il est chargé vers 3 kHz la

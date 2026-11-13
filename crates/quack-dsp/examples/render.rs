@@ -121,8 +121,9 @@ fn main() {
     midi.sort_by(|a, b| a.0.total_cmp(&b.0));
     autos.sort_by(|a, b| a.0.total_cmp(&b.0));
     if let Some((style, amount)) = assist {
-        for _ in 0..listens {
+        for pass in 0..listens {
             listen(
+                pass > 0,
                 f64::from(sr),
                 &chans,
                 side.as_deref(),
@@ -146,6 +147,7 @@ fn main() {
 /// The mixing assistant, offline: listen to the whole take with the
 /// settings given, print what was heard, and add the proposal to them.
 fn listen<'a>(
+    checked: bool,
     sr: f64,
     chans: &[Vec<f32>],
     side: Option<&'a [Vec<f32>]>,
@@ -191,10 +193,11 @@ fn listen<'a>(
     // The EQ in force during the listen, per band.
     #[allow(clippy::cast_possible_truncation)]
     let eq_db = assist::eq_in_force(&|id| values.get(id), sr as f32);
-    let Some(heard) = ear.finish(&eq_db) else {
+    let Some(mut heard) = ear.finish(&eq_db) else {
         eprintln!("assistant: not enough singing");
         return;
     };
+    heard.checked = checked;
     eprintln!("{heard:?}");
     for line in assist::describe(&heard, style, assist::Amounts::all(amount), 120.0) {
         eprintln!("  {line}");

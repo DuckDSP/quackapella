@@ -297,6 +297,26 @@ impl Style {
     }
 }
 
+/// Sibilants this far under the sung parts at the output need nothing
+/// more, dB.
+const OUT_SIBILANCE_OK: f32 = 8.0;
+
+impl Style {
+    /// Output compressor, %: the glue that holds the voice and its
+    /// layers together.
+    #[must_use]
+    pub const fn glue(self) -> f32 {
+        match self {
+            Self::Natural => 0.0,
+            Self::Ballad => 10.0,
+            Self::Rnb => 20.0,
+            Self::Pop => 25.0,
+            Self::Rock => 30.0,
+            Self::Trap | Self::Electro | Self::LoFi => 35.0,
+        }
+    }
+}
+
 /// The character of a style's reverb and delay.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpaceColour {
@@ -390,6 +410,12 @@ pub struct Analysis {
     pub noise_db: Option<f32>,
     /// Seconds of singing the figures rest on.
     pub voiced_s: f32,
+    /// The sibilants at the output, against the sung parts there (dB).
+    pub out_sibilance: Option<f32>,
+    /// The listen was made with the proposal playing: the output is
+    /// the proposal's, and its sibilants are the output de-esser's to
+    /// tame. Set by who runs the listens.
+    pub checked: bool,
 }
 
 /// Average level of the bands inside `zone`, dB.
@@ -540,6 +566,10 @@ pub struct Listener {
     /// neither.
     sung_levels: [u32; 100],
     sib_level_sum: f64,
+    /// Levels at the output, summed in dB: over the sibilant frames
+    /// and over the sung ones.
+    sib_out_sum: f64,
+    sung_out_sum: f64,
     quiet_levels: [u32; 100],
     quiet_frames: u32,
     /// Sung notes in semitone bins (MIDI numbers).
@@ -608,6 +638,8 @@ impl Listener {
             sib_frames: 0,
             sung_levels: [0; 100],
             sib_level_sum: 0.0,
+            sib_out_sum: 0.0,
+            sung_out_sum: 0.0,
             quiet_levels: [0; 100],
             quiet_frames: 0,
             notes: [0; 128],
@@ -696,6 +728,13 @@ impl Listener {
         out
     }
 
+    /// Level of the frame at the output, dBFS RMS.
+    fn output_level(&self) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let mean_sq = self.output.iter().map(|x| x * x).sum::<f32>() / FRAME as f32;
+        10.0 * mean_sq.max(1e-12).log10()
+    }
+
     fn frame(&mut self, pitch_hz: f32) {
         self.frames += 1;
         #[allow(clippy::cast_precision_loss)]
@@ -727,6 +766,7 @@ impl Listener {
                 self.side_frames += 1;
             }
             self.sung_frames += 1;
+            self.sung_out_sum += f64::from(self.output_level());
             self.sung_levels[level_bin(level)] += 1;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let note = (69.0 + 12.0 * (pitch_hz / 440.0).log2())
@@ -740,6 +780,7 @@ impl Listener {
             }
             self.sib_frames += 1;
             self.sib_level_sum += f64::from(level);
+            self.sib_out_sum += f64::from(self.output_level());
         } else if pitch_hz <= 0.0 {
             self.quiet_levels[level_bin(level)] += 1;
             self.quiet_frames += 1;
@@ -855,6 +896,12 @@ impl Listener {
             soft_db,
             noise_db,
             voiced_s: self.voiced_seconds(),
+            #[allow(clippy::cast_possible_truncation)]
+            out_sibilance: sibilance.map(|_| {
+                (self.sib_out_sum / f64::from(self.sib_frames.max(1))
+                    - self.sung_out_sum / f64::from(self.sung_frames.max(1))) as f32
+            }),
+            checked: false,
         })
     }
 }
@@ -884,7 +931,7 @@ impl Amounts {
 }
 
 /// Every parameter a proposal may set (what Undo has to remember).
-pub const PARAMS: [ParamId; 53] = [
+pub const PARAMS: [ParamId; 56] = [
     ParamId::FxOn,
     ParamId::ToneOn,
     ParamId::LowCut,
@@ -930,6 +977,9 @@ pub const PARAMS: [ParamId; 53] = [
     ParamId::DelayTone,
     ParamId::DelayPingPong,
     ParamId::DelayToReverb,
+    ParamId::OutDeEss,
+    ParamId::OutComp,
+    ParamId::OutCeiling,
     REVERB_SEND_PARAMS[0],
     REVERB_SEND_PARAMS[1],
     REVERB_SEND_PARAMS[2],
@@ -975,6 +1025,10 @@ struct Plan {
     low_cut: f32,
     gate: Option<f32>,
     deess: Option<(f32, f32)>,
+    /// Output de-esser (%), once the output was checked; output
+    /// compressor (%).
+    out_deess: Option<f32>,
+    out_comp: f32,
     /// Threshold, ratio, make-up, reduction aimed at.
     comp: Option<(f32, f32, f32, f32)>,
     mud: (f32, f32),
@@ -1041,6 +1095,13 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
         let amt = deess_amount(rel, r.deess_bias, amount);
         (amt >= 5.0).then_some((amt, (hz / 100.0).round() * 100.0))
     });
+    // What is left of the sibilants at the output, with what the
+    // exciter and the layers add, is for the output de-esser.
+    let out_deess = a
+        .out_sibilance
+        .filter(|_| a.checked)
+        .map(|rel| (((rel + OUT_SIBILANCE_OK) * 5.0).clamp(0.0, 50.0) * amount).round());
+    let out_comp = (style.glue() * control).round();
     // Compressor: the style's reduction on the loud phrases, less when
     // the voice is already even.
     let spread = (a.loud_db - a.soft_db).max(0.0);
@@ -1075,6 +1136,8 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
         resonance,
         presence,
         air,
+        out_deess,
+        out_comp,
         // A voice whose top the EQ has to pull down needs no more of it.
         // Nor do sharp sibilants: half of it.
         exciter: if air >= 0.0 {
@@ -1157,6 +1220,15 @@ pub fn propose(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Propo
         (ParamId::EqHighShelfGain, half(p.air)),
     ]);
     c.push((ParamId::ExciterAmount, f64::from(p.exciter)));
+    // The output: a little glue for the voice and its layers, a ceiling
+    // under full scale, and the de-esser once the output was heard.
+    c.extend([
+        (ParamId::OutComp, f64::from(p.out_comp)),
+        (ParamId::OutCeiling, -1.0),
+    ]);
+    if let Some(amt) = p.out_deess {
+        c.push((ParamId::OutDeEss, f64::from(amt)));
+    }
     if let Some((reverb, delay)) = p.space {
         let (decay, predelay) = reverb_times(&r, tempo);
         let col = style.colour();
@@ -1274,13 +1346,20 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<
         format!("{t}.")
     });
     out.push(match (a.sibilance, p.deess) {
-        (Some((_, hz)), Some((amt, _))) => {
-            format!("Sibilants at {}: de-esser at {amt:.0} %.", hz_words(hz))
-        }
+        (Some((_, hz)), Some((amt, _))) => match p.out_deess {
+            Some(out) if out >= 1.0 => format!(
+                "Sibilants at {}: de-esser {amt:.0} %, output {out:.0} %.",
+                hz_words(hz)
+            ),
+            _ => format!("Sibilants at {}: de-esser at {amt:.0} %.", hz_words(hz)),
+        },
         (Some(_), None) => "Sibilants under control.".to_owned(),
         (None, _) => "No sibilants heard.".to_owned(),
     });
     let comp = match p.comp {
+        Some((_, ratio, _, red)) if p.out_comp >= 1.0 => {
+            format!("Comp {ratio:.0}:1, {red:.0} dB, glue {:.0} %.", p.out_comp)
+        }
         Some((_, ratio, _, red)) => format!("Comp {ratio:.0}:1, about {red:.0} dB."),
         None => "No compression.".to_owned(),
     };
