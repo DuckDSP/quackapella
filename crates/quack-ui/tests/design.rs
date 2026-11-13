@@ -294,6 +294,12 @@ fn editor_captures() {
                 -120.0, -9.6, -6.4, 0.3, 8.9, 25.4, 27.9, 23.4, 19.9, 27.7, 24.1, 20.6, 20.7, 22.3,
                 19.6, 21.0, 21.1, 18.7, 15.6, 14.5, 8.1, 10.0, 6.8, 6.0, 0.9, -10.7, -22.1,
             ];
+            // A mix with a busy upper midrange on the side-chain.
+            let mix = std::array::from_fn(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let oct = (i as f32 - 13.0) / 3.0;
+                -20.0 - 2.0 * oct.max(0.0) - 1.0 * (-oct).max(0.0)
+            });
             st.show_assistant(
                 quack_dsp::assist::Analysis {
                     low_hz: 123.5,
@@ -301,11 +307,15 @@ fn editor_captures() {
                     high_hz: 233.1,
                     input: bands,
                     layers: bands,
+                    colour: [0.0; 27],
+                    mix: quack_dsp::assist::Mix::Heard(mix),
                     sibilance: Some((-10.2, 7300.0)),
                     loud_db: -22.0,
                     soft_db: -27.0,
                     noise_db: Some(-59.0),
                     voiced_s: 7.2,
+                    out_sibilance: Some(-6.0),
+                    checked: true,
                 },
                 quack_dsp::assist::Style::Pop,
                 96,

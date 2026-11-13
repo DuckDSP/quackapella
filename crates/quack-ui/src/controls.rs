@@ -298,13 +298,6 @@ pub(crate) fn fader(
             accent.gamma_multiply(0.28),
             accent.gamma_multiply(0.28),
         );
-        p.line_segment(
-            [
-                pos2(fill.right(), inner.top() + 3.0),
-                pos2(fill.right(), inner.bottom() - 3.0),
-            ],
-            egui::Stroke::new(2.0_f32, accent),
-        );
     }
     let mid = r.center().y;
     // Without a label, the value sits in the middle.
@@ -321,7 +314,7 @@ pub(crate) fn fader(
         );
         (pos2(r.right() - 10.0, mid), Align2::RIGHT_CENTER)
     };
-    crate::paint::value(
+    let written = crate::paint::value(
         p,
         vpos,
         valign,
@@ -329,6 +322,19 @@ pub(crate) fn fader(
         size::CAPTION + 1.0,
         color::TEXT,
     );
+    // The marker at the end of the fill: whole beside the value, two
+    // ticks where it would cross the digits.
+    if t > 0.0 {
+        let x = inner.left() + inner.width() * t;
+        let stroke = egui::Stroke::new(2.0_f32, accent);
+        let (top, bottom) = (inner.top() + 3.0, inner.bottom() - 3.0);
+        if written.expand2(vec2(3.0, 0.0)).x_range().contains(x) {
+            p.line_segment([pos2(x, top), pos2(x, top + 2.5)], stroke);
+            p.line_segment([pos2(x, bottom - 2.5), pos2(x, bottom)], stroke);
+        } else {
+            p.line_segment([pos2(x, top), pos2(x, bottom)], stroke);
+        }
+    }
 }
 
 /// Segmented choice for an enum parameter: a click on a segment is one

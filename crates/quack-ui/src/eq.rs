@@ -267,9 +267,10 @@ pub(crate) fn graph_panel(
     let reading = if !on {
         "Off".to_owned()
     } else if b.gain.is_none() && low_cut_off(hz) {
-        format!("{} {} · Off", sel + 1, b.name)
+        format!("{} · {} · Off", sel + 1, b.name)
     } else {
-        let mut t = format!("{} {} · {} Hz", sel + 1, b.name, hz_text(hz));
+        // Short: the switch on the left leaves room for about 30 letters.
+        let mut t = format!("{} · {} Hz", sel + 1, hz_text(hz));
         if let Some(g) = b.gain {
             t += &format!(" · {:+.1} dB", params.get_plain(g));
         }
@@ -278,17 +279,18 @@ pub(crate) fn graph_panel(
         }
         t
     };
-    value(
+    crate::paint::text_fit(
         p,
         pos2(r.right() - space::L, ty),
         Align2::RIGHT_CENTER,
         &reading,
-        size::VALUE,
+        size::CAPTION,
         if on {
             color::TEXT_DIM
         } else {
             color::TEXT_FAINT
         },
+        r.width() - 2.0 * space::L - 150.0 - space::M,
     );
 
     let plot = Rect::from_min_max(

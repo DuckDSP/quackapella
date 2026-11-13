@@ -7,6 +7,12 @@
 //! Control and Space set how far the tone, the dynamics and the reverb
 //! and delay go towards the style.
 //!
+//! A second Listen, with the proposal playing, checks it at the output
+//! and corrects the EQ for what the exciter and the reverb add. When the
+//! side-chain is free (not the voice, not the vocoder's carrier), what
+//! comes by it is taken for the mix and the voice is shaped to cut
+//! through it.
+//!
 //! The listening runs here, on the UI thread, from the engine's
 //! analysis taps ([`quack_dsp::tap`]): nothing is added to the audio
 //! path, so no latency. The thinking is in [`quack_dsp::assist`].
@@ -14,9 +20,11 @@
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::assist::{
-    Amounts, Analysis, FULL_VOICED_S, Listener, MIN_VOICED_S, PARAMS, Style, describe, propose,
+    Amounts, Analysis, BANDS, FULL_VOICED_S, Heard, Listener, MIN_VOICED_S, PARAMS, Style,
+    describe, eq_in_force, propose,
 };
 use quack_dsp::tap::TAP_LEN;
+use quack_dsp::vocoder::Carrier;
 
 use crate::controls::{self, KNOB_TRAVEL};
 use crate::paint::{knob as paint_knob, knob_value, panel, rounded, text, well};
@@ -27,6 +35,10 @@ use crate::{ParamAccess, UiState, View, set_once};
 const AMOUNT_DEFAULT: f32 = 0.7;
 /// A listen gives up after this long without enough singing, seconds.
 const LISTEN_MAX_S: f32 = 30.0;
+/// Singing the check at the output asks for, and how long the
+/// proposal is left to settle before it starts, seconds.
+const CHECK_VOICED_S: f32 = 4.0;
+const SETTLE_S: f64 = 0.7;
 
 /// What the assistant keeps between frames (not saved with the
 /// session: a listen belongs to the moment).
@@ -40,7 +52,14 @@ pub(crate) struct AssistUi {
     /// A listen in progress, and the tap position it has read up to.
     listener: Option<Listener>,
     seen: usize,
-    scratch: [Vec<f32>; 2],
+    scratch: [Vec<f32>; 4],
+    /// The listen in progress is the check at the output, which follows
+    /// the first one by itself; `check_from` is the tap position it
+    /// waits for (the proposal has to be playing first).
+    checking: bool,
+    check_from: Option<usize>,
+    /// What the check changed, in a few words.
+    verdict: String,
     /// Why the last listen gave nothing.
     note: &'static str,
     analysis: Option<Analysis>,
@@ -55,6 +74,9 @@ pub(crate) struct AssistUi {
     /// Style, amounts and tempo of the proposal last put on the
     /// parameters: a change of any is heard at once.
     played: Option<(Style, [f32; 3], u32)>,
+    /// Style and amounts the output was last checked with: once they
+    /// move, the check is stale and Check asks for another.
+    checked_with: Option<(Style, [f32; 3])>,
 }
 
 impl Default for AssistUi {
@@ -65,7 +87,10 @@ impl Default for AssistUi {
             amounts: [AMOUNT_DEFAULT; 3],
             listener: None,
             seen: 0,
-            scratch: [vec![0.0; TAP_LEN], vec![0.0; TAP_LEN]],
+            scratch: std::array::from_fn(|_| vec![0.0; TAP_LEN]),
+            checking: false,
+            check_from: None,
+            verdict: String::new(),
             note: "",
             analysis: None,
             before: None,
@@ -74,6 +99,7 @@ impl Default for AssistUi {
             hints: Vec::new(),
             amount_drag: None,
             played: None,
+            checked_with: None,
         }
     }
 }
@@ -92,6 +118,7 @@ impl AssistUi {
         self.analysis = Some(analysis);
         // As after Undo: shown, not played.
         self.played = Some((style, self.amounts, tempo));
+        self.checked_with = Some((style, self.amounts));
     }
 
     fn amounts(&self) -> Amounts {
@@ -103,18 +130,109 @@ impl AssistUi {
         }
     }
 
-    fn stop(&mut self) {
-        if let Some(l) = self.listener.take() {
-            match l.finish() {
-                Some(a) => {
-                    self.analysis = Some(a);
-                    self.played = None;
-                    self.note = "";
-                }
-                None => self.note = "Not enough singing heard. Try again.",
-            }
+    /// The style or an amount moved since the output was checked.
+    fn stale(&self) -> bool {
+        self.analysis.as_ref().is_some_and(|a| a.checked)
+            && self.checked_with != Some((self.style, self.amounts))
+    }
+
+    /// Seconds of singing the listen in progress asks for.
+    fn wanted(&self) -> f32 {
+        if self.checking {
+            CHECK_VOICED_S
+        } else {
+            FULL_VOICED_S
         }
     }
+
+    /// End the listen; `eq_db` is the EQ in force while it ran, `tempo`
+    /// the host's. After a first listen the check at the output
+    /// follows by itself (`settle` tap samples later); the check's own
+    /// end says what it changed.
+    /// `deessing`: the output de-esser was at work, so the sibilants
+    /// measured there are no lower bound on what it has to tame.
+    fn stop(&mut self, eq_db: &[f32; BANDS], tempo: f32, settle: usize, deessing: bool) {
+        let Some(l) = self.listener.take() else {
+            return;
+        };
+        let checking = std::mem::take(&mut self.checking);
+        match (l.finish(eq_db), checking) {
+            (Some(mut a), true) => {
+                a.checked = true;
+                if let (true, Some(first)) = (deessing, &self.analysis)
+                    && first.checked
+                {
+                    a.out_sibilance = match (a.out_sibilance, first.out_sibilance) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        (x, y) => x.or(y),
+                    };
+                }
+                self.checked_with = Some((self.style, self.amounts));
+                self.verdict = match &self.analysis {
+                    Some(first) => verdict(first, &a, self.style, self.amounts(), tempo),
+                    None => String::new(),
+                };
+                self.analysis = Some(a);
+                self.played = None;
+            }
+            // Not enough singing for the check: the first diagnosis
+            // stands.
+            (None, true) => "Check skipped".clone_into(&mut self.verdict),
+            (Some(a), false) => {
+                self.analysis = Some(a);
+                self.played = None;
+                self.note = "";
+                self.verdict.clear();
+                self.checked_with = None;
+                self.check_from = Some(self.seen.wrapping_add(settle));
+            }
+            (None, false) => self.note = "Not enough singing heard. Try again.",
+        }
+    }
+}
+
+/// What the check at the output changed in the EQ and the output
+/// de-esser, in a few words.
+fn verdict(
+    first: &Analysis,
+    checked: &Analysis,
+    style: Style,
+    amounts: Amounts,
+    tempo: f32,
+) -> String {
+    let before = propose(first, style, amounts, tempo);
+    let after = propose(checked, style, amounts, tempo);
+    let mut parts: Vec<String> = Vec::new();
+    for (id, name) in [
+        (quack_dsp::params::EQ_BELL_PARAMS[0][1], "lows"),
+        (quack_dsp::params::EQ_BELL_PARAMS[2][1], "presence"),
+        (ParamId::EqHighShelfGain, "air"),
+    ] {
+        let d = after.get(id).unwrap_or(0.0) - before.get(id).unwrap_or(0.0);
+        if d.abs() >= 0.5 {
+            parts.push(format!("{name} {d:+.1}"));
+        }
+    }
+    if after.get(ParamId::OutDeEss).unwrap_or(0.0) >= 1.0 {
+        parts.push("de-ess".to_owned());
+    }
+    if parts.is_empty() {
+        "Checked: all good".to_owned()
+    } else {
+        parts.truncate(2);
+        format!("Checked: {}", parts.join(", "))
+    }
+}
+
+/// The output EQ as it is set now, dB per analysis band.
+fn eq_now(params: &dyn ParamAccess, view: &View) -> [f32; BANDS] {
+    #[allow(clippy::cast_possible_truncation)]
+    let sr = if view.sample_rate > 0.0 {
+        view.sample_rate as f32
+    } else {
+        48_000.0
+    };
+    eq_in_force(&|id| params.get_plain(id), sr)
 }
 
 fn snapshot(params: &dyn ParamAccess) -> Vec<(ParamId, f64)> {
@@ -136,16 +254,49 @@ fn set_all(params: &dyn ParamAccess, values: &[(ParamId, f64)]) {
 /// work out what is still to apply.
 pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
     let UiState { assist: a, eq, .. } = st;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let settle = (view.sample_rate.max(8000.0) * SETTLE_S) as usize;
+    // The check at the output starts by itself once the proposal of
+    // the first listen has been playing for a moment.
+    if let (Some(from), Some(taps), None) = (a.check_from, &eq.taps, &a.listener)
+        && taps.input.written().wrapping_sub(from) < usize::MAX / 2
+    {
+        a.check_from = None;
+        a.listener = Some(Listener::new(view.sample_rate.max(8000.0)));
+        a.seen = taps.input.written();
+        a.checking = true;
+    }
     if let (Some(l), Some(taps)) = (&mut a.listener, &eq.taps) {
         let written = taps.input.written();
         let n = written.wrapping_sub(a.seen).min(TAP_LEN);
         a.seen = written;
-        let [x, y] = &mut a.scratch;
+        let [x, y, z, w] = &mut a.scratch;
         taps.input.read(&mut x[..n]);
         taps.layers.read(&mut y[..n]);
-        l.feed(&x[..n], &y[..n], view.pitch_hz);
-        if l.voiced_seconds() >= FULL_VOICED_S || l.seconds() >= LISTEN_MAX_S {
-            a.stop();
+        taps.output.read(&mut z[..n]);
+        taps.side.read(&mut w[..n]);
+        // The side-chain is the mix unless it brings the voice or the
+        // vocoder's carrier.
+        let taken = params.get_plain(ParamId::VocoderSwap) >= 0.5
+            || (params.get_plain(ParamId::VocoderOn) >= 0.5
+                && Carrier::from_index(params.get_plain(ParamId::Carrier)) == Carrier::Sidechain);
+        l.feed(
+            &Heard {
+                input: &x[..n],
+                layers: &y[..n],
+                output: &z[..n],
+                side: (!taken).then_some(&w[..n]),
+            },
+            view.pitch_hz,
+        );
+        let wanted = if a.checking {
+            CHECK_VOICED_S
+        } else {
+            FULL_VOICED_S
+        };
+        if l.voiced_seconds() >= wanted || l.seconds() >= LISTEN_MAX_S {
+            let deessing = params.get_plain(ParamId::OutDeEss) >= 1.0;
+            a.stop(&eq_now(params, view), view.tempo, settle, deessing);
         }
     }
     a.hints.clear();
@@ -293,22 +444,30 @@ pub(crate) fn assistant_panel(
     let listening = st.assist.listener.is_some();
 
     // What is heard through the plugin right now.
-    let state = if listening {
+    let state = if st.assist.checking {
+        "Checking the output"
+    } else if listening {
         "Listening"
     } else if st.assist.comparing {
         "Hearing: before"
+    } else if st.assist.stale() {
+        "Changed: check again"
+    } else if !st.assist.verdict.is_empty() {
+        st.assist.verdict.as_str()
     } else if st.assist.before.is_some() {
         "Hearing: after"
     } else {
         ""
     };
-    text(
+    // The switch takes the left 150: the state keeps to what is left.
+    crate::paint::text_fit(
         ui.painter(),
         pos2(r.right() - space::L, r.top() + 22.0),
         Align2::RIGHT_CENTER,
         state,
-        size::VALUE,
+        size::CAPTION,
         if listening { accent } else { color::TEXT_DIM },
+        inner_w - 150.0 - space::M,
     );
 
     // Styles: two rows of four.
@@ -341,37 +500,53 @@ pub(crate) fn assistant_panel(
     let line = |i: usize, s: &str, c: Color32| {
         #[allow(clippy::cast_precision_loss)]
         let y = box_r.top() + 13.0 + 17.2 * i as f32;
-        text(
+        crate::paint::text_fit(
             p,
             pos2(box_r.left() + space::M, y),
             Align2::LEFT_CENTER,
             s,
             size::CAPTION,
             c,
+            box_r.width() - 2.0 * space::M,
         );
     };
     if let Some(l) = &st.assist.listener {
-        line(0, "Sing a phrase or two, as in the song.", color::TEXT);
+        let wanted = st.assist.wanted();
+        if st.assist.checking {
+            line(0, "Checking the result at the output.", color::TEXT);
+            line(
+                2,
+                "Keep singing: the EQ and the output are refined",
+                color::TEXT_DIM,
+            );
+            line(
+                3,
+                "for what the exciter and the reverb add.",
+                color::TEXT_DIM,
+            );
+        } else {
+            line(0, "Sing a phrase or two, as in the song.", color::TEXT);
+        }
         line(
             1,
             &format!(
-                "{:.1} s of singing heard, {FULL_VOICED_S:.0} s wanted.",
+                "{:.1} s of singing heard, {wanted:.0} s wanted.",
                 l.voiced_seconds()
             ),
             color::TEXT_DIM,
         );
         let bar = Rect::from_min_size(
-            pos2(box_r.left() + space::M, box_r.top() + 58.0),
+            pos2(box_r.left() + space::M, box_r.bottom() - 34.0),
             vec2(box_r.width() - 2.0 * space::M, 6.0),
         );
         rounded(p, bar, 3, color::RAISED, color::RAISED);
-        let done = (l.voiced_seconds() / FULL_VOICED_S).clamp(0.0, 1.0);
+        let done = (l.voiced_seconds() / wanted).clamp(0.0, 1.0);
         if done > 0.0 {
             let fill = Rect::from_min_size(bar.min, vec2(bar.width() * done, bar.height()));
             rounded(p, fill, 3, accent, accent);
         }
-        if l.voiced_seconds() >= MIN_VOICED_S {
-            line(4, "Stop now for a quick diagnosis.", color::TEXT_FAINT);
+        if l.voiced_seconds() >= MIN_VOICED_S && !st.assist.checking {
+            line(2, "Stop now for a quick diagnosis.", color::TEXT_FAINT);
         }
     } else if let Some(an) = &st.assist.analysis {
         for (i, s) in describe(an, st.assist.style, st.assist.amounts(), view.tempo)
@@ -389,12 +564,18 @@ pub(crate) fn assistant_panel(
         );
         line(2, "settings. You hear them at once.", color::TEXT_DIM);
         line(3, "Compare with before, or Undo it all.", color::TEXT_DIM);
+        line(
+            4,
+            "Send the mix to the side-chain: it is heard too.",
+            color::TEXT_DIM,
+        );
         if !st.assist.note.is_empty() {
-            line(4, st.assist.note, color::METER_HOT);
+            line(5, st.assist.note, color::METER_HOT);
         }
     }
 
-    // Clarity, Control and Space, then Listen, Apply, Compare, Undo.
+    // Clarity, Control and Space, then Listen, Check and Apply over
+    // Compare and Undo.
     let cy = r.bottom() - 58.0;
     for which in 0..3 {
         #[allow(clippy::cast_precision_loss)]
@@ -404,28 +585,28 @@ pub(crate) fn assistant_panel(
     let bw = 95.0;
     let bx = r.right() - space::L - 2.0 * bw - 6.0;
     #[allow(clippy::cast_precision_loss)]
-    let slot = |i: usize| {
-        Rect::from_min_size(
-            pos2(
-                bx + (bw + 6.0) * (i % 2) as f32,
-                cy - 30.0 + 34.0 * (i / 2) as f32,
-            ),
-            vec2(bw, 28.0),
-        )
-    };
+    let slot =
+        |i: usize| Rect::from_min_size(pos2(bx + (bw + 6.0) * i as f32, cy + 4.0), vec2(bw, 28.0));
+    let tw = (2.0 * bw - 6.0) / 3.0;
+    #[allow(clippy::cast_precision_loss)]
+    let top =
+        |i: usize| Rect::from_min_size(pos2(bx + (tw + 6.0) * i as f32, cy - 30.0), vec2(tw, 28.0));
     let a = &mut st.assist;
     let has_taps = st.eq.taps.is_some();
     if button(
         ui,
         "listen",
-        slot(0),
+        top(0),
         if listening { "Stop" } else { "Listen" },
         has_taps,
         listening,
         accent,
     ) {
         if listening {
-            a.stop();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let settle = (view.sample_rate.max(8000.0) * SETTLE_S) as usize;
+            let deessing = params.get_plain(ParamId::OutDeEss) >= 1.0;
+            a.stop(&eq_now(params, view), view.tempo, settle, deessing);
         } else if let Some(taps) = &st.eq.taps {
             let sr = if view.sample_rate > 0.0 {
                 view.sample_rate
@@ -435,10 +616,23 @@ pub(crate) fn assistant_panel(
             a.listener = Some(Listener::new(sr));
             a.seen = taps.input.written();
             a.note = "";
+            a.checking = false;
+            a.check_from = None;
+            a.verdict.clear();
         }
     }
+    // Another check at the output: lit when the style or an amount
+    // moved since the last one, or when it was skipped.
+    let can_check = has_taps && !listening && !a.comparing && a.analysis.is_some();
+    let due = can_check && (a.stale() || a.analysis.as_ref().is_some_and(|an| !an.checked));
+    if button(ui, "check", top(1), "Check", can_check, due, accent)
+        && let Some(taps) = &st.eq.taps
+    {
+        a.check_from = Some(taps.input.written());
+        a.verdict.clear();
+    }
     let can_apply = !listening && !a.comparing && !a.hints.is_empty();
-    if button(ui, "apply", slot(1), "Apply", can_apply, false, accent) {
+    if button(ui, "apply", top(2), "Apply", can_apply, false, accent) {
         if a.before.is_none() {
             a.before = Some(snapshot(params));
         }
@@ -449,7 +643,7 @@ pub(crate) fn assistant_panel(
     if button(
         ui,
         "compare",
-        slot(2),
+        slot(0),
         "Compare",
         applied,
         a.comparing,
@@ -464,7 +658,7 @@ pub(crate) fn assistant_panel(
         }
         a.comparing = !a.comparing;
     }
-    if button(ui, "undo", slot(3), "Undo", applied, false, accent)
+    if button(ui, "undo", slot(1), "Undo", applied, false, accent)
         && let Some(before) = a.before.take()
     {
         set_all(params, &before);

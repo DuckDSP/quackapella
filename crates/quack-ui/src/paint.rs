@@ -9,6 +9,35 @@ pub(crate) fn text(p: &Painter, pos: Pos2, align: Align2, s: &str, size: f32, c:
     p.text(pos, align, s, label_font(size), c)
 }
 
+/// Text held within `max_w`: shrunk a little first, then cut short
+/// with an ellipsis. Nothing may run into its neighbour.
+pub(crate) fn text_fit(
+    p: &Painter,
+    pos: Pos2,
+    align: Align2,
+    s: &str,
+    size: f32,
+    c: Color32,
+    max_w: f32,
+) -> Rect {
+    let width = |t: &str, sz: f32| p.layout_no_wrap(t.to_owned(), label_font(sz), c).size().x;
+    let mut sz = size;
+    while width(s, sz) > max_w && sz > (size - 2.0).max(9.0) {
+        sz -= 0.5;
+    }
+    if width(s, sz) <= max_w {
+        return p.text(pos, align, s, label_font(sz), c);
+    }
+    let mut cut: String = s.to_owned();
+    loop {
+        cut.pop();
+        let t = format!("{}…", cut.trim_end());
+        if cut.is_empty() || width(&t, sz) <= max_w {
+            return p.text(pos, align, t, label_font(sz), c);
+        }
+    }
+}
+
 pub(crate) fn value(p: &Painter, pos: Pos2, align: Align2, s: &str, size: f32, c: Color32) -> Rect {
     p.text(pos, align, s, value_font(size), c)
 }

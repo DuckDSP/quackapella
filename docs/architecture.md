@@ -393,10 +393,11 @@ Première étape de l'assistant de mixage (ids 1300 et suivants).
 - **Exciter** (`fx::Exciter`) : harmoniques fabriquées à partir de la
   bande juste au-dessus de sa fréquence, ajoutées en parallèle, à niveau
   relatif constant. Aucune latence.
-- **Prises d'analyse** (`tap`) : deux anneaux de 4096 samples écrits par
-  le fil audio (un atomique par sample, sans attente), à l'entrée et
-  après les couches. L'éditeur y lit le spectre du graphe ; l'assistant
-  s'en servira. Rien sur le chemin audio.
+- **Prises d'analyse** (`tap`) : quatre anneaux de 4096 samples écrits
+  par le fil audio (un atomique par sample, sans attente) : l'entrée,
+  après les couches, la sortie des effets et l'entrée sidechain.
+  L'éditeur y lit le spectre du graphe et l'assistant ses mesures. Rien
+  sur le chemin audio.
 - **Éditeur** : sur la page FX, le graphe de l'égaliseur remplace le
   panneau Tune (`quack-ui/src/eq.rs`). Les fréquences restent linéaires
   pour l'hôte, les boutons et le graphe sont logarithmiques.
@@ -438,6 +439,28 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
 - `propose` est une fonction pure (mesures, style, dose) ; `describe`
   dit la même chose en cinq lignes. `PARAMS` liste tout ce qu'une
   proposition peut toucher (pour Undo).
+- **Vérification en sortie** : une troisième prise (`Taps::output`,
+  après l'EQ, les retours et la dynamique de sortie) donne ce que la
+  chaîne ajoute après les couches, EQ mis à part (`Analysis::colour`,
+  relatif aux médiums, borné à ±6 dB). Une deuxième écoute, proposition
+  en place, corrige donc l'EQ de ce qu'apportent l'exciter et la
+  reverb. L'éditeur enchaîne cette vérification tout seul après la
+  première écoute (0,7 s pour laisser la proposition s'installer, puis
+  4 s de chant), avec un message, et affiche ce qu'elle a changé.
+  Quand le style ou une dose bouge ensuite, l'éditeur affiche
+  « Changed: check again » et le bouton Check, allumé, refait la seule
+  vérification (4 s de chant) sans refaire le diagnostic de la voix.
+- **Sortie** : le compresseur de sortie est dosé par style
+  (`Style::glue`, avec Control), le plafond mis à -1 dB, et le
+  de-esseur de sortie réglé à la vérification d'après les sifflantes
+  mesurées en sortie (`Analysis::out_sibilance`).
+- **Écoute du mix** : une quatrième prise (`Taps::side`) lit l'entrée
+  sidechain. Quand elle est libre (ni Voice from Sidechain, ni porteuse
+  externe du vocodeur), c'est le mix : s'il est chargé vers 3 kHz la
+  cible de présence monte (jusqu'à +3 dB), s'il est plein dans les
+  bas-médiums celle de la voix descend (jusqu'à -2 dB). Seule la forme
+  du mix est lue, pas son niveau. Sidechain pris ou muet : l'assistant
+  le dit et s'en passe.
 - **Interface** (`quack-ui/src/assist.rs`) : sur la page FX, le panneau
   de gauche bascule entre le graphe de l'EQ et l'assistant. Listen,
   diagnostic, Clarity, Control et Space, puis Apply, Compare et Undo. La proposition
