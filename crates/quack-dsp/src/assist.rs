@@ -1433,8 +1433,8 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<
         None => "Reverb and delay left as they are.".to_owned(),
     });
     out.push(match (a.mix, a.unmask()) {
-        (Mix::Taken, _) => "Mix: side-chain in use, not heard.".to_owned(),
-        (Mix::Silent, _) | (_, None) => "Mix: nothing on the side-chain.".to_owned(),
+        (Mix::Taken, _) => "Mix: side-chain in use. Add Quackapella Link.".to_owned(),
+        (Mix::Silent, _) | (_, None) => "Mix: not heard. Add Quackapella Link on it.".to_owned(),
         (_, Some((lift, lean))) if lift > 0.0 && lean > 0.0 => {
             format!("Mix dense: presence +{lift:.1} dB, low mids -{lean:.1} dB.")
         }

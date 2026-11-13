@@ -487,3 +487,30 @@ fn midi_out_onset_per_voice_range() {
         }
     }
 }
+
+/// What a Quackapella Link sends as the mix reaches the assistant's
+/// tap. (Only the mix here: these tests run side by side and share the
+/// machine's channels; a carrier would land in the others' side-chain.)
+#[test]
+fn a_linked_mix_reaches_its_tap() {
+    use quack_link::{Channel, Role, Sender};
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
+    let x = vec![0.0f32; 64];
+    run(&mut dsp, &params, &x, &EventList::default());
+    assert_eq!(params.shared.view().link, [false, false]);
+
+    let mut tx = Sender::new(Channel::open(Role::Mix).expect("channel"), 77, SR);
+    let tone: Vec<f32> = (0..64).map(|i| (i as f32 * 0.3).sin() * 0.4).collect();
+    for _ in 0..80 {
+        tx.send(&tone, &tone, 1.0);
+        run(&mut dsp, &params, &x, &EventList::default());
+    }
+    assert_eq!(params.shared.view().link, [true, false]);
+    let mut heard = vec![0.0f32; 1024];
+    params.shared.taps.link.read(&mut heard);
+    let peak = heard.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+    assert!((peak - 0.4).abs() < 0.02, "{peak}");
+    assert!(tx.listened(64));
+}

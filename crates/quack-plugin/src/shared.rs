@@ -36,6 +36,9 @@ pub struct Shared {
     /// Notes the MIDI output plays.
     midi_out_lo: AtomicU64,
     midi_out_hi: AtomicU64,
+    /// A Quackapella Link sends the mix, the carrier.
+    link_mix: AtomicBool,
+    link_carrier: AtomicBool,
     /// Analysis taps the engine writes and the editor's spectrum reads.
     pub taps: quack_dsp::tap::Taps,
 }
@@ -99,6 +102,12 @@ impl Shared {
             .store((mask >> 64) as u64, Ordering::Relaxed);
     }
 
+    pub fn publish_link(&self, mix: bool, carrier: bool) {
+        self.link_mix.store(mix, Ordering::Relaxed);
+        self.link_carrier.store(carrier, Ordering::Relaxed);
+        self.taps.linked.store(mix, Ordering::Relaxed);
+    }
+
     pub fn publish_frozen(&self, frozen: bool) {
         self.frozen.store(frozen, Ordering::Relaxed);
     }
@@ -140,6 +149,10 @@ impl Shared {
             out_deess_db: f32::from_bits(self.out_deess_db.load(Ordering::Relaxed)),
             midi_out_notes: u128::from(self.midi_out_lo.load(Ordering::Relaxed))
                 | (u128::from(self.midi_out_hi.load(Ordering::Relaxed)) << 64),
+            link: [
+                self.link_mix.load(Ordering::Relaxed),
+                self.link_carrier.load(Ordering::Relaxed),
+            ],
         }
     }
 }

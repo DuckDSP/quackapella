@@ -23,6 +23,7 @@ rt-paranoid = ["truce/rt-paranoid"]
 [dependencies]
 quack-dsp = { workspace = true }
 quack-ui = { workspace = true }
+quack-link = { workspace = true }
 truce = { workspace = true }
 truce-core = { workspace = true }
 truce-params = { workspace = true }

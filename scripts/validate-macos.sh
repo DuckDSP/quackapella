@@ -31,7 +31,7 @@ step() {
 cat "$LOG/environment.log"
 
 step install-cargo-truce cargo install cargo-truce --version =6.3.0 --locked
-step unit-tests cargo test --workspace --features quack-plugin/rt-paranoid
+step unit-tests cargo test --workspace --features quack-plugin/rt-paranoid,quack-link-plugin/rt-paranoid
 step build-au2 cargo truce install --au2 --user -p quack-plugin
 COMPONENT="$HOME/Library/Audio/Plug-Ins/Components/Quackapella.component"
 step arch-check bash -c "lipo -archs \"$COMPONENT\"/Contents/MacOS/*"
@@ -56,6 +56,17 @@ CLAP="$HOME/Library/Audio/Plug-Ins/CLAP/Quackapella.clap"
 step clap-arch-check bash -c "lipo -archs \"$CLAP\"/Contents/MacOS/*"
 step clap-validator "$CLAP_VALIDATOR" validate "$CLAP"
 
+# The companion, Quackapella Link: a plain effect (`aufx`), same checks.
+PLUGINS="$HOME/Library/Audio/Plug-Ins"
+step link-build-au2 cargo truce install --au2 --user -p quack-link-plugin
+step link-arch-check bash -c "lipo -archs \"$PLUGINS\"/Components/Quackapella*Link.component/Contents/MacOS/*"
+killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+step link-auval auval -strict -v aufx Qklk DKDS
+step link-build-vst3 cargo truce install --vst3 --user -p quack-link-plugin
+step link-pluginval bash -c "\"$PLUGINVAL\" --strictness-level 10 --timeout-ms 120000 --validate \"$PLUGINS\"/VST3/Quackapella*Link.vst3"
+step link-build-clap cargo truce install --clap --user -p quack-link-plugin
+step link-clap-validator bash -c "\"$CLAP_VALIDATOR\" validate \"$PLUGINS\"/CLAP/Quackapella*Link.clap"
+
 if [[ $package -eq 1 ]]; then
     step package scripts/package-macos.sh
 fi
@@ -63,5 +74,8 @@ fi
 grep -E "AU VALIDATION SUCCEEDED|FAILED" "$LOG/auval.log" || true
 grep -E "SUCCESS|FAILED" "$LOG/pluginval.log" | tail -3 || true
 grep -E "tests run|passed|failed" "$LOG/clap-validator.log" | tail -3 || true
+grep -E "AU VALIDATION SUCCEEDED|FAILED" "$LOG/link-auval.log" || true
+grep -E "SUCCESS|FAILED" "$LOG/link-pluginval.log" | tail -3 || true
+grep -E "tests run|passed|failed" "$LOG/link-clap-validator.log" | tail -3 || true
 echo "Logs: $LOG"
 exit $status

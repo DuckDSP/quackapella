@@ -1,0 +1,35 @@
+[package]
+name = "quack-link-plugin"
+description = "Quackapella Link: sends the track it sits on to Quackapella (the mix for the assistant, or the vocoder's carrier). The audio passes through untouched."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["clap", "vst3"]
+clap = ["dep:truce-clap", "dep:clap-sys", "truce/clap"]
+vst3 = ["dep:truce-vst3", "truce/vst3"]
+au = ["dep:truce-au"]
+rt-paranoid = ["truce/rt-paranoid"]
+
+[dependencies]
+quack-link = { workspace = true }
+quack-ui = { workspace = true }
+truce = { workspace = true }
+truce-core = { workspace = true }
+truce-params = { workspace = true }
+truce-egui = { workspace = true }
+truce-font = { workspace = true }
+egui = { workspace = true }
+truce-clap = { workspace = true, optional = true }
+clap-sys = { workspace = true, optional = true }
+truce-vst3 = { workspace = true, optional = true }
+truce-au = { workspace = true, optional = true }
+
+[dev-dependencies]
+truce-test = { workspace = true }

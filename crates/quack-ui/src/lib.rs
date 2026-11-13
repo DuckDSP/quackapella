@@ -23,6 +23,7 @@ mod brand;
 mod controls;
 mod eq;
 pub mod library;
+pub mod link;
 mod paint;
 pub mod perform;
 pub mod theme;
@@ -102,6 +103,8 @@ pub struct View {
     pub out_deess_db: f32,
     /// Notes the MIDI output plays, bit n = note n.
     pub midi_out_notes: u128,
+    /// A Quackapella Link sends the mix, the carrier (in that order).
+    pub link: [bool; 2],
 }
 
 /// Seconds of pitch history in the graph.
@@ -1321,7 +1324,9 @@ fn vocoder_panel(
     let carrier = if swapped { Carrier::Sidechain } else { carrier };
     let status = match (mode, carrier) {
         _ if !layer => "Off".to_owned(),
+        _ if swapped && view.link[1] => "Voice: Link · Carrier: track".to_owned(),
         _ if swapped => "Voice: side-chain · Carrier: track".to_owned(),
+        (_, Carrier::Sidechain) if view.link[1] => "Quackapella Link".to_owned(),
         (_, Carrier::Sidechain) => "Side-chain".to_owned(),
         _ if !playing.is_empty() && view.held_notes == 0 && follow => {
             format!("Follow · {shown}{more}")
@@ -2653,6 +2658,7 @@ mod tests {
                 out_comp_db: 0.0,
                 out_deess_db: 0.0,
                 midi_out_notes: 0,
+                link: [false; 2],
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

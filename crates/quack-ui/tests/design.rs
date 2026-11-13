@@ -170,6 +170,7 @@ fn editor_captures() {
                 0
             },
             midi_out_notes: if mode == 1.0 { 1 << 57 } else { 0 },
+            link: [false; 2],
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);

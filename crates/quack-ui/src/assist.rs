@@ -274,12 +274,21 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
         taps.input.read(&mut x[..n]);
         taps.layers.read(&mut y[..n]);
         taps.output.read(&mut z[..n]);
-        taps.side.read(&mut w[..n]);
-        // The side-chain is the mix unless it brings the voice or the
+        // The mix comes from Quackapella Link when one sends it, else
+        // from the side-chain unless that brings the voice or the
         // vocoder's carrier.
-        let taken = params.get_plain(ParamId::VocoderSwap) >= 0.5
-            || (params.get_plain(ParamId::VocoderOn) >= 0.5
-                && Carrier::from_index(params.get_plain(ParamId::Carrier)) == Carrier::Sidechain);
+        let linked = taps.linked.load(std::sync::atomic::Ordering::Relaxed);
+        if linked {
+            taps.link.read(&mut w[..n]);
+        } else {
+            taps.side.read(&mut w[..n]);
+        }
+        let taken = !linked
+            && (view.link[1]
+                || params.get_plain(ParamId::VocoderSwap) >= 0.5
+                || (params.get_plain(ParamId::VocoderOn) >= 0.5
+                    && Carrier::from_index(params.get_plain(ParamId::Carrier))
+                        == Carrier::Sidechain));
         l.feed(
             &Heard {
                 input: &x[..n],
@@ -566,7 +575,7 @@ pub(crate) fn assistant_panel(
         line(3, "Compare with before, or Undo it all.", color::TEXT_DIM);
         line(
             4,
-            "Send the mix to the side-chain: it is heard too.",
+            "Quackapella Link on the mix: it is heard too.",
             color::TEXT_DIM,
         );
         if !st.assist.note.is_empty() {

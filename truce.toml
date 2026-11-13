@@ -27,6 +27,19 @@ au3_subtype = "Qkp3"
 au_tag = "Effects"
 vst3_subcategory = "Pitch Shift"
 
+# The companion: sends the track it sits on to Quackapella (the mix for
+# the assistant, the vocoder's carrier). A plain effect, no MIDI: an AU
+# `aufx`, so it loads on any audio, instrument or bus channel.
+[[plugin]]
+name = "Quackapella Link"
+bundle_id = "quackapella-link"
+crate = "quack-link-plugin"
+category = "effect"
+fourcc = "Qklk"
+au3_subtype = "Qkl3"
+au_tag = "Effects"
+vst3_subcategory = "Tools"
+
 # `cargo truce package` (scripts/package-macos.sh): one .pkg holding the
 # three formats. Notarization runs only when the script finds the
 # Developer ID identities and a notarytool profile (else --no-notarize).
