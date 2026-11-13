@@ -76,6 +76,8 @@ pub struct View {
     /// Reported latency in samples, and the rate it was computed at.
     pub latency_samples: u32,
     pub sample_rate: f64,
+    /// Host tempo, BPM (0 while unknown).
+    pub tempo: f32,
     /// Detected pitch in Hz, 0 while unvoiced, and its confidence (0-1).
     pub pitch_hz: f32,
     pub pitch_confidence: f32,
@@ -1689,8 +1691,9 @@ impl UiState {
         &mut self,
         analysis: quack_dsp::assist::Analysis,
         style: quack_dsp::assist::Style,
+        tempo: u32,
     ) {
-        self.assist.show(analysis, style);
+        self.assist.show(analysis, style, tempo);
     }
 }
 
@@ -2632,6 +2635,7 @@ mod tests {
                 held_notes: (1 << 60) | (1 << 76),
                 latency_samples: 591,
                 sample_rate: 48_000.0,
+                tempo: 120.0,
                 pitch_hz: if mode % 2 == 0 { 0.0 } else { 223.1 },
                 pitch_confidence: 0.92,
                 tune_sung: 57.2,

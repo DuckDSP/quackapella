@@ -147,6 +147,7 @@ fn editor_captures() {
             },
             latency_samples: 591,
             sample_rate: 48_000.0,
+            tempo: 96.0,
             pitch_hz: if mode == 2.0 { 0.0 } else { 223.1 },
             pitch_confidence: 0.92,
             tune_sung: 57.24,
@@ -307,6 +308,7 @@ fn editor_captures() {
                     voiced_s: 7.2,
                 },
                 quack_dsp::assist::Style::Pop,
+                96,
             );
             for (tab, name) in [(FxTab::Input, "assistant"), (FxTab::Eq, "assistant-eq")] {
                 st.set_fx_tab(tab);
@@ -349,6 +351,7 @@ fn preset_browser_capture() {
     let view = View {
         latency_samples: 591,
         sample_rate: 48_000.0,
+        tempo: 96.0,
         ..View::default()
     };
     let ctx = egui::Context::default();

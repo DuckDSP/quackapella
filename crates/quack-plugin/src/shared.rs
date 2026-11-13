@@ -9,6 +9,8 @@ pub struct Shared {
     notes_hi: AtomicU64,
     latency: AtomicU32,
     sample_rate_bits: AtomicU64,
+    /// Host tempo, BPM (f32 bits).
+    tempo: AtomicU32,
     /// Detected pitch (f32 bits, 0 while unvoiced) and its confidence.
     pitch_hz: AtomicU32,
     pitch_confidence: AtomicU32,
@@ -43,6 +45,11 @@ impl Shared {
         #[allow(clippy::cast_possible_truncation)]
         self.notes_lo.store(mask as u64, Ordering::Relaxed);
         self.notes_hi.store((mask >> 64) as u64, Ordering::Relaxed);
+    }
+
+    pub fn publish_tempo(&self, bpm: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        self.tempo.store((bpm as f32).to_bits(), Ordering::Relaxed);
     }
 
     pub fn publish_pitch(&self, pitch: Option<quack_dsp::pitch::PitchEstimate>) {
@@ -114,6 +121,7 @@ impl Shared {
                 | (u128::from(self.notes_hi.load(Ordering::Relaxed)) << 64),
             latency_samples: self.latency.load(Ordering::Relaxed),
             sample_rate: f64::from_bits(self.sample_rate_bits.load(Ordering::Relaxed)),
+            tempo: f32::from_bits(self.tempo.load(Ordering::Relaxed)),
             pitch_hz: f32::from_bits(self.pitch_hz.load(Ordering::Relaxed)),
             pitch_confidence: f32::from_bits(self.pitch_confidence.load(Ordering::Relaxed)),
             tune_sung: f32::from_bits(self.tune_sung.load(Ordering::Relaxed)),

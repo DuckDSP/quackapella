@@ -360,6 +360,7 @@ impl PluginLogic for Quackapella {
         state
             .engine
             .set_transport(t.tempo, bar, t.playing.then_some(t.position_beats));
+        params.shared.publish_tempo(t.tempo);
         let total = buffer.num_samples();
         state.update_morph(params, total);
         // Host values once per (sub-)block: truce splits blocks at
