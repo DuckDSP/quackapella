@@ -32,6 +32,7 @@
 //! | [`presets`] | Factory library and preset files [8] |
 //! | [`snapshot`] | Snapshots A/B and the morph between them |
 //! | [`midiout`] | Sung notes as MIDI output |
+//! | [`tap`] | Analysis taps for the editor, off the audio path |
 
 pub mod autotune;
 pub mod chain;
@@ -51,6 +52,7 @@ pub mod presets;
 pub mod shift;
 pub mod smooth;
 pub mod snapshot;
+pub mod tap;
 pub mod throat;
 pub mod vocoder;
 

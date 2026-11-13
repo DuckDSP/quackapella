@@ -327,6 +327,7 @@ impl PluginLogic for Quackapella {
         state
             .engine
             .prepare(config.sample_rate, config.max_block_size.max(1));
+        state.engine.set_taps(params.shared.taps.clone());
         state.needs_snap = true;
         state.sample_rate = config.sample_rate;
         state.tracker = Tracker::default();

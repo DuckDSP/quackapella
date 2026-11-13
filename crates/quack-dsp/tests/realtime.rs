@@ -151,6 +151,12 @@ fn heavy(mode: f64) -> ParamValues {
     set("out_comp", 50.0);
     set("out_deess", 40.0);
     set("keep_in_key", 1.0);
+    set("eq_low_cut", 90.0);
+    set("eq_low_shelf_gain", -3.0);
+    set("eq_bell_1_gain", -4.0);
+    set("eq_bell_3_gain", 3.0);
+    set("eq_high_shelf_gain", 4.0);
+    set("exciter_amount", 40.0);
     set("chorus_on", 1.0);
     set("delay_mod", 50.0);
     set("delay_width", 50.0);

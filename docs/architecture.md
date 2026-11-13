@@ -378,6 +378,29 @@ Rangée *Snapshots* et panneau *MIDI Out*, au-dessus des macros (éditeur
     (Soprano) à 19 ms (Bass) après l'attaque (test
     `midi_out_onset_per_voice_range`). Aucune latence audio ajoutée.
 
+## Égaliseur de sortie, exciter, prises d'analyse
+
+Première étape de l'assistant de mixage (ids 1300 et suivants).
+
+- **Où** : après les couches et le chorus, avant le retour du delay et
+  de la reverb et avant la dynamique de sortie. La couleur se règle sur
+  le son transformé (formants, harmonies, vocodeur), pas sur la voix
+  brute ; l'onglet Tone reste à l'entrée, pour nettoyer la source.
+- **Égaliseur** (`fx::Eq`) : coupe-bas, plateau grave, trois cloches,
+  plateau aigu, en filtres à variables d'état à phase minimale. Aucune
+  latence. Une bande à plat ne coûte rien. `fx::EqCurve` donne la courbe
+  jouée, la même que celle dessinée.
+- **Exciter** (`fx::Exciter`) : harmoniques fabriquées à partir de la
+  bande juste au-dessus de sa fréquence, ajoutées en parallèle, à niveau
+  relatif constant. Aucune latence.
+- **Prises d'analyse** (`tap`) : deux anneaux de 4096 samples écrits par
+  le fil audio (un atomique par sample, sans attente), à l'entrée et
+  après les couches. L'éditeur y lit le spectre du graphe ; l'assistant
+  s'en servira. Rien sur le chemin audio.
+- **Éditeur** : sur la page FX, le graphe de l'égaliseur remplace le
+  panneau Tune (`quack-ui/src/eq.rs`). Les fréquences restent linéaires
+  pour l'hôte, les boutons et le graphe sont logarithmiques.
+
 ## Modes
 
 | Mode | Intention | Formants |

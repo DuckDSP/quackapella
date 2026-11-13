@@ -112,6 +112,16 @@ fn editor_captures() {
             v.set(ParamId::Routing, 1.0);
             v.set(ParamId::Chain, 1.0);
         }
+        if mode == 5.0 {
+            v.set(ParamId::EqLowCut, 90.0);
+            v.set(ParamId::EqBell1Freq, 280.0);
+            v.set(ParamId::EqBell1Gain, -4.0);
+            v.set(ParamId::EqBell1Q, 1.4);
+            v.set(ParamId::EqBell3Freq, 3500.0);
+            v.set(ParamId::EqBell3Gain, 3.0);
+            v.set(ParamId::EqHighShelfGain, 4.0);
+            v.set(ParamId::ExciterAmount, 30.0);
+        }
         v.set(ParamId::Macro1, 40.0);
         v.set(ParamId::Macro2, if mode == 2.0 { 30.0 } else { 0.0 });
         ctl.bind(1, ParamId::Macro1);
@@ -163,6 +173,25 @@ fn editor_captures() {
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);
         let mut st = UiState::default();
+        // The FX page's spectrum: a sung vowel in the analysis tap.
+        let taps = quack_dsp::tap::Taps::default();
+        st.set_taps(taps.clone());
+        let sing = move || {
+            for i in 0..4096 {
+                let t = f64::from(i) / 48_000.0;
+                let mut x = 0.0;
+                for h in 1..40 {
+                    let f = 165.0 * f64::from(h);
+                    // Two formants over a falling source.
+                    let formant = |c: f64, w: f64| (-((f - c) / w).powi(2)).exp();
+                    let a = (formant(650.0, 220.0) + 0.5 * formant(2800.0, 500.0) + 0.08)
+                        / f64::from(h).sqrt();
+                    x += a * (std::f64::consts::TAU * f * t).sin();
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                taps.layers.push(0.12 * x as f32);
+            }
+        };
         st.set_page(match mode as u8 {
             2 => Page::Creative,
             3 => Page::Harmony,
@@ -221,7 +250,10 @@ fn editor_captures() {
             2.0,
             3,
             color::BG,
-            |ui| draw(ui, &params, &view, &mut st),
+            |ui| {
+                sing();
+                draw(ui, &params, &view, &mut st);
+            },
         );
         if write {
             support::raster::write_png(&canvas, &out.join(format!("editor-{name}.png")))
@@ -244,7 +276,10 @@ fn editor_captures() {
                     2.0,
                     3,
                     color::BG,
-                    |ui| draw(ui, &params, &view, &mut st),
+                    |ui| {
+                        sing();
+                        draw(ui, &params, &view, &mut st);
+                    },
                 );
                 if write {
                     let tab = tab.name().to_lowercase();

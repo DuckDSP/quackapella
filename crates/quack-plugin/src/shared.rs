@@ -34,6 +34,8 @@ pub struct Shared {
     /// Notes the MIDI output plays.
     midi_out_lo: AtomicU64,
     midi_out_hi: AtomicU64,
+    /// Analysis taps the engine writes and the editor's spectrum reads.
+    pub taps: quack_dsp::tap::Taps,
 }
 
 impl Shared {
