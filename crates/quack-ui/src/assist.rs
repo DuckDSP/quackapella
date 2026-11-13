@@ -1,7 +1,9 @@
 //! The mixing assistant's panel on the FX page: pick a style, press
-//! Listen and sing; it says what it heard and proposes settings, shown
-//! as dots on the knobs. Nothing changes until Apply; Compare switches
-//! between before and after, Undo puts everything back. Clarity,
+//! Listen and sing; it says what it heard and proposes settings, set
+//! and heard at once: the proposal follows the style and the three
+//! knobs. Compare switches between before and after, Undo puts
+//! everything back (the proposal then shows as dots on the knobs, and
+//! Apply plays it again). Clarity,
 //! Control and Space set how far the tone, the dynamics and the reverb
 //! and delay go towards the style.
 //!
@@ -50,6 +52,9 @@ pub(crate) struct AssistUi {
     /// Proposed values not applied yet: the dots on the knobs.
     hints: Vec<(ParamId, f64)>,
     amount_drag: Option<(usize, f32)>,
+    /// Style and amounts of the proposal last put on the parameters:
+    /// a change of either is heard at once.
+    played: Option<(Style, [f32; 3])>,
 }
 
 impl Default for AssistUi {
@@ -68,6 +73,7 @@ impl Default for AssistUi {
             comparing: false,
             hints: Vec::new(),
             amount_drag: None,
+            played: None,
         }
     }
 }
@@ -84,6 +90,8 @@ impl AssistUi {
         self.open = true;
         self.style = style;
         self.analysis = Some(analysis);
+        // As after Undo: shown, not played.
+        self.played = Some((style, self.amounts));
     }
 
     fn amounts(&self) -> Amounts {
@@ -100,6 +108,7 @@ impl AssistUi {
             match l.finish() {
                 Some(a) => {
                     self.analysis = Some(a);
+                    self.played = None;
                     self.note = "";
                 }
                 None => self.note = "Not enough singing heard. Try again.",
@@ -142,8 +151,21 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
     a.hints.clear();
     if let Some(an) = &a.analysis
         && !a.comparing
+        && a.listener.is_none()
     {
-        for (id, v) in propose(an, a.style, a.amounts()).changes {
+        let changes = propose(an, a.style, a.amounts()).changes;
+        // A new diagnosis, another style or a turn of Clarity, Control
+        // or Space is heard at once. What the user then sets by hand
+        // is left alone (and the difference shown as dots).
+        let key = (a.style, a.amounts);
+        if a.played != Some(key) {
+            if a.before.is_none() {
+                a.before = Some(snapshot(params));
+            }
+            set_all(params, &changes);
+            a.played = Some(key);
+        }
+        for (id, v) in changes {
             if (params.get_plain(id) - v).abs() > 1e-6 {
                 a.hints.push((id, v));
             }
@@ -364,8 +386,8 @@ pub(crate) fn assistant_panel(
             "The assistant says what it hears and proposes",
             color::TEXT_DIM,
         );
-        line(2, "settings, shown as dots on the knobs.", color::TEXT_DIM);
-        line(3, "Nothing changes until you press Apply.", color::TEXT_DIM);
+        line(2, "settings. You hear them at once.", color::TEXT_DIM);
+        line(3, "Compare with before, or Undo it all.", color::TEXT_DIM);
         if !st.assist.note.is_empty() {
             line(4, st.assist.note, color::METER_HOT);
         }

@@ -432,8 +432,10 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
 - **Interface** (`quack-ui/src/assist.rs`) : sur la page FX, le panneau
   de gauche bascule entre le graphe de l'EQ et l'assistant. Listen,
   diagnostic, Clarity, Control et Space, puis Apply, Compare et Undo. La proposition
-  s'affiche en points blancs sur les boutons tant qu'elle n'est pas
-  appliquée ; rien ne change sans Apply.
+  s'entend dès la fin de l'écoute et suit le style et les trois doses.
+  Compare bascule entre avant et après, Undo remet tout ; elle reste
+  alors affichée en points blancs sur les boutons et Apply la rejoue.
+  Un réglage fait à la main n'est pas écrasé.
 
 ## Modes
 
