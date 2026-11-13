@@ -9,7 +9,8 @@
 //! `retune=0`, `scale=2`, `key=9`, `pitch=-5`...); `midi=60,64@1.5`
 //! holds notes 60 and 64 from 1.5 s (repeat for a sequence, `midi=@4`
 //! releases everything at 4 s); `key=value@t` changes a parameter at
-//! `t` seconds (`freeze=1@2.1 freeze=0@4`); `sc=FILE.wav` feeds the
+//! `t` seconds (`freeze=1@2.1 freeze=0@4`); `preset=Radio Pop` loads a
+//! factory preset (`preset=Radio Pop/B`: its snapshot B); `sc=FILE.wav` feeds the
 //! side-chain input (mono or stereo, cut or padded to the input). `--demo` writes a synthetic singer
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
@@ -58,6 +59,21 @@ fn main() {
         let (k, v) = kv.split_once('=').expect("key=value");
         if k == "sc" {
             side = Some(read_wav(v).1);
+            continue;
+        }
+        if k == "preset" {
+            // `preset=Name` or `preset=Name/B` (its snapshot B); the
+            // setup parameters keep what came before.
+            let (name, b) = v.strip_suffix("/B").map_or((v, false), |n| (n, true));
+            let f = quack_dsp::presets::FACTORY
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("unknown preset {name}"));
+            let pv = match f.snapshots() {
+                Some([_, snap_b]) if b => snap_b,
+                _ => f.values(),
+            };
+            values = quack_dsp::presets::merge(&values, &pv);
             continue;
         }
         if k == "midi" {

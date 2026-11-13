@@ -2258,6 +2258,13 @@ impl QuackParams {
                 self.set_normalized(spec.host_id, spec.kind.normalize(values.get(id)));
             }
         }
+        // A preset made to morph starts on A, ready to move.
+        if f.snapshots().is_some() {
+            for (id, v) in [(ParamId::Morph, 0.0), (ParamId::MorphOn, 1.0)] {
+                let spec = id.spec();
+                self.set_normalized(spec.host_id, spec.kind.normalize(v));
+            }
+        }
         self.control.recall_factory_macros(i);
         true
     }

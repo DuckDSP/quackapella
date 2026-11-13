@@ -255,3 +255,43 @@ fn editor_captures() {
         }
     }
 }
+
+#[test]
+fn preset_browser_capture() {
+    // A style preset loaded (Radio Pop: it holds snapshots A and B),
+    // the browser open on its shelf.
+    let write = std::env::var_os("QUACK_WRITE_CAPTURES").is_some();
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design");
+    let fi = FACTORY
+        .iter()
+        .position(|f| f.name == "Radio Pop")
+        .expect("factory preset");
+    let ctl = ControlState::default();
+    ctl.recall_factory_macros(fi);
+    let mut v = quack_dsp::presets::merge(&ParamValues::default(), &FACTORY[fi].values());
+    v.set(ParamId::MorphOn, 1.0);
+    let params = Values(RefCell::new(v), ctl);
+    let view = View {
+        latency_samples: 591,
+        sample_rate: 48_000.0,
+        ..View::default()
+    };
+    let ctx = egui::Context::default();
+    theme::apply(&ctx, truce_font::JETBRAINS_MONO);
+    let mut st = UiState::default();
+    st.open_presets(None);
+    #[allow(clippy::cast_precision_loss)]
+    let canvas = support::raster::render(
+        &ctx,
+        BASE_W as f32,
+        BASE_H as f32,
+        2.0,
+        3,
+        color::BG,
+        |ui| draw(ui, &params, &view, &mut st),
+    );
+    if write {
+        support::raster::write_png(&canvas, &out.join("editor-presets.png"))
+            .expect("write capture");
+    }
+}

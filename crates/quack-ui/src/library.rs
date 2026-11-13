@@ -7,8 +7,12 @@
 //! | Windows | `%APPDATA%\DuckDSP\Quackapella\Presets\` |
 //! | Linux | `$XDG_DATA_HOME/DuckDSP/Quackapella/presets/` (or `~/.local/share/…`) |
 //!
+//! The favorites (factory or user presets) sit beside them in
+//! `favorites.txt`, one `factory:Name` or `user:Name` per line.
+//!
 //! Editor thread only: read when the list opens, written on save.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use quack_dsp::presets::{EXTENSION, Preset};
@@ -99,6 +103,14 @@ pub fn save(dir: &Path, preset: &Preset) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Delete a user preset file.
+///
+/// # Errors
+/// Any I/O error.
+pub fn delete(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
 /// Find a user preset by name.
 #[must_use]
 pub fn find(dir: &Path, name: &str) -> Option<Preset> {
@@ -110,6 +122,49 @@ pub fn find(dir: &Path, name: &str) -> Option<Preset> {
         .into_iter()
         .find(|e| e.name == name)
         .and_then(|e| load(&e.path))
+}
+
+/// Favorites file in the user folder: one key per line.
+const FAVORITES: &str = "favorites.txt";
+
+/// Favorite key of a factory preset.
+#[must_use]
+pub fn factory_key(name: &str) -> String {
+    format!("factory:{name}")
+}
+
+/// Favorite key of a user preset.
+#[must_use]
+pub fn user_key(name: &str) -> String {
+    format!("user:{name}")
+}
+
+/// The favorites saved in `dir` (none when the file is missing).
+#[must_use]
+pub fn favorites(dir: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(dir.join(FAVORITES))
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write the favorites into `dir` (created if needed).
+///
+/// # Errors
+/// Any I/O error.
+pub fn save_favorites(dir: &Path, favs: &BTreeSet<String>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut t = String::from("# Quackapella favorite presets\n");
+    for f in favs {
+        t.push_str(f);
+        t.push('\n');
+    }
+    std::fs::write(dir.join(FAVORITES), t)
 }
 
 #[cfg(test)]
@@ -129,6 +184,14 @@ mod tests {
         assert_eq!(l.len(), 1);
         assert_eq!(l[0].name, "Mon/preset: 1");
         assert_eq!(find(&dir, "Mon/preset: 1"), Some(p));
+        // Favorites live beside the presets.
+        assert!(favorites(&dir).is_empty());
+        let favs: BTreeSet<String> = [factory_key("Radio Pop"), user_key("Mon/preset: 1")].into();
+        save_favorites(&dir, &favs).expect("favorites");
+        assert_eq!(favorites(&dir), favs);
+        assert_eq!(list(&dir).len(), 1);
+        delete(&path).expect("delete");
+        assert!(list(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

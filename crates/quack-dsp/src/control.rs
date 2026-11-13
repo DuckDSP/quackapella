@@ -435,8 +435,8 @@ impl ControlState {
         self.recall.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Recall factory preset `i`'s macros (audio thread safe: atomics
-    /// only; the names follow when the editor or the state save reads
+    /// Recall factory preset `i`'s macros and snapshots (audio thread
+    /// safe: atomics only; the names follow when the editor or the state save reads
     /// them). The caller sets the parameter values.
     pub fn recall_factory_macros(&self, i: usize) {
         let Some(f) = crate::presets::FACTORY.get(i) else {
@@ -444,6 +444,17 @@ impl ControlState {
         };
         for (m, def) in f.macros.iter().enumerate() {
             self.set_targets(m, def.targets);
+        }
+        // The snapshots belong to the sound.
+        match f.snapshots() {
+            Some([a, b]) => {
+                self.store_snapshot(0, &a);
+                self.store_snapshot(1, &b);
+            }
+            None => {
+                self.clear_snapshot(0);
+                self.clear_snapshot(1);
+            }
         }
         #[allow(clippy::cast_possible_truncation)]
         {
@@ -539,12 +550,7 @@ impl ControlState {
         }
         for (i, key) in SNAPSHOT_KEYS.iter().enumerate() {
             if let Some(v) = self.snapshot(i) {
-                let items: Vec<String> = ParamId::ALL
-                    .into_iter()
-                    .filter(|&id| crate::snapshot::in_snapshot(id))
-                    .map(|id| format!("{}:{}", id.spec().key, v.get(id)))
-                    .collect();
-                let _ = writeln!(s, "{key} = {}", items.join(", "));
+                let _ = writeln!(s, "{key} = {}", snapshot_text(&v));
             }
         }
         s
@@ -562,15 +568,7 @@ impl ControlState {
         self.clear_snapshot(1);
         for (k, v) in lines(text) {
             if let Some(i) = SNAPSHOT_KEYS.iter().position(|&s| s == k) {
-                let mut snap = ParamValues::default();
-                for item in v.split(',') {
-                    if let Some((key, val)) = item.trim().split_once(':')
-                        && let (Some(id), Ok(val)) = (by_key(key.trim()), val.trim().parse::<f64>())
-                    {
-                        snap.set(id, val);
-                    }
-                }
-                self.store_snapshot(i, &snap);
+                self.store_snapshot(i, &parse_snapshot(v));
                 continue;
             }
             match k {
@@ -612,8 +610,32 @@ impl ControlState {
     }
 }
 
-/// State keys of snapshots A and B.
-const SNAPSHOT_KEYS: [&str; 2] = ["snapshot_a", "snapshot_b"];
+/// State (and preset) keys of snapshots A and B.
+pub(crate) const SNAPSHOT_KEYS: [&str; 2] = ["snapshot_a", "snapshot_b"];
+
+/// A snapshot as one line: `key:value` pairs.
+pub(crate) fn snapshot_text(v: &ParamValues) -> String {
+    let items: Vec<String> = ParamId::ALL
+        .into_iter()
+        .filter(|&id| crate::snapshot::in_snapshot(id))
+        .map(|id| format!("{}:{}", id.spec().key, v.get(id)))
+        .collect();
+    items.join(", ")
+}
+
+/// Read [`snapshot_text`] back (unknown keys skipped, missing ones at
+/// their default).
+pub(crate) fn parse_snapshot(v: &str) -> ParamValues {
+    let mut snap = ParamValues::default();
+    for item in v.split(',') {
+        if let Some((key, val)) = item.trim().split_once(':')
+            && let (Some(id), Ok(val)) = (by_key(key.trim()), val.trim().parse::<f64>())
+        {
+            snap.set(id, val);
+        }
+    }
+    snap
+}
 
 /// `key = value` lines, comments (`#`) and blanks skipped.
 pub(crate) fn lines(text: &str) -> impl Iterator<Item = (&str, &str)> {

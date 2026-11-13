@@ -6,9 +6,12 @@
 //! macros and MIDI learn through [`ParamAccess::control`] (absent in a
 //! host without it: the menus then show nothing).
 
+use std::collections::BTreeSet;
+
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::control::{MACRO_COUNT, can_modulate};
+use quack_dsp::latency::VoiceRange;
 use quack_dsp::midiout::OutSource;
 use quack_dsp::params::{MACRO_PARAMS, ParamValues};
 use quack_dsp::presets::{self, CATEGORIES, FACTORY, Preset};
@@ -37,9 +40,44 @@ pub struct PresetUi {
     users: Option<Vec<Entry>>,
     /// Message under the bar (saved, error) and when it was set.
     note: Option<(String, f64)>,
+    /// Browser: shelf shown (the loaded preset's at first), search
+    /// text, favorites (read when first needed).
+    shelf: Option<Shelf>,
+    search: String,
+    favs: Option<BTreeSet<String>>,
+    /// User preset whose delete button was clicked once (a second
+    /// click deletes it).
+    deleting: Option<String>,
 }
 
 impl PresetUi {
+    /// Open the browser (on `shelf`, or the loaded preset's).
+    pub fn open_browser(&mut self, shelf: Option<Shelf>) {
+        self.menu = true;
+        self.shelf = shelf;
+    }
+
+    fn favs(&mut self) -> &BTreeSet<String> {
+        self.favs.get_or_insert_with(|| {
+            library::user_dir()
+                .map(|d| library::favorites(&d))
+                .unwrap_or_default()
+        })
+    }
+
+    /// Star or unstar a preset, and save the list.
+    fn toggle_favorite(&mut self, key: &str, now: f64) {
+        let favs = self.favs.get_or_insert_with(BTreeSet::new);
+        if !favs.remove(key) {
+            favs.insert(key.to_owned());
+        }
+        if let Some(dir) = library::user_dir()
+            && let Err(e) = library::save_favorites(&dir, favs)
+        {
+            self.note = Some((format!("Could not save favorites: {e}"), now));
+        }
+    }
+
     fn users(&mut self) -> &[Entry] {
         self.users.get_or_insert_with(|| {
             library::user_dir()
@@ -81,7 +119,12 @@ pub(crate) fn refresh(params: &dyn ParamAccess, st: &mut UiState) {
 /// parameters left alone.
 fn recall(params: &dyn ParamAccess, st: &mut UiState, preset: &Preset, factory: Option<usize>) {
     let pu = &mut st.presets;
-    let target = presets::merge(&pu.values, &preset.values);
+    let mut target = presets::merge(&pu.values, &preset.values);
+    // A preset made to morph starts on A, ready to move.
+    if preset.has_snapshots() {
+        target.set(ParamId::Morph, 0.0);
+        target.set(ParamId::MorphOn, 1.0);
+    }
     for id in ParamId::ALL {
         if target.get(id) != pu.values.get(id) {
             set_once(params, id, target.get(id));
@@ -301,115 +344,473 @@ pub(crate) fn preset_bar(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiSta
     }
 }
 
-/// A browser entry: name, factory index or user file.
-type BrowserItem = (String, Option<usize>, Option<std::path::PathBuf>);
+/// A shelf of the browser's side list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shelf {
+    All,
+    Favorites,
+    User,
+    /// A factory category ([`presets::STYLES`] or [`CATEGORIES`]).
+    Category(&'static str),
+}
 
-/// The preset browser: one column per category, user presets last.
-fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Rect) {
-    let users: Vec<Entry> = st.presets.users().to_vec();
-    let col_w = 150.0;
-    let row = 24.0;
-    let mut cols: Vec<(&str, Vec<BrowserItem>)> = CATEGORIES
+impl Shelf {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Favorites => "Favorites",
+            Self::User => "User",
+            Self::Category(c) => c,
+        }
+    }
+}
+
+/// One preset in the browser.
+#[derive(Debug, Clone)]
+struct Item {
+    name: String,
+    category: String,
+    factory: Option<usize>,
+    path: Option<std::path::PathBuf>,
+    note: String,
+    /// Favorite key ([`library::factory_key`], [`library::user_key`]).
+    key: String,
+    /// Holds snapshots A and B.
+    morph: bool,
+}
+
+impl Item {
+    fn on(&self, shelf: Shelf, favs: &BTreeSet<String>) -> bool {
+        match shelf {
+            Shelf::All => true,
+            Shelf::Favorites => favs.contains(&self.key),
+            Shelf::User => self.factory.is_none(),
+            Shelf::Category(c) => self.factory.is_some() && self.category == c,
+        }
+    }
+
+    fn matches(&self, search: &str) -> bool {
+        let s = search.trim().to_lowercase();
+        s.is_empty()
+            || [&self.name, &self.category, &self.note]
+                .iter()
+                .any(|t| t.to_lowercase().contains(&s))
+    }
+}
+
+/// Every preset: the factory library in order, then the user's.
+fn items(users: &[Entry]) -> Vec<Item> {
+    let mut out: Vec<Item> = FACTORY
         .iter()
-        .map(|c| {
-            (
-                *c,
-                FACTORY
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, f)| f.category == *c)
-                    .map(|(i, f)| (f.name.to_owned(), Some(i), None))
-                    .collect(),
-            )
+        .enumerate()
+        .map(|(i, f)| Item {
+            name: f.name.to_owned(),
+            category: f.category.to_owned(),
+            factory: Some(i),
+            path: None,
+            note: f.note.to_owned(),
+            key: library::factory_key(f.name),
+            morph: f.snapshots().is_some(),
         })
         .collect();
-    cols.push((
-        "User",
-        users
-            .iter()
-            .map(|e| (e.name.clone(), None, Some(e.path.clone())))
-            .collect(),
-    ));
-    let rows = cols.iter().map(|c| c.1.len()).max().unwrap_or(1).max(3);
-    #[allow(clippy::cast_precision_loss)]
-    let size_v = vec2(
-        col_w * cols.len() as f32 + 16.0,
-        row * (rows as f32 + 1.0) + 24.0,
-    );
-    let screen = ui.ctx().content_rect();
-    let x = (anchor.center().x - size_v.x / 2.0)
-        .min(screen.right() - size_v.x - 8.0)
-        .max(screen.left() + 8.0);
-    let r = Rect::from_min_size(pos2(x, anchor.bottom() + 6.0), size_v);
+    out.extend(users.iter().map(|e| Item {
+        name: e.name.clone(),
+        category: "User".to_owned(),
+        factory: None,
+        path: Some(e.path.clone()),
+        note: String::new(),
+        key: library::user_key(&e.name),
+        morph: false,
+    }));
+    out
+}
+
+/// The side list: the library shelves, then the styles, then the
+/// modules.
+fn shelves() -> Vec<(Option<&'static str>, Shelf)> {
+    let mut v = vec![
+        (Some("LIBRARY"), Shelf::All),
+        (None, Shelf::Favorites),
+        (None, Shelf::User),
+    ];
+    for (i, c) in presets::STYLES.iter().enumerate() {
+        v.push(((i == 0).then_some("STYLES"), Shelf::Category(c)));
+    }
+    for (i, c) in CATEGORIES.iter().enumerate() {
+        v.push(((i == 0).then_some("MODULES"), Shelf::Category(c)));
+    }
+    v
+}
+
+/// A five-pointed star, filled or outlined.
+fn star(p: &egui::Painter, c: egui::Pos2, r: f32, on: bool, col: Color32) {
+    let pts: Vec<egui::Pos2> = (0..10)
+        .map(|k| {
+            #[allow(clippy::cast_precision_loss)]
+            let a = std::f32::consts::PI * (k as f32) / 5.0 - std::f32::consts::FRAC_PI_2;
+            let rr = if k % 2 == 0 { r } else { r * 0.45 };
+            c + vec2(a.cos(), a.sin()) * rr
+        })
+        .collect();
+    if on {
+        // Convex pieces: the inner pentagon and the five tips.
+        let inner: Vec<egui::Pos2> = pts.iter().skip(1).step_by(2).copied().collect();
+        p.add(egui::Shape::convex_polygon(inner, col, egui::Stroke::NONE));
+        for k in (0..10).step_by(2) {
+            let tip = vec![pts[(k + 9) % 10], pts[k], pts[k + 1]];
+            p.add(egui::Shape::convex_polygon(tip, col, egui::Stroke::NONE));
+        }
+    } else {
+        p.add(egui::Shape::closed_line(
+            pts,
+            egui::Stroke::new(1.0_f32, col),
+        ));
+    }
+}
+
+/// The preset browser: shelves on the left (library, styles, modules),
+/// the presets of the shelf on the right with a search field and a
+/// favorite star each, the hovered preset's description below. A
+/// click loads the preset and leaves the browser open to try the next;
+/// Escape or a click outside closes it. A user preset has a delete
+/// button (x), which asks for a second click.
+fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Rect) {
+    let users: Vec<Entry> = st.presets.users().to_vec();
+    let all = items(&users);
+    st.presets.favs();
     let current = params.control().and_then(|c| c.factory());
     let current_user = params
         .control()
         .map(|c| c.user_preset())
         .unwrap_or_default();
-    let mut pick: Option<(Option<usize>, Option<std::path::PathBuf>)> = None;
+    let is_current = |it: &Item| {
+        (it.factory.is_some() && it.factory == current)
+            || (it.factory.is_none() && current.is_none() && it.name == current_user)
+    };
+    let shelf = *st.presets.shelf.get_or_insert_with(|| {
+        all.iter()
+            .find(|it| is_current(it))
+            .map_or(Shelf::All, |it| match it.factory {
+                Some(i) => Shelf::Category(FACTORY[i].category),
+                None => Shelf::User,
+            })
+    });
+
+    let size_v = vec2(660.0, 470.0);
+    let screen = ui.ctx().content_rect();
+    let x = (anchor.center().x - size_v.x / 2.0)
+        .min(screen.right() - size_v.x - 8.0)
+        .max(screen.left() + 8.0);
+    let r = Rect::from_min_size(pos2(x, anchor.bottom() + 6.0), size_v);
+    let mut pick: Option<Item> = None;
+    let mut toggle: Option<String> = None;
+    let mut delete: Option<Item> = None;
+    let mut arm_delete: Option<Option<String>> = None;
+    let deleting = st.presets.deleting.clone();
+    let mut new_shelf = None;
+    let mut hovered: Option<Item> = None;
     let mut close = false;
+    let mut search = st.presets.search.clone();
+    let favs = st.presets.favs.clone().unwrap_or_default();
     egui::Area::new(ui.id().with("quack-preset-browser"))
         .fixed_pos(r.min)
+        .fade_in(false)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             let (r, _) = ui.allocate_exact_size(r.size(), Sense::hover());
-            let p = ui.painter();
-            rounded(p, r, radius::PANEL, color::RAISED, color::BORDER);
-            for (ci, (cat, items)) in cols.iter().enumerate() {
-                #[allow(clippy::cast_precision_loss)]
-                let x0 = r.left() + 8.0 + col_w * ci as f32;
+            let p = ui.painter().clone();
+            rounded(&p, r, radius::PANEL, color::RAISED, color::BORDER);
+
+            // Shelves.
+            let side_w = 168.0;
+            let mut y = r.top() + 10.0;
+            for (si, (caption, s)) in shelves().into_iter().enumerate() {
+                if let Some(cap) = caption {
+                    if si > 0 {
+                        y += 6.0;
+                    }
+                    text(
+                        &p,
+                        pos2(r.left() + 18.0, y + 8.0),
+                        Align2::LEFT_CENTER,
+                        cap,
+                        size::CAPTION - 3.0,
+                        color::TEXT_FAINT,
+                    );
+                    y += 18.0;
+                }
+                let row = Rect::from_min_size(pos2(r.left() + 8.0, y), vec2(side_w - 12.0, 22.0));
+                let resp = ui.interact(row, ui.id().with(("quack-shelf", si)), Sense::click());
+                let lit = s == shelf;
+                if lit || resp.hovered() {
+                    let fill = if lit {
+                        color::QUACK.gamma_multiply(0.2)
+                    } else {
+                        color::BORDER
+                    };
+                    rounded(&p, row, radius::CONTROL - 1, fill, fill);
+                }
+                if resp.clicked() {
+                    new_shelf = Some(s);
+                }
                 text(
-                    p,
-                    pos2(x0 + 10.0, r.top() + 20.0),
+                    &p,
+                    pos2(row.left() + 10.0, row.center().y),
                     Align2::LEFT_CENTER,
-                    cat,
-                    size::CAPTION,
+                    s.label(),
+                    size::BODY - 1.0,
+                    if lit { color::QUACK } else { color::TEXT },
+                );
+                let n = all.iter().filter(|it| it.on(s, &favs)).count();
+                text(
+                    &p,
+                    pos2(row.right() - 8.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    &n.to_string(),
+                    size::CAPTION - 3.0,
                     color::TEXT_FAINT,
                 );
-                if items.is_empty() {
-                    text(
-                        p,
-                        pos2(x0 + 10.0, r.top() + 22.0 + row),
-                        Align2::LEFT_CENTER,
-                        "Save one with Save",
-                        size::CAPTION - 2.0,
-                        color::TEXT_FAINT.gamma_multiply(0.7),
-                    );
-                }
-                for (i, (name, f, path)) in items.iter().enumerate() {
-                    #[allow(clippy::cast_precision_loss)]
-                    let item = Rect::from_min_size(
-                        pos2(x0, r.top() + 34.0 + row * i as f32),
-                        vec2(col_w - 6.0, row - 2.0),
-                    );
-                    let resp = ui.interact(
-                        item,
-                        ui.id().with(("quack-preset-item", ci, i)),
-                        Sense::click(),
-                    );
-                    let lit = (f.is_some() && *f == current)
-                        || (f.is_none() && current.is_none() && *name == current_user);
-                    if resp.hovered() || lit {
-                        let fill = if lit {
-                            color::QUACK.gamma_multiply(0.2)
-                        } else {
-                            color::BORDER
-                        };
-                        rounded(p, item, radius::CONTROL - 1, fill, fill);
-                    }
-                    if resp.clicked() {
-                        pick = Some((*f, path.clone()));
-                    }
-                    text(
-                        p,
-                        pos2(item.left() + 10.0, item.center().y),
-                        Align2::LEFT_CENTER,
-                        name,
-                        size::BODY - 1.0,
-                        if lit { color::QUACK } else { color::TEXT },
-                    );
-                }
+                y += 22.0;
             }
+            let div = r.left() + side_w;
+            p.line_segment(
+                [pos2(div, r.top() + 10.0), pos2(div, r.bottom() - 10.0)],
+                egui::Stroke::new(1.0_f32, color::BORDER),
+            );
+
+            // Search.
+            let right = Rect::from_min_max(
+                pos2(div + 10.0, r.top() + 10.0),
+                pos2(r.right() - 10.0, r.bottom() - 10.0),
+            );
+            let field = Rect::from_min_size(right.min, vec2(right.width(), 24.0));
+            ui.put(
+                field,
+                egui::TextEdit::singleline(&mut search)
+                    .hint_text(format!("Search {}", shelf.label().to_lowercase()))
+                    .char_limit(40),
+            );
+
+            // Presets of the shelf.
+            let note_h = 46.0;
+            let list = Rect::from_min_max(
+                pos2(right.left(), field.bottom() + 8.0),
+                pos2(right.right(), right.bottom() - note_h - 6.0),
+            );
+            let shown: Vec<&Item> = all
+                .iter()
+                .filter(|it| it.on(shelf, &favs) && it.matches(&search))
+                .collect();
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list));
+            if shown.is_empty() {
+                let msg = match shelf {
+                    _ if !search.trim().is_empty() => "Nothing matches",
+                    Shelf::Favorites => "Click a star to add a favorite",
+                    Shelf::User => "Save one with Save",
+                    _ => "Empty",
+                };
+                text(
+                    &p,
+                    pos2(list.left() + 10.0, list.top() + 14.0),
+                    Align2::LEFT_CENTER,
+                    msg,
+                    size::CAPTION - 2.0,
+                    color::TEXT_FAINT,
+                );
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("quack-preset-list")
+                .auto_shrink([false, false])
+                .show(&mut child, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let w = ui.available_width();
+                    for it in &shown {
+                        let (row, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+                        let star_r = Rect::from_center_size(
+                            pos2(row.left() + 14.0, row.center().y),
+                            vec2(22.0, 22.0),
+                        );
+                        let sresp = ui.interact(
+                            star_r,
+                            ui.id().with(("quack-fav", &it.key)),
+                            Sense::click(),
+                        );
+                        let p = ui.painter();
+                        let lit = is_current(it);
+                        if resp.hovered() || sresp.hovered() || lit {
+                            let fill = if lit {
+                                color::QUACK.gamma_multiply(0.2)
+                            } else {
+                                color::BORDER
+                            };
+                            rounded(p, row, radius::CONTROL - 1, fill, fill);
+                        }
+                        if resp.hovered() || sresp.hovered() {
+                            hovered = Some((*it).clone());
+                        }
+                        let fav = favs.contains(&it.key);
+                        star(
+                            p,
+                            star_r.center(),
+                            6.5,
+                            fav,
+                            if fav {
+                                color::QUACK
+                            } else if sresp.hovered() {
+                                color::TEXT_DIM
+                            } else {
+                                color::TEXT_FAINT.gamma_multiply(0.6)
+                            },
+                        );
+                        // User presets: a delete button, clicked twice.
+                        let mut del_clicked = false;
+                        if it.factory.is_none() {
+                            let armed = deleting.as_deref() == Some(it.key.as_str());
+                            let del_r = if armed {
+                                Rect::from_min_size(
+                                    pos2(row.right() - 112.0, row.top() + 2.0),
+                                    vec2(108.0, row.height() - 4.0),
+                                )
+                            } else {
+                                Rect::from_center_size(
+                                    pos2(row.right() - 14.0, row.center().y),
+                                    vec2(22.0, 22.0),
+                                )
+                            };
+                            let dresp = ui.interact(
+                                del_r,
+                                ui.id().with(("quack-del", &it.key)),
+                                Sense::click(),
+                            );
+                            let p = ui.painter();
+                            if armed {
+                                rounded(
+                                    p,
+                                    del_r,
+                                    radius::CONTROL - 1,
+                                    color::METER_OVER.gamma_multiply(0.25),
+                                    color::METER_OVER,
+                                );
+                                text(
+                                    p,
+                                    del_r.center(),
+                                    Align2::CENTER_CENTER,
+                                    "Click to delete",
+                                    size::CAPTION - 3.0,
+                                    color::METER_OVER,
+                                );
+                            } else if resp.hovered() || dresp.hovered() {
+                                let c = if dresp.hovered() {
+                                    color::METER_OVER
+                                } else {
+                                    color::TEXT_FAINT
+                                };
+                                let m = del_r.center();
+                                for (a, b) in [(-4.0, 4.0), (4.0, -4.0)] {
+                                    p.line_segment(
+                                        [m + vec2(-4.0, a), m + vec2(4.0, b)],
+                                        egui::Stroke::new(1.5_f32, c),
+                                    );
+                                }
+                            }
+                            if dresp.hovered() {
+                                hovered = Some((*it).clone());
+                            }
+                            if dresp.clicked() {
+                                del_clicked = true;
+                                if armed {
+                                    delete = Some((*it).clone());
+                                } else {
+                                    arm_delete = Some(Some(it.key.clone()));
+                                }
+                            }
+                        }
+                        if sresp.clicked() {
+                            toggle = Some(it.key.clone());
+                        } else if resp.clicked() && !del_clicked {
+                            pick = Some((*it).clone());
+                        }
+                        let t = text(
+                            p,
+                            pos2(row.left() + 30.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            &it.name,
+                            size::BODY - 1.0,
+                            if lit { color::QUACK } else { color::TEXT },
+                        );
+                        if it.morph {
+                            let tag = Rect::from_min_size(
+                                pos2(t.right() + 8.0, row.center().y - 7.0),
+                                vec2(26.0, 14.0),
+                            );
+                            rounded(p, tag, 3, Color32::TRANSPARENT, color::BORDER);
+                            text(
+                                p,
+                                tag.center(),
+                                Align2::CENTER_CENTER,
+                                "A/B",
+                                size::CAPTION - 4.0,
+                                color::TEXT_DIM,
+                            );
+                        }
+                        // Program change number (factory) and, off its
+                        // own shelf, the category.
+                        let mut rx = row.right() - if it.factory.is_none() { 32.0 } else { 8.0 };
+                        if let Some(i) = it.factory {
+                            let pc = text(
+                                p,
+                                pos2(rx, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                &format!("PC {i}"),
+                                size::CAPTION - 3.0,
+                                color::TEXT_FAINT.gamma_multiply(0.8),
+                            );
+                            rx = pc.left() - 10.0;
+                        }
+                        if !matches!(shelf, Shelf::Category(_) | Shelf::User) {
+                            text(
+                                p,
+                                pos2(rx, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                &it.category,
+                                size::CAPTION - 2.0,
+                                color::TEXT_FAINT,
+                            );
+                        }
+                    }
+                });
+
+            // What the hovered (or loaded) preset is for.
+            let info = hovered
+                .clone()
+                .or_else(|| all.iter().find(|it| is_current(it)).cloned());
+            let foot = Rect::from_min_max(pos2(right.left(), right.bottom() - note_h), right.max);
+            p.line_segment(
+                [foot.left_top(), foot.right_top()],
+                egui::Stroke::new(1.0_f32, color::BORDER),
+            );
+            if let Some(it) = info {
+                let mut s = if it.note.is_empty() {
+                    it.category.clone()
+                } else {
+                    it.note.clone()
+                };
+                if it.morph {
+                    s.push_str("  Macro 1 or A/B: morph to B.");
+                }
+                let g = p.layout(
+                    s,
+                    crate::theme::label_font(size::CAPTION - 1.5),
+                    color::TEXT_DIM,
+                    foot.width() - 8.0,
+                );
+                p.galley(
+                    pos2(foot.left() + 4.0, foot.top() + 7.0),
+                    g,
+                    color::TEXT_DIM,
+                );
+            }
+
             let out = ui.input(|i| {
                 i.pointer.any_click()
                     && i.pointer
@@ -418,22 +819,56 @@ fn browser(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, anchor: Re
             });
             close = out || ui.input(|i| i.key_pressed(egui::Key::Escape));
         });
-    match pick {
-        Some((Some(i), _)) => {
-            recall(params, st, &FACTORY[i].to_preset(), Some(i));
-            st.presets.menu = false;
-        }
-        Some((None, Some(path))) => {
-            if let Some(p) = library::load(&path) {
-                recall(params, st, &p, None);
+    st.presets.search = search;
+    // A click anywhere else disarms the delete button.
+    if let Some(a) = arm_delete {
+        st.presets.deleting = a;
+    } else if pick.is_some() || toggle.is_some() || new_shelf.is_some() {
+        st.presets.deleting = None;
+    }
+    if let Some(it) = delete {
+        st.presets.deleting = None;
+        let now = ui.input(|i| i.time);
+        if let Some(path) = &it.path {
+            match library::delete(path) {
+                Ok(()) => {
+                    st.presets.note = Some((format!("Deleted \u{201c}{}\u{201d}", it.name), now));
+                    if st.presets.favs().contains(&it.key) {
+                        st.presets.toggle_favorite(&it.key, now);
+                    }
+                    // The sound stays; it is just no longer a preset.
+                    if let Some(ctl) = params.control()
+                        && ctl.factory().is_none()
+                        && ctl.user_preset() == it.name
+                    {
+                        ctl.set_loaded(None, "");
+                        st.presets.seen = Some(ctl.recall_count());
+                        st.presets.baseline = None;
+                    }
+                }
+                Err(e) => st.presets.note = Some((format!("Could not delete: {e}"), now)),
             }
-            st.presets.menu = false;
         }
-        _ => {
-            if close {
-                st.presets.menu = false;
+        st.presets.users = None;
+    }
+    if let Some(s) = new_shelf {
+        st.presets.shelf = Some(s);
+    }
+    if let Some(key) = toggle {
+        st.presets.toggle_favorite(&key, ui.input(|i| i.time));
+    }
+    if let Some(it) = pick {
+        match (it.factory, it.path) {
+            (Some(i), _) => recall(params, st, &FACTORY[i].to_preset(), Some(i)),
+            (None, Some(path)) => {
+                if let Some(p) = library::load(&path) {
+                    recall(params, st, &p, None);
+                }
             }
+            _ => {}
         }
+    } else if close {
+        st.presets.menu = false;
     }
 }
 
@@ -1061,10 +1496,27 @@ pub(crate) fn perform_menus(
         );
     }
     if st.channel_menu {
-        let r = Rect::from_min_size(st.channel_rect.min, vec2(st.channel_rect.width(), 0.0));
-        let r = r.translate(vec2(0.0, -26.0 * 16.0 - 12.0));
-        st.channel_menu =
-            controls::choice_menu(ui, params, ParamId::MidiOutChannel, r, &CHANNELS, accent);
+        // Above the stepper: the list is taller than the room below.
+        st.channel_menu = controls::choice_menu_at(
+            ui,
+            params,
+            ParamId::MidiOutChannel,
+            st.channel_rect,
+            &CHANNELS,
+            accent,
+            true,
+        );
+    }
+    if st.voice_menu {
+        let labels: Vec<&str> = VoiceRange::ALL.iter().map(|v| v.name()).collect();
+        st.voice_menu = controls::choice_menu(
+            ui,
+            params,
+            ParamId::Voice,
+            st.voice_rect,
+            &labels,
+            color::QUACK,
+        );
     }
     if st.source_menu {
         st.source_menu = controls::choice_menu(
