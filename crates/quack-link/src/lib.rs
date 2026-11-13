@@ -15,6 +15,7 @@
 //! and only the linked sound is delayed (by the sender's block, see
 //! [`Receiver`]).
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 mod region;
@@ -25,6 +26,16 @@ use region::Mapping;
 pub const FRAMES: usize = 16_384;
 const MAGIC: u32 = 0x514B_4C4B; // "QKLK"
 const VERSION: u32 = 1;
+
+/// A suffix for the channels' names, for this process only.
+static PRIVATE: OnceLock<String> = OnceLock::new();
+
+/// Keep this process's channels to itself (tests): they then never
+/// meet the plugins running on the machine, in a host or in another
+/// test. To call before the first [`Channel::open`].
+pub fn keep_private() {
+    PRIVATE.get_or_init(|| format!("-{:x}", std::process::id()));
+}
 
 /// What the linked sound is for. One sender at a time per role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,8 +65,8 @@ impl Role {
 
     const fn key(self) -> &'static str {
         match self {
-            Self::Mix => "duckdsp-quack-mix",
-            Self::Carrier => "duckdsp-quack-carrier",
+            Self::Mix => "dkds-quack-mix",
+            Self::Carrier => "dkds-quack-carrier",
         }
     }
 }
@@ -91,7 +102,10 @@ impl Channel {
     /// absent). Not for the audio thread.
     #[must_use]
     pub fn open(role: Role) -> Option<Self> {
-        Self::open_named(role.key())
+        match PRIVATE.get() {
+            Some(suffix) => Self::open_named(&format!("{}{suffix}", role.key())),
+            None => Self::open_named(role.key()),
+        }
     }
 
     /// A channel under another name (tests).

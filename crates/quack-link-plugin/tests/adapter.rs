@@ -2,8 +2,8 @@
 //! untouched, what it sends arrives at the other end of the wire with
 //! the level applied, and the audio thread does not allocate.
 //!
-//! One test: the roles' channels are the real ones, shared by every
-//! instance on the machine.
+//! One test, on channels of its own: the real ones belong to the
+//! plugins running on the machine.
 
 use quack_link::{Channel, Receiver, Role};
 use quack_link_plugin::{LinkDsp, LinkParams, QuackLink};
@@ -30,6 +30,7 @@ fn run(dsp: &mut LinkDsp, params: &LinkParams, l: &[f32], r: &[f32]) -> Vec<Vec<
 
 #[test]
 fn the_track_passes_through_and_reaches_quackapella() {
+    quack_link::keep_private();
     let params = LinkParams::default();
     let mut dsp = LinkDsp::default();
     QuackLink::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
