@@ -1,7 +1,9 @@
 //! The mixing assistant's panel on the FX page: pick a style, press
 //! Listen and sing; it says what it heard and proposes settings, shown
 //! as dots on the knobs. Nothing changes until Apply; Compare switches
-//! between before and after, Undo puts everything back.
+//! between before and after, Undo puts everything back. Clarity,
+//! Control and Space set how far the tone, the dynamics and the reverb
+//! and delay go towards the style.
 //!
 //! The listening runs here, on the UI thread, from the engine's
 //! analysis taps ([`quack_dsp::tap`]): nothing is added to the audio
@@ -10,7 +12,7 @@
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::assist::{
-    Analysis, FULL_VOICED_S, Listener, MIN_VOICED_S, PARAMS, Style, describe, propose,
+    Amounts, Analysis, FULL_VOICED_S, Listener, MIN_VOICED_S, PARAMS, Style, describe, propose,
 };
 use quack_dsp::tap::TAP_LEN;
 
@@ -31,8 +33,8 @@ pub(crate) struct AssistUi {
     /// The assistant is shown in place of the EQ's graph.
     pub open: bool,
     pub style: Style,
-    /// How far towards the style, 0-1.
-    pub amount: f32,
+    /// How far towards the style, 0-1: clarity, control, space.
+    pub amounts: [f32; 3],
     /// A listen in progress, and the tap position it has read up to.
     listener: Option<Listener>,
     seen: usize,
@@ -47,7 +49,7 @@ pub(crate) struct AssistUi {
     comparing: bool,
     /// Proposed values not applied yet: the dots on the knobs.
     hints: Vec<(ParamId, f64)>,
-    amount_drag: Option<f32>,
+    amount_drag: Option<(usize, f32)>,
 }
 
 impl Default for AssistUi {
@@ -55,7 +57,7 @@ impl Default for AssistUi {
         Self {
             open: false,
             style: Style::default(),
-            amount: AMOUNT_DEFAULT,
+            amounts: [AMOUNT_DEFAULT; 3],
             listener: None,
             seen: 0,
             scratch: [vec![0.0; TAP_LEN], vec![0.0; TAP_LEN]],
@@ -82,6 +84,15 @@ impl AssistUi {
         self.open = true;
         self.style = style;
         self.analysis = Some(analysis);
+    }
+
+    fn amounts(&self) -> Amounts {
+        let [clarity, control, space] = self.amounts;
+        Amounts {
+            clarity,
+            control,
+            space,
+        }
     }
 
     fn stop(&mut self) {
@@ -132,7 +143,7 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
     if let Some(an) = &a.analysis
         && !a.comparing
     {
-        for (id, v) in propose(an, a.style, a.amount).changes {
+        for (id, v) in propose(an, a.style, a.amounts()).changes {
             if (params.get_plain(id) - v).abs() > 1e-6 {
                 a.hints.push((id, v));
             }
@@ -179,22 +190,23 @@ fn button(
     enabled && resp.clicked()
 }
 
-/// The Amount knob: the same gestures as a parameter's knob, on a
-/// value of the editor.
-fn amount_knob(ui: &egui::Ui, st: &mut UiState, centre: egui::Pos2, accent: Color32) {
-    const SIZE: f32 = 54.0;
+/// One of the three amount knobs (0 Clarity, 1 Control, 2 Space): the
+/// same gestures as a parameter's knob, on a value of the editor.
+fn amount_knob(ui: &egui::Ui, st: &mut UiState, which: usize, centre: egui::Pos2, accent: Color32) {
+    const SIZE: f32 = 48.0;
     let a = &mut st.assist;
     let area = Rect::from_center_size(centre, vec2(SIZE, SIZE));
     let resp = ui.interact(
         area,
-        ui.id().with("quack-assist-amount"),
+        ui.id().with(("quack-assist-amount", which)),
         Sense::click_and_drag(),
     );
     if resp.drag_started() {
-        a.amount_drag = Some(a.amount);
+        a.amount_drag = Some((which, a.amounts[which]));
     }
     if resp.dragged()
-        && let Some(from) = a.amount_drag
+        && let Some((w, from)) = a.amount_drag
+        && w == which
         && let (Some(now), Some(origin)) = (
             resp.interact_pointer_pos(),
             ui.input(|i| i.pointer.press_origin()),
@@ -206,28 +218,28 @@ fn amount_knob(ui: &egui::Ui, st: &mut UiState, centre: egui::Pos2, accent: Colo
             1.0
         };
         let moved = (now.x - origin.x) - (now.y - origin.y);
-        a.amount = (from + moved / KNOB_TRAVEL * fine).clamp(0.0, 1.0);
+        a.amounts[which] = (from + moved / KNOB_TRAVEL * fine).clamp(0.0, 1.0);
     }
-    if resp.drag_stopped() {
+    if resp.drag_stopped() && a.amount_drag.is_some_and(|(w, _)| w == which) {
         a.amount_drag = None;
     }
     if resp.double_clicked() {
-        a.amount = AMOUNT_DEFAULT;
+        a.amounts[which] = AMOUNT_DEFAULT;
     } else if resp.hovered() && a.amount_drag.is_none() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
-            a.amount = (a.amount + 0.01 * scroll.signum()).clamp(0.0, 1.0);
+            a.amounts[which] = (a.amounts[which] + 0.01 * scroll.signum()).clamp(0.0, 1.0);
         }
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
     let p = ui.painter();
-    paint_knob(p, centre, SIZE, a.amount, accent);
+    paint_knob(p, centre, SIZE, a.amounts[which], accent);
     knob_value(
         p,
         area,
-        &format!("{:.0}", a.amount * 100.0),
+        &format!("{:.0}", a.amounts[which] * 100.0),
         "%",
         size::VALUE,
     );
@@ -235,7 +247,7 @@ fn amount_knob(ui: &egui::Ui, st: &mut UiState, centre: egui::Pos2, accent: Colo
         p,
         centre + vec2(0.0, SIZE * 0.5 + 12.0),
         Align2::CENTER_CENTER,
-        "Amount",
+        ["Clarity", "Control", "Space"][which],
         size::CAPTION,
         color::TEXT_DIM,
     );
@@ -300,12 +312,12 @@ pub(crate) fn assistant_panel(
     }
 
     // What was heard, in words.
-    let box_r = Rect::from_min_size(pos2(left, r.top() + 112.0), vec2(inner_w, 104.0));
+    let box_r = Rect::from_min_size(pos2(left, r.top() + 108.0), vec2(inner_w, 112.0));
     let p = ui.painter();
     well(p, box_r);
     let line = |i: usize, s: &str, c: Color32| {
         #[allow(clippy::cast_precision_loss)]
-        let y = box_r.top() + 16.0 + 18.0 * i as f32;
+        let y = box_r.top() + 13.0 + 17.2 * i as f32;
         text(
             p,
             pos2(box_r.left() + space::M, y),
@@ -339,7 +351,7 @@ pub(crate) fn assistant_panel(
             line(4, "Stop now for a quick diagnosis.", color::TEXT_FAINT);
         }
     } else if let Some(an) = &st.assist.analysis {
-        for (i, s) in describe(an, st.assist.style, st.assist.amount)
+        for (i, s) in describe(an, st.assist.style, st.assist.amounts())
             .iter()
             .enumerate()
         {
@@ -359,14 +371,25 @@ pub(crate) fn assistant_panel(
         }
     }
 
-    // Amount, then Listen, Apply, Compare, Undo.
+    // Clarity, Control and Space, then Listen, Apply, Compare, Undo.
     let cy = r.bottom() - 58.0;
-    amount_knob(ui, st, pos2(left + 34.0, cy), accent);
-    let bw = 72.0;
-    let bx = r.right() - space::L - 4.0 * bw - 3.0 * 6.0;
+    for which in 0..3 {
+        #[allow(clippy::cast_precision_loss)]
+        let x = left + 28.0 + 62.0 * which as f32;
+        amount_knob(ui, st, which, pos2(x, cy), accent);
+    }
+    let bw = 95.0;
+    let bx = r.right() - space::L - 2.0 * bw - 6.0;
     #[allow(clippy::cast_precision_loss)]
-    let slot =
-        |i: usize| Rect::from_min_size(pos2(bx + (bw + 6.0) * i as f32, cy - 15.0), vec2(bw, 30.0));
+    let slot = |i: usize| {
+        Rect::from_min_size(
+            pos2(
+                bx + (bw + 6.0) * (i % 2) as f32,
+                cy - 30.0 + 34.0 * (i / 2) as f32,
+            ),
+            vec2(bw, 28.0),
+        )
+    };
     let a = &mut st.assist;
     let has_taps = st.eq.taps.is_some();
     if button(

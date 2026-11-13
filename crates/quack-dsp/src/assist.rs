@@ -13,12 +13,12 @@
 //!   against the style's target sets the output EQ.
 //!
 //! [`propose`] is a pure function from what was measured, a [`Style`]
-//! and an amount to parameter values; [`describe`] says the same in
+//! and [`Amounts`] to parameter values; [`describe`] says the same in
 //! words. Part of what is measured is physical (range, sibilants,
 //! dynamics, noise); the targets of a style are taste, kept in one
 //! table ([`Style::rules`]) so they can be tuned by ear.
 
-use crate::fx::LOW_CUT_OFF_HZ;
+use crate::fx::{Division, LOW_CUT_OFF_HZ};
 use crate::params::{EQ_BELL_PARAMS, ParamId};
 
 /// Third-octave bands of the analysis, from [`BAND_BASE_HZ`] up.
@@ -100,6 +100,13 @@ pub struct StyleRules {
     pub deess_bias: f32,
     /// Low cut of the output EQ, Hz (a telephone band for lo-fi).
     pub low_cut_hz: f32,
+    /// Exciter, % (left off when the voice is already bright).
+    pub exciter: f32,
+    /// Reverb: return level (%), decay (s) and pre-delay (ms).
+    pub reverb: (f32, f32, f32),
+    /// Delay, on the host's tempo: return level (%), note value and
+    /// feedback (%).
+    pub delay: (f32, Division, f32),
 }
 
 /// The styles the assistant knows.
@@ -159,6 +166,9 @@ impl Style {
             release_ms: 150.0,
             deess_bias: 0.0,
             low_cut_hz: LOW_CUT_OFF_HZ,
+            exciter: 0.0,
+            reverb: (30.0, 1.2, 20.0),
+            delay: (0.0, Division::Eighth, 20.0),
         };
         match self {
             // Clean the source, keep the voice as it is.
@@ -174,6 +184,9 @@ impl Style {
                 attack_ms: 8.0,
                 release_ms: 100.0,
                 deess_bias: 2.0,
+                exciter: 25.0,
+                reverb: (45.0, 1.6, 40.0),
+                delay: (25.0, Division::Eighth, 25.0),
                 ..BASE
             },
             // Warm lows, silky top.
@@ -187,6 +200,9 @@ impl Style {
                 attack_ms: 10.0,
                 release_ms: 120.0,
                 deess_bias: 2.0,
+                exciter: 20.0,
+                reverb: (50.0, 2.0, 50.0),
+                delay: (25.0, Division::Quarter, 30.0),
                 ..BASE
             },
             // Very present, pinned in place, sibilants tamed.
@@ -200,6 +216,9 @@ impl Style {
                 attack_ms: 3.0,
                 release_ms: 80.0,
                 deess_bias: 4.0,
+                exciter: 30.0,
+                reverb: (35.0, 1.2, 30.0),
+                delay: (40.0, Division::Quarter, 35.0),
                 ..BASE
             },
             // Mids forward, little air, hit hard.
@@ -213,6 +232,9 @@ impl Style {
                 attack_ms: 5.0,
                 release_ms: 90.0,
                 deess_bias: 1.0,
+                exciter: 15.0,
+                reverb: (30.0, 1.0, 20.0),
+                delay: (30.0, Division::Sixteenth, 10.0),
                 ..BASE
             },
             // Cuts through a dense, bright mix: lean lows, crisp top.
@@ -226,6 +248,9 @@ impl Style {
                 attack_ms: 4.0,
                 release_ms: 80.0,
                 deess_bias: 3.0,
+                exciter: 35.0,
+                reverb: (50.0, 2.4, 30.0),
+                delay: (40.0, Division::DottedEighth, 40.0),
                 ..BASE
             },
             // Close to natural, a little polish, barely compressed.
@@ -239,6 +264,9 @@ impl Style {
                 attack_ms: 15.0,
                 release_ms: 180.0,
                 deess_bias: 1.0,
+                exciter: 10.0,
+                reverb: (60.0, 2.8, 60.0),
+                delay: (15.0, Division::Quarter, 20.0),
                 ..BASE
             },
             // A narrow band: no lows, no air, squashed.
@@ -253,6 +281,9 @@ impl Style {
                 release_ms: 100.0,
                 deess_bias: 0.0,
                 low_cut_hz: 280.0,
+                exciter: 0.0,
+                reverb: (35.0, 0.8, 0.0),
+                delay: (20.0, Division::Eighth, 20.0),
             },
         }
     }
@@ -610,8 +641,31 @@ impl Listener {
     }
 }
 
+/// How far towards the style, 0 to 1, in three parts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Amounts {
+    /// Tone: the output EQ, the de-esser, the exciter.
+    pub clarity: f32,
+    /// Dynamics: the compressor.
+    pub control: f32,
+    /// Reverb and delay. At 0 they are left as they are.
+    pub space: f32,
+}
+
+impl Amounts {
+    /// The same amount everywhere.
+    #[must_use]
+    pub const fn all(amount: f32) -> Self {
+        Self {
+            clarity: amount,
+            control: amount,
+            space: amount,
+        }
+    }
+}
+
 /// Every parameter a proposal may set (what Undo has to remember).
-pub const PARAMS: [ParamId; 26] = [
+pub const PARAMS: [ParamId; 39] = [
     ParamId::FxOn,
     ParamId::ToneOn,
     ParamId::LowCut,
@@ -638,6 +692,19 @@ pub const PARAMS: [ParamId; 26] = [
     EQ_BELL_PARAMS[2][2],
     ParamId::EqHighShelfFreq,
     ParamId::EqHighShelfGain,
+    ParamId::ExciterAmount,
+    ParamId::ReverbOn,
+    ParamId::ReverbLevel,
+    ParamId::ReverbDecay,
+    ParamId::ReverbPredelay,
+    ParamId::ReverbLowCut,
+    ParamId::DelayOn,
+    ParamId::DelaySync,
+    ParamId::DelayDivision,
+    ParamId::DelayFeedback,
+    ParamId::DelayLevel,
+    ParamId::DelayLowCut,
+    ParamId::DelayDuck,
 ];
 
 /// Parameter values the assistant proposes, in the order they are set.
@@ -681,11 +748,16 @@ struct Plan {
     resonance: Option<(f32, f32)>,
     presence: f32,
     air: f32,
+    exciter: f32,
+    /// Reverb level, and delay level; `None`: the space is left alone.
+    space: Option<(f32, f32)>,
 }
 
-fn plan(a: &Analysis, style: Style, amount: f32) -> Plan {
+fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
     let r = style.rules();
-    let amount = amount.clamp(0.0, 1.0);
+    let amount = amounts.clarity.clamp(0.0, 1.0);
+    let control = amounts.control.clamp(0.0, 1.0);
+    let space = amounts.space.clamp(0.0, 1.0);
     // Under the lowest note there is only rumble and breath.
     let low_cut = (0.8 * a.low_hz).clamp(40.0, 200.0).round();
     // The gate opens over the noise and the breaths, well under the
@@ -702,7 +774,7 @@ fn plan(a: &Analysis, style: Style, amount: f32) -> Plan {
     // the voice is already even.
     let spread = (a.loud_db - a.soft_db).max(0.0);
     let even = (spread / 8.0).clamp(0.5, 1.0);
-    let reduction = r.reduction * amount * even;
+    let reduction = r.reduction * control * even;
     let comp = (reduction >= 1.0).then(|| {
         // The detector follows peaks: a few dB over the RMS level.
         let peak = a.loud_db + 4.0;
@@ -730,6 +802,13 @@ fn plan(a: &Analysis, style: Style, amount: f32) -> Plan {
         resonance,
         presence,
         air,
+        // A voice whose top the EQ has to pull down needs no more of it.
+        exciter: if air >= 0.0 {
+            (r.exciter * amount).round()
+        } else {
+            0.0
+        },
+        space: (space >= 0.01).then(|| ((r.reverb.0 * space).round(), (r.delay.0 * space).round())),
     }
 }
 
@@ -739,7 +818,7 @@ fn plan(a: &Analysis, style: Style, amount: f32) -> Plan {
 /// style the EQ, the de-esser and the compressor go; the low cut and
 /// the gate are cleaning and do not depend on it.
 #[must_use]
-pub fn propose(a: &Analysis, style: Style, amount: f32) -> Proposal {
+pub fn propose(a: &Analysis, style: Style, amount: Amounts) -> Proposal {
     let r = style.rules();
     let p = plan(a, style, amount);
     let half = |v: f32| f64::from((v * 2.0).round() / 2.0 + 0.0);
@@ -794,6 +873,33 @@ pub fn propose(a: &Analysis, style: Style, amount: f32) -> Proposal {
         (ParamId::EqHighShelfFreq, 9000.0),
         (ParamId::EqHighShelfGain, half(p.air)),
     ]);
+    c.push((ParamId::ExciterAmount, f64::from(p.exciter)));
+    if let Some((reverb, delay)) = p.space {
+        c.extend([
+            (ParamId::ReverbOn, 1.0),
+            (ParamId::ReverbLevel, f64::from(reverb)),
+            (ParamId::ReverbDecay, f64::from(r.reverb.1)),
+            (ParamId::ReverbPredelay, f64::from(r.reverb.2)),
+            (ParamId::ReverbLowCut, 180.0),
+            (ParamId::DelayLevel, f64::from(delay)),
+        ]);
+        if delay >= 1.0 {
+            let division = Division::ALL
+                .iter()
+                .position(|d| *d == r.delay.1)
+                .unwrap_or(0);
+            #[allow(clippy::cast_precision_loss)]
+            c.extend([
+                (ParamId::DelayOn, 1.0),
+                (ParamId::DelaySync, 1.0),
+                (ParamId::DelayDivision, division as f64),
+                (ParamId::DelayFeedback, f64::from(r.delay.2)),
+                (ParamId::DelayLowCut, 200.0),
+                // The echoes step back while the voice sings.
+                (ParamId::DelayDuck, 40.0),
+            ]);
+        }
+    }
     for (id, v) in &mut c {
         *v = id.spec().kind.sanitize(*v);
     }
@@ -822,7 +928,7 @@ fn hz_words(hz: f32) -> String {
 
 /// What was heard and what is proposed, in a few short lines.
 #[must_use]
-pub fn describe(a: &Analysis, style: Style, amount: f32) -> Vec<String> {
+pub fn describe(a: &Analysis, style: Style, amount: Amounts) -> Vec<String> {
     let r = style.rules();
     let p = plan(a, style, amount);
     let mut out = vec![format!(
@@ -883,6 +989,15 @@ pub fn describe(a: &Analysis, style: Style, amount: f32) -> Vec<String> {
         (Some(n), Some(g)) => format!("Noise at {n:.0} dB between phrases: gate at {g:.0} dB."),
         (Some(n), None) => format!("Quiet between phrases ({n:.0} dB): no gate."),
         (None, _) => "No pause heard: gate left off.".to_owned(),
+    });
+    out.push(match p.space {
+        Some((reverb, delay)) if delay >= 1.0 => format!(
+            "Reverb {:.1} s at {reverb:.0} %, {} delay at {delay:.0} %.",
+            r.reverb.1,
+            r.delay.1.name()
+        ),
+        Some((reverb, _)) => format!("Reverb {:.1} s at {reverb:.0} %, no delay.", r.reverb.1),
+        None => "Reverb and delay left as they are.".to_owned(),
     });
     out
 }
@@ -973,13 +1088,13 @@ mod tests {
         let dull = sing(48_000.0, 220.0, -12.0, 9.0, 0.05, 0.0)
             .finish()
             .expect("analysis");
-        let p = propose(&dull, Style::Pop, 1.0);
+        let p = propose(&dull, Style::Pop, Amounts::all(1.0));
         assert!(p.get(ParamId::EqHighShelfGain).expect("air") > 2.0);
         assert!(p.get(EQ_BELL_PARAMS[2][1]).expect("presence") > 1.0);
         let bright = sing(48_000.0, 220.0, -3.0, 9.0, 0.05, 0.0)
             .finish()
             .expect("analysis");
-        let q = propose(&bright, Style::Pop, 1.0);
+        let q = propose(&bright, Style::Pop, Amounts::all(1.0));
         assert!(q.get(ParamId::EqHighShelfGain).expect("air") < -2.0);
         // The low cut sits under the lowest note; values stay in range.
         assert!(p.get(ParamId::LowCut).expect("low cut") < 220.0);
@@ -993,17 +1108,30 @@ mod tests {
         let a = sing(48_000.0, 220.0, -12.0, 9.0, 0.3, 0.002)
             .finish()
             .expect("analysis");
-        let none = propose(&a, Style::Trap, 0.0);
+        let none = propose(&a, Style::Trap, Amounts::all(0.0));
         assert!(none.get(ParamId::EqHighShelfGain).expect("air").abs() < 1e-9);
         assert!((none.get(ParamId::CompRatio).expect("ratio") - 1.0).abs() < 1e-9);
         assert!(none.get(ParamId::DeEss).expect("de-ess").abs() < 1e-9);
-        let half = propose(&a, Style::Trap, 0.5);
-        let full = propose(&a, Style::Trap, 1.0);
+        let half = propose(&a, Style::Trap, Amounts::all(0.5));
+        let full = propose(&a, Style::Trap, Amounts::all(1.0));
         let air = |p: &Proposal| p.get(ParamId::EqHighShelfGain).expect("air");
         assert!(air(&half) > 0.0 && air(&full) >= air(&half));
+        // The space follows its own amount, and stays put at zero.
+        assert!(none.get(ParamId::ReverbLevel).is_none());
+        let wet = |p: &Proposal| p.get(ParamId::ReverbLevel).expect("reverb");
+        assert!(wet(&full) > wet(&half) && half.get(ParamId::DelayLevel).expect("delay") > 0.0);
+        let dry = propose(
+            &a,
+            Style::Trap,
+            Amounts {
+                space: 0.0,
+                ..Amounts::all(1.0)
+            },
+        );
+        assert!(dry.get(ParamId::ReverbLevel).is_none() && air(&dry) > 0.0);
         // Stronger styles compress more.
         let thr = |s| {
-            propose(&a, s, 1.0)
+            propose(&a, s, Amounts::all(1.0))
                 .get(ParamId::CompThreshold)
                 .expect("threshold")
         };
@@ -1011,13 +1139,13 @@ mod tests {
         // Words for every style, and nothing set outside the list.
         for s in Style::ALL {
             assert!(
-                propose(&a, s, 1.0)
+                propose(&a, s, Amounts::all(1.0))
                     .changes
                     .iter()
                     .all(|(id, _)| PARAMS.contains(id))
             );
-            let lines = describe(&a, s, 1.0);
-            assert_eq!(lines.len(), 5);
+            let lines = describe(&a, s, Amounts::all(1.0));
+            assert_eq!(lines.len(), 6);
             assert!(
                 lines.iter().all(|l| !l.is_empty() && l.len() < 56),
                 "{lines:?}"

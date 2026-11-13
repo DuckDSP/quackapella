@@ -419,12 +419,19 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
 - **Styles** (`Style::rules`) : Natural, Pop, R&B, Trap, Rock, Electro,
   Ballad, Lo-Fi. Les cibles sont des conventions de mixage, réunies
   dans une seule table pour être réglées à l'oreille.
+- **Espace et brillance** : chaque style a sa reverb (niveau, durée,
+  pré-délai), son delay calé sur le tempo de l'hôte (valeur de note,
+  réinjection, atténué pendant le chant) et sa dose d'exciter (aucune
+  si la voix est déjà brillante).
+- **Trois doses** (`Amounts`) : Clarity (EQ, de-esseur, exciter),
+  Control (compresseur), Space (reverb et delay ; à zéro, l'espace
+  n'est pas touché).
 - `propose` est une fonction pure (mesures, style, dose) ; `describe`
   dit la même chose en cinq lignes. `PARAMS` liste tout ce qu'une
   proposition peut toucher (pour Undo).
 - **Interface** (`quack-ui/src/assist.rs`) : sur la page FX, le panneau
   de gauche bascule entre le graphe de l'EQ et l'assistant. Listen,
-  diagnostic, Amount, puis Apply, Compare et Undo. La proposition
+  diagnostic, Clarity, Control et Space, puis Apply, Compare et Undo. La proposition
   s'affiche en points blancs sur les boutons tant qu'elle n'est pas
   appliquée ; rien ne change sans Apply.
 

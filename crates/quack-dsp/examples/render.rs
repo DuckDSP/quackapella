@@ -158,10 +158,10 @@ fn listen(
         return;
     };
     eprintln!("{heard:?}");
-    for line in assist::describe(&heard, style, amount) {
+    for line in assist::describe(&heard, style, assist::Amounts::all(amount)) {
         eprintln!("  {line}");
     }
-    for (id, v) in assist::propose(&heard, style, amount).changes {
+    for (id, v) in assist::propose(&heard, style, assist::Amounts::all(amount)).changes {
         eprintln!("    {} = {v}", id.spec().key);
         values.set(id, v);
     }
