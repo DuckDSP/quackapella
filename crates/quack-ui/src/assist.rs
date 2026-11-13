@@ -204,7 +204,7 @@ fn verdict(
     let after = propose(checked, style, amounts, tempo);
     let mut parts: Vec<String> = Vec::new();
     for (id, name) in [
-        (quack_dsp::params::EQ_BELL_PARAMS[0][1], "low mids"),
+        (quack_dsp::params::EQ_BELL_PARAMS[0][1], "lows"),
         (quack_dsp::params::EQ_BELL_PARAMS[2][1], "presence"),
         (ParamId::EqHighShelfGain, "air"),
     ] {
@@ -459,13 +459,15 @@ pub(crate) fn assistant_panel(
     } else {
         ""
     };
-    text(
+    // The switch takes the left 150: the state keeps to what is left.
+    crate::paint::text_fit(
         ui.painter(),
         pos2(r.right() - space::L, r.top() + 22.0),
         Align2::RIGHT_CENTER,
         state,
-        size::VALUE,
+        size::CAPTION,
         if listening { accent } else { color::TEXT_DIM },
+        inner_w - 150.0 - space::M,
     );
 
     // Styles: two rows of four.
@@ -498,13 +500,14 @@ pub(crate) fn assistant_panel(
     let line = |i: usize, s: &str, c: Color32| {
         #[allow(clippy::cast_precision_loss)]
         let y = box_r.top() + 13.0 + 17.2 * i as f32;
-        text(
+        crate::paint::text_fit(
             p,
             pos2(box_r.left() + space::M, y),
             Align2::LEFT_CENTER,
             s,
             size::CAPTION,
             c,
+            box_r.width() - 2.0 * space::M,
         );
     };
     if let Some(l) = &st.assist.listener {

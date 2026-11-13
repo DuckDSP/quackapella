@@ -1162,13 +1162,16 @@ fn harmony_panel(
             "",
         );
         if i == quack_dsp::harmony::INTERVAL_VOICES - 1 {
-            text(
+            // Beside the last voice's boxes, never over them.
+            let x = fr.right() + space::M;
+            paint::text_fit(
                 p,
-                pos2(r.left() + space::L + kw * 5.0, pr.center().y),
-                Align2::CENTER_CENTER,
-                "← Level and pan of each voice",
+                pos2(x, pr.center().y),
+                Align2::LEFT_CENTER,
+                "← Level and pan",
                 size::CAPTION - 1.0,
                 color::TEXT_FAINT,
+                r.right() - space::L - x,
             );
         }
     }

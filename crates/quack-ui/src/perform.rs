@@ -1051,13 +1051,14 @@ pub(crate) fn macro_panel(
             };
             #[allow(clippy::cast_precision_loss)]
             let y = r.center().y - 24.0 + 16.0 * i as f32 + (4.0 - shown as f32) * 8.0;
-            text(
+            crate::paint::text_fit(
                 &p,
                 pos2(tx, y),
                 Align2::LEFT_CENTER,
                 &l,
                 size::CAPTION - 2.5,
                 color::TEXT_DIM,
+                cell_w - 64.0 - space::S,
             );
         }
     }
