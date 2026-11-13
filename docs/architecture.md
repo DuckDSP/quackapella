@@ -424,8 +424,10 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   réinjection, atténué pendant le chant) et sa dose d'exciter (aucune
   si la voix est déjà brillante).
 - **Trois doses** (`Amounts`) : Clarity (EQ, de-esseur, exciter),
-  Control (compresseur), Space (reverb et delay ; à zéro, l'espace
-  n'est pas touché).
+  Control (compresseur), Space (envois de chaque couche vers la reverb
+  et le delay : 20 % pour la voix lead à fond, harmonies plus loin
+  dans la reverb, vocodeur presque sec ; les retours sont fixés par le
+  style ; à zéro, l'espace n'est pas touché).
 - `propose` est une fonction pure (mesures, style, dose) ; `describe`
   dit la même chose en cinq lignes. `PARAMS` liste tout ce qu'une
   proposition peut toucher (pour Undo).

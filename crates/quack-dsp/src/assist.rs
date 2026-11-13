@@ -19,7 +19,7 @@
 //! table ([`Style::rules`]) so they can be tuned by ear.
 
 use crate::fx::{Division, LOW_CUT_OFF_HZ};
-use crate::params::{EQ_BELL_PARAMS, ParamId};
+use crate::params::{DELAY_SEND_PARAMS, EQ_BELL_PARAMS, ParamId, REVERB_SEND_PARAMS};
 
 /// Third-octave bands of the analysis, from [`BAND_BASE_HZ`] up.
 pub const BANDS: usize = 27;
@@ -102,7 +102,8 @@ pub struct StyleRules {
     pub low_cut_hz: f32,
     /// Exciter, % (left off when the voice is already bright).
     pub exciter: f32,
-    /// Reverb: return level (%), decay (s) and pre-delay (ms).
+    /// Reverb: return level (%), decay (s) and pre-delay (ms). The
+    /// layers' sends are dosed by the Space amount.
     pub reverb: (f32, f32, f32),
     /// Delay, on the host's tempo: return level (%), note value and
     /// feedback (%).
@@ -648,7 +649,8 @@ pub struct Amounts {
     pub clarity: f32,
     /// Dynamics: the compressor.
     pub control: f32,
-    /// Reverb and delay. At 0 they are left as they are.
+    /// Reverb and delay: the layers' sends. At 0 they are left as
+    /// they are.
     pub space: f32,
 }
 
@@ -665,7 +667,7 @@ impl Amounts {
 }
 
 /// Every parameter a proposal may set (what Undo has to remember).
-pub const PARAMS: [ParamId; 39] = [
+pub const PARAMS: [ParamId; 47] = [
     ParamId::FxOn,
     ParamId::ToneOn,
     ParamId::LowCut,
@@ -705,6 +707,14 @@ pub const PARAMS: [ParamId; 39] = [
     ParamId::DelayLevel,
     ParamId::DelayLowCut,
     ParamId::DelayDuck,
+    REVERB_SEND_PARAMS[0],
+    REVERB_SEND_PARAMS[1],
+    REVERB_SEND_PARAMS[2],
+    REVERB_SEND_PARAMS[3],
+    DELAY_SEND_PARAMS[0],
+    DELAY_SEND_PARAMS[1],
+    DELAY_SEND_PARAMS[2],
+    DELAY_SEND_PARAMS[3],
 ];
 
 /// Parameter values the assistant proposes, in the order they are set.
@@ -749,9 +759,18 @@ struct Plan {
     presence: f32,
     air: f32,
     exciter: f32,
-    /// Reverb level, and delay level; `None`: the space is left alone.
+    /// The lead voice's reverb and delay sends, %; `None`: the space
+    /// is left alone.
     space: Option<(f32, f32)>,
 }
+
+/// The lead voice's sends with Space at 100 %, and each layer's share
+/// of them (voice, creative, harmony, vocoder): the lead stays the
+/// driest in reverb and carries the echoes, the harmonies sit further
+/// back, the vocoder stays close to dry.
+const LEAD_SEND: f32 = 20.0;
+const REVERB_SHARE: [f32; 4] = [1.0, 0.8, 1.5, 0.5];
+const DELAY_SHARE: [f32; 4] = [1.0, 0.6, 0.4, 0.3];
 
 fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
     let r = style.rules();
@@ -808,7 +827,10 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
         } else {
             0.0
         },
-        space: (space >= 0.01).then(|| ((r.reverb.0 * space).round(), (r.delay.0 * space).round())),
+        space: (space >= 0.01).then(|| {
+            let send = LEAD_SEND * space;
+            (send, if r.delay.0 > 0.0 { send } else { 0.0 })
+        }),
     }
 }
 
@@ -875,15 +897,21 @@ pub fn propose(a: &Analysis, style: Style, amount: Amounts) -> Proposal {
     ]);
     c.push((ParamId::ExciterAmount, f64::from(p.exciter)));
     if let Some((reverb, delay)) = p.space {
+        // The style sets the returns; Space doses each layer's sends.
         c.extend([
             (ParamId::ReverbOn, 1.0),
-            (ParamId::ReverbLevel, f64::from(reverb)),
+            (ParamId::ReverbLevel, f64::from(r.reverb.0)),
             (ParamId::ReverbDecay, f64::from(r.reverb.1)),
             (ParamId::ReverbPredelay, f64::from(r.reverb.2)),
             (ParamId::ReverbLowCut, 180.0),
-            (ParamId::DelayLevel, f64::from(delay)),
         ]);
-        if delay >= 1.0 {
+        for (id, share) in REVERB_SEND_PARAMS.iter().zip(REVERB_SHARE) {
+            c.push((*id, f64::from((reverb * share).round())));
+        }
+        for (id, share) in DELAY_SEND_PARAMS.iter().zip(DELAY_SHARE) {
+            c.push((*id, f64::from((delay * share).round())));
+        }
+        if delay > 0.0 {
             let division = Division::ALL
                 .iter()
                 .position(|d| *d == r.delay.1)
@@ -891,6 +919,7 @@ pub fn propose(a: &Analysis, style: Style, amount: Amounts) -> Proposal {
             #[allow(clippy::cast_precision_loss)]
             c.extend([
                 (ParamId::DelayOn, 1.0),
+                (ParamId::DelayLevel, f64::from(r.delay.0)),
                 (ParamId::DelaySync, 1.0),
                 (ParamId::DelayDivision, division as f64),
                 (ParamId::DelayFeedback, f64::from(r.delay.2)),
@@ -991,12 +1020,15 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts) -> Vec<String> {
         (None, _) => "No pause heard: gate left off.".to_owned(),
     });
     out.push(match p.space {
-        Some((reverb, delay)) if delay >= 1.0 => format!(
-            "Reverb {:.1} s at {reverb:.0} %, {} delay at {delay:.0} %.",
+        Some((send, delay)) if delay > 0.0 => format!(
+            "Reverb {:.1} s, {} delay: lead sends at {send:.0} %.",
             r.reverb.1,
             r.delay.1.name()
         ),
-        Some((reverb, _)) => format!("Reverb {:.1} s at {reverb:.0} %, no delay.", r.reverb.1),
+        Some((send, _)) => format!(
+            "Reverb {:.1} s, no delay: lead send at {send:.0} %.",
+            r.reverb.1
+        ),
         None => "Reverb and delay left as they are.".to_owned(),
     });
     out
@@ -1118,8 +1150,11 @@ mod tests {
         assert!(air(&half) > 0.0 && air(&full) >= air(&half));
         // The space follows its own amount, and stays put at zero.
         assert!(none.get(ParamId::ReverbLevel).is_none());
-        let wet = |p: &Proposal| p.get(ParamId::ReverbLevel).expect("reverb");
+        let wet = |p: &Proposal| p.get(REVERB_SEND_PARAMS[0]).expect("lead reverb send");
         assert!(wet(&full) > wet(&half) && half.get(ParamId::DelayLevel).expect("delay") > 0.0);
+        // The harmonies sit further back than the lead, in reverb.
+        assert!(full.get(REVERB_SEND_PARAMS[2]).expect("harmony send") > wet(&full));
+        assert!(full.get(DELAY_SEND_PARAMS[2]).expect("harmony echo") < wet(&full));
         let dry = propose(
             &a,
             Style::Trap,
