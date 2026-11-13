@@ -66,11 +66,10 @@ pub fn build(params: Arc<LinkParams>) -> Box<dyn Editor> {
         st: LinkUi::default(),
         ctx: None,
     };
-    let mut themed = false;
     EguiEditor::new(params, (LINK_W, LINK_H), move |ui, ctx| {
-        if !std::mem::replace(&mut themed, true) {
-            quack_ui::theme::apply(ui.ctx(), truce_font::JETBRAINS_MONO);
-            // Fonts apply on the next frame: skip drawing this one.
+        // A new context (first frame, window reopened): theme it, and
+        // draw from the next frame, once the fonts are bound.
+        if quack_ui::theme::ensure(ui.ctx(), truce_font::JETBRAINS_MONO) {
             ui.ctx().request_repaint();
             return;
         }

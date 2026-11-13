@@ -79,3 +79,14 @@ fn link_captures() {
         }
     }
 }
+
+/// The host hands a reopened window a new context while the editor's
+/// state lives on: the theme follows the context.
+#[test]
+fn a_new_context_gets_the_theme_again() {
+    let first = egui::Context::default();
+    assert!(theme::ensure(&first, truce_font::JETBRAINS_MONO));
+    assert!(!theme::ensure(&first, truce_font::JETBRAINS_MONO));
+    let reopened = egui::Context::default();
+    assert!(theme::ensure(&reopened, truce_font::JETBRAINS_MONO));
+}
