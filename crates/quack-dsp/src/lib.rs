@@ -33,7 +33,9 @@
 //! | [`snapshot`] | Snapshots A/B and the morph between them |
 //! | [`midiout`] | Sung notes as MIDI output |
 //! | [`tap`] | Analysis taps for the editor, off the audio path |
+//! | [`assist`] | Mixing assistant: analysis of a listen, proposal by style |
 
+pub mod assist;
 pub mod autotune;
 pub mod chain;
 pub mod control;

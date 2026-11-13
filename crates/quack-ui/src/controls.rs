@@ -182,6 +182,12 @@ pub(crate) fn knob_tapered(
     #[allow(clippy::cast_possible_truncation)]
     let t = norm(params.get_plain(id).max(floor)) as f32;
     paint_knob(p, centre, size_pt, t, accent);
+    // The mixing assistant's proposal, until it is applied.
+    if let Some(h) = st.assist.hint(id) {
+        #[allow(clippy::cast_possible_truncation)]
+        let m = norm(h.max(floor)) as f32;
+        crate::paint::hint_dot(p, centre, size_pt, m);
+    }
     // Macro modulation: where the macros take the value.
     if params.control().is_some_and(|c| c.modulated(id)) {
         #[allow(clippy::cast_possible_truncation)]

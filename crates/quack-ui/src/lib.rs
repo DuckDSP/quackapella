@@ -18,6 +18,7 @@
 //! their DSP steps; step 8 adds the preset bar, the macro strip, the
 //! right-click menu (MIDI learn, macro depths) and zoom ([`perform`]).
 
+mod assist;
 mod brand;
 mod controls;
 mod eq;
@@ -136,6 +137,8 @@ pub struct UiState {
     fx_tab: FxTab,
     /// The output EQ's graph: selected band, drag, spectrum.
     eq: eq::EqUi,
+    /// The mixing assistant: its listen, diagnosis and undo.
+    assist: assist::AssistUi,
     /// Vocoder page's tab: 0 voice and effects, 1 carrier.
     vocoder_tab: usize,
     /// Perform row lists open, and where they hang from.
@@ -162,6 +165,7 @@ impl Default for UiState {
             presets: perform::PresetUi::default(),
             fx_tab: FxTab::default(),
             eq: eq::EqUi::default(),
+            assist: assist::AssistUi::default(),
             vocoder_tab: 0,
             keys_menu: false,
             voice_menu: false,
@@ -369,10 +373,13 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     // The FX page gives its eight tabs a little more room.
     let tune_w = if st.page == Page::Fx { 420.0 } else { 452.0 };
     let tune_r = Rect::from_min_size(pos2(inner.left(), mid_top), vec2(tune_w, mid_h));
-    if st.page == Page::Fx {
+    assist::tick(params, st, view);
+    if st.page == Page::Fx && !st.assist.open {
         // The FX page takes the whole row: the output EQ's graph where
         // the tune panel is on the layers' pages.
         eq::graph_panel(ui, params, st, view, tune_r, color::FX);
+    } else if st.page == Page::Fx {
+        assist::assistant_panel(ui, params, st, view, tune_r, color::FX);
     } else {
         tune_panel(ui, params, st, view, tune_r, accent, mode);
     }
@@ -1675,6 +1682,15 @@ impl UiState {
     /// The engine's analysis taps, for the EQ graph's spectrum.
     pub fn set_taps(&mut self, taps: quack_dsp::tap::Taps) {
         self.eq.taps = Some(taps);
+    }
+
+    /// Open the mixing assistant on a diagnosis (captures and tests).
+    pub fn show_assistant(
+        &mut self,
+        analysis: quack_dsp::assist::Analysis,
+        style: quack_dsp::assist::Style,
+    ) {
+        self.assist.show(analysis, style);
     }
 }
 
