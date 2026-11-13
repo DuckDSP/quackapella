@@ -419,10 +419,17 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
 - **Styles** (`Style::rules`) : Natural, Pop, R&B, Trap, Rock, Electro,
   Ballad, Lo-Fi. Les cibles sont des conventions de mixage, réunies
   dans une seule table pour être réglées à l'oreille.
-- **Espace et brillance** : chaque style a sa reverb (niveau, durée,
-  pré-délai), son delay calé sur le tempo de l'hôte (valeur de note,
-  réinjection, atténué pendant le chant) et sa dose d'exciter (aucune
-  si la voix est déjà brillante).
+- **Espace et brillance** : chaque style a sa reverb (retour, taille,
+  amortissement, coupe-bas, atténuation pendant le chant), son delay
+  sur le tempo de l'hôte (valeur de note, réinjection, couleur,
+  ping-pong, part envoyée dans la reverb, atténué pendant le chant) et
+  sa dose d'exciter (aucune si la voix est déjà brillante, moitié si
+  les sifflantes sont fortes). La queue et le pré-délai de la reverb
+  suivent le tempo (`reverb_times` : valeurs du style à 120 BPM, queue
+  bornée entre 0,6 et 1,6 fois, pré-délai sur une quadruple, triple ou
+  double croche) ; la réinjection du delay baisse quand le tempo
+  ralentit. Sans tempo de l'hôte : 120 BPM. Le tempo arrive à
+  l'éditeur par `View::tempo`.
 - **Trois doses** (`Amounts`) : Clarity (EQ, de-esseur, exciter),
   Control (compresseur), Space (envois de chaque couche vers la reverb
   et le delay : 35 % pour la voix lead à fond, 17 % à 70 %, harmonies plus loin

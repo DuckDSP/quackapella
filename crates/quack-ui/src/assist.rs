@@ -52,9 +52,9 @@ pub(crate) struct AssistUi {
     /// Proposed values not applied yet: the dots on the knobs.
     hints: Vec<(ParamId, f64)>,
     amount_drag: Option<(usize, f32)>,
-    /// Style and amounts of the proposal last put on the parameters:
-    /// a change of either is heard at once.
-    played: Option<(Style, [f32; 3])>,
+    /// Style, amounts and tempo of the proposal last put on the
+    /// parameters: a change of any is heard at once.
+    played: Option<(Style, [f32; 3], u32)>,
 }
 
 impl Default for AssistUi {
@@ -86,12 +86,12 @@ impl AssistUi {
     }
 
     /// Show a diagnosis (captures and tests).
-    pub fn show(&mut self, analysis: Analysis, style: Style) {
+    pub fn show(&mut self, analysis: Analysis, style: Style, tempo: u32) {
         self.open = true;
         self.style = style;
         self.analysis = Some(analysis);
         // As after Undo: shown, not played.
-        self.played = Some((style, self.amounts));
+        self.played = Some((style, self.amounts, tempo));
     }
 
     fn amounts(&self) -> Amounts {
@@ -153,11 +153,12 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
         && !a.comparing
         && a.listener.is_none()
     {
-        let changes = propose(an, a.style, a.amounts()).changes;
+        let changes = propose(an, a.style, a.amounts(), view.tempo).changes;
         // A new diagnosis, another style or a turn of Clarity, Control
         // or Space is heard at once. What the user then sets by hand
         // is left alone (and the difference shown as dots).
-        let key = (a.style, a.amounts);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let key = (a.style, a.amounts, view.tempo.max(0.0).round() as u32);
         if a.played != Some(key) {
             if a.before.is_none() {
                 a.before = Some(snapshot(params));
@@ -373,7 +374,7 @@ pub(crate) fn assistant_panel(
             line(4, "Stop now for a quick diagnosis.", color::TEXT_FAINT);
         }
     } else if let Some(an) = &st.assist.analysis {
-        for (i, s) in describe(an, st.assist.style, st.assist.amounts())
+        for (i, s) in describe(an, st.assist.style, st.assist.amounts(), view.tempo)
             .iter()
             .enumerate()
         {
