@@ -8,6 +8,7 @@
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use quack_dsp::ParamId;
+use quack_dsp::assist::fft;
 use quack_dsp::fx::{EQ_BANDS, EqCurve, EqSettings, LOW_CUT_OFF_HZ};
 use quack_dsp::params::EQ_BELL_PARAMS;
 use quack_dsp::tap::Taps;
@@ -96,45 +97,6 @@ fn point_hz(i: f32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let t = i / (POINTS - 1) as f32;
     F_MIN * (F_MAX / F_MIN).powf(t)
-}
-
-/// In-place radix-2 FFT (`re.len()` a power of two).
-fn fft(re: &mut [f32], im: &mut [f32]) {
-    let n = re.len();
-    let mut j = 0;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j |= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let mut len = 2;
-    while len <= n {
-        #[allow(clippy::cast_precision_loss)]
-        let ang = -2.0 * std::f32::consts::PI / len as f32;
-        let (ws, wc) = ang.sin_cos();
-        for start in (0..n).step_by(len) {
-            let (mut cr, mut ci) = (1.0_f32, 0.0_f32);
-            for k in 0..len / 2 {
-                let (a, b) = (start + k, start + k + len / 2);
-                let (tr, ti) = (re[b] * cr - im[b] * ci, re[b] * ci + im[b] * cr);
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-                let next = cr * wc - ci * ws;
-                ci = cr * ws + ci * wc;
-                cr = next;
-            }
-        }
-        len <<= 1;
-    }
 }
 
 /// The spectrum drawn behind the curve, smoothed between frames.
@@ -287,14 +249,7 @@ pub(crate) fn graph_panel(
     let p = ui.painter();
     panel(p, r);
     let ty = r.top() + 22.0;
-    text(
-        p,
-        pos2(r.left() + space::L, ty),
-        Align2::LEFT_CENTER,
-        "Output EQ",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
+    crate::assist::switch(ui, st, r, accent);
     let on = params.get_plain(ParamId::FxOn) >= 0.5 && params.get_plain(ParamId::EqOn) >= 0.5;
     #[allow(clippy::cast_possible_truncation)]
     let sr = if view.sample_rate > 0.0 {

@@ -401,6 +401,33 @@ Première étape de l'assistant de mixage (ids 1300 et suivants).
   panneau Tune (`quack-ui/src/eq.rs`). Les fréquences restent linéaires
   pour l'hôte, les boutons et le graphe sont logarithmiques.
 
+## Assistant de mixage
+
+`quack_dsp::assist` écoute quelques secondes de chant et propose des
+réglages. Rien ne tourne sur le fil audio : l'éditeur (ou l'exemple
+`render` avec `assist=Pop`) nourrit un `Listener` avec les deux prises
+d'analyse et le pitch détecté. Aucune latence ajoutée.
+
+- **Prise d'entrée** : ce qui nettoie la source. Tessiture (coupe-bas à
+  0,8 fois la note la plus grave), bruit entre les phrases (gate 12 dB
+  au-dessus), sifflantes (de-esseur, fréquence et dose), écart entre
+  doux et fort (compresseur).
+- **Prise après les couches** : la couleur. L'équilibre bas-médiums,
+  présence et air contre les médiums est comparé à la cible du style,
+  et l'écart règle l'EQ de sortie (cloche à 300 Hz, cloche à 3,5 kHz,
+  plateau à 9 kHz, cloche étroite sur une résonance entre 1 et 5 kHz).
+- **Styles** (`Style::rules`) : Natural, Pop, R&B, Trap, Rock, Electro,
+  Ballad, Lo-Fi. Les cibles sont des conventions de mixage, réunies
+  dans une seule table pour être réglées à l'oreille.
+- `propose` est une fonction pure (mesures, style, dose) ; `describe`
+  dit la même chose en cinq lignes. `PARAMS` liste tout ce qu'une
+  proposition peut toucher (pour Undo).
+- **Interface** (`quack-ui/src/assist.rs`) : sur la page FX, le panneau
+  de gauche bascule entre le graphe de l'EQ et l'assistant. Listen,
+  diagnostic, Amount, puis Apply, Compare et Undo. La proposition
+  s'affiche en points blancs sur les boutons tant qu'elle n'est pas
+  appliquée ; rien ne change sans Apply.
+
 ## Modes
 
 | Mode | Intention | Formants |

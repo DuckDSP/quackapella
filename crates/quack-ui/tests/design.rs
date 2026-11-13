@@ -287,6 +287,46 @@ fn editor_captures() {
                         .expect("write capture");
                 }
             }
+            // The mixing assistant on a diagnosis (a tenor, measured
+            // on a real take), its proposal as dots on the knobs.
+            let bands = [
+                -120.0, -9.6, -6.4, 0.3, 8.9, 25.4, 27.9, 23.4, 19.9, 27.7, 24.1, 20.6, 20.7, 22.3,
+                19.6, 21.0, 21.1, 18.7, 15.6, 14.5, 8.1, 10.0, 6.8, 6.0, 0.9, -10.7, -22.1,
+            ];
+            st.show_assistant(
+                quack_dsp::assist::Analysis {
+                    low_hz: 123.5,
+                    median_hz: 185.0,
+                    high_hz: 233.1,
+                    input: bands,
+                    layers: bands,
+                    sibilance: Some((-10.2, 7300.0)),
+                    loud_db: -22.0,
+                    soft_db: -27.0,
+                    noise_db: Some(-59.0),
+                    voiced_s: 7.2,
+                },
+                quack_dsp::assist::Style::Pop,
+            );
+            for (tab, name) in [(FxTab::Input, "assistant"), (FxTab::Eq, "assistant-eq")] {
+                st.set_fx_tab(tab);
+                let ctx = egui::Context::default();
+                theme::apply(&ctx, truce_font::JETBRAINS_MONO);
+                #[allow(clippy::cast_precision_loss)]
+                let canvas = support::raster::render(
+                    &ctx,
+                    BASE_W as f32,
+                    BASE_H as f32,
+                    2.0,
+                    3,
+                    color::BG,
+                    |ui| draw(ui, &params, &view, &mut st),
+                );
+                if write {
+                    support::raster::write_png(&canvas, &out.join(format!("editor-fx-{name}.png")))
+                        .expect("write capture");
+                }
+            }
         }
     }
 }

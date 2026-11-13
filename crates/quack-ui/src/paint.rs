@@ -72,6 +72,16 @@ pub(crate) fn knob(p: &Painter, c: Pos2, size: f32, t: f32, accent: Color32) {
     );
 }
 
+/// The mixing assistant's proposal on a knob: a dot on the track where
+/// the value would go.
+pub(crate) fn hint_dot(p: &Painter, c: Pos2, size: f32, t: f32) {
+    let scale = size / 64.0;
+    let ang = std::f32::consts::PI * (0.75 + 1.5 * t.clamp(0.0, 1.0));
+    let at = c + vec2(ang.cos(), ang.sin()) * 28.0 * scale;
+    p.circle_filled(at, 4.5 * scale.max(0.8), color::BG);
+    p.circle_filled(at, 3.0 * scale.max(0.8), color::TEXT);
+}
+
 /// Macro modulation on a knob: a thin outer arc from the set value `t`
 /// to the modulated one `m`, and a dot where the macros take it.
 pub(crate) fn mod_arc(p: &Painter, c: Pos2, size: f32, t: f32, m: f32, accent: Color32) {

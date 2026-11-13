@@ -11,7 +11,10 @@
 //! releases everything at 4 s); `key=value@t` changes a parameter at
 //! `t` seconds (`freeze=1@2.1 freeze=0@4`); `preset=Radio Pop` loads a
 //! factory preset (`preset=Radio Pop/B`: its snapshot B); `sc=FILE.wav` feeds the
-//! side-chain input (mono or stereo, cut or padded to the input). `--demo` writes a synthetic singer
+//! side-chain input (mono or stereo, cut or padded to the input); `assist=Pop`
+//! (or `assist=Pop:0.6` for the amount) listens to the whole file with
+//! the settings given, prints what the mixing assistant hears and
+//! renders with what it proposes. `--demo` writes a synthetic singer
 //! (glottal source, formants, scoops, vibrato, off-key notes,
 //! consonants) instead of reading a file. WAV in: 16/24-bit PCM or
 //! 32-bit float, mono or stereo; out: 32-bit float, same channels
@@ -55,8 +58,19 @@ fn main() {
     let mut midi: Vec<(f64, Vec<u8>)> = Vec::new();
     let mut autos: Vec<(f64, ParamId, f64)> = Vec::new();
     let mut side: Option<Vec<Vec<f32>>> = None;
+    let mut assist: Option<(quack_dsp::assist::Style, f32)> = None;
     for kv in &args[2..] {
         let (k, v) = kv.split_once('=').expect("key=value");
+        if k == "assist" {
+            // `assist=Pop` or `assist=Pop:0.6` (the amount).
+            let (name, amount) = v.split_once(':').unwrap_or((v, "1"));
+            let style = quack_dsp::assist::Style::ALL
+                .into_iter()
+                .find(|s| s.name().eq_ignore_ascii_case(name))
+                .unwrap_or_else(|| panic!("unknown style {name}"));
+            assist = Some((style, amount.parse().expect("amount")));
+            continue;
+        }
         if k == "sc" {
             side = Some(read_wav(v).1);
             continue;
@@ -99,6 +113,9 @@ fn main() {
     }
     midi.sort_by(|a, b| a.0.total_cmp(&b.0));
     autos.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((style, amount)) = assist {
+        listen(f64::from(sr), &chans, &mut values, style, amount);
+    }
     let out = process(
         f64::from(sr),
         &chans,
@@ -108,6 +125,46 @@ fn main() {
         side.as_deref(),
     );
     write_wav(&args[1], sr, &out);
+}
+
+/// The mixing assistant, offline: listen to the whole take with the
+/// settings given, print what was heard, and add the proposal to them.
+fn listen(
+    sr: f64,
+    chans: &[Vec<f32>],
+    values: &mut ParamValues,
+    style: quack_dsp::assist::Style,
+    amount: f32,
+) {
+    use quack_dsp::assist;
+    let mut e = Engine::new();
+    e.prepare(sr, 512);
+    e.set_all(values, true);
+    let taps = e.taps();
+    let mut l = chans[0].clone();
+    let mut r = chans.get(1).unwrap_or(&chans[0]).clone();
+    let mut ear = assist::Listener::new(sr);
+    let (mut a, mut b) = ([0.0_f32; 256], [0.0_f32; 256]);
+    for (cl, cr) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
+        e.process(cl, cr);
+        let n = cl.len();
+        taps.input.read(&mut a[..n]);
+        taps.layers.read(&mut b[..n]);
+        let hz = e.pitch().map_or(0.0, |p| p.hz);
+        ear.feed(&a[..n], &b[..n], hz);
+    }
+    let Some(heard) = ear.finish() else {
+        eprintln!("assistant: not enough singing");
+        return;
+    };
+    eprintln!("{heard:?}");
+    for line in assist::describe(&heard, style, amount) {
+        eprintln!("  {line}");
+    }
+    for (id, v) in assist::propose(&heard, style, amount).changes {
+        eprintln!("    {} = {v}", id.spec().key);
+        values.set(id, v);
+    }
 }
 
 fn process(
