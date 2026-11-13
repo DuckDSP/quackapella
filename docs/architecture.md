@@ -450,6 +450,11 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   Quand le style ou une dose bouge ensuite, l'éditeur affiche
   « Changed: check again » et le bouton Check, allumé, refait la seule
   vérification (4 s de chant) sans refaire le diagnostic de la voix.
+- **Tessiture** : `Analysis::bands` déplace les zones mesurées et les
+  fréquences de l'EQ avec la médiane chantée, autour d'un ténor de
+  référence (185 Hz : 300 Hz, 3,5 kHz, 9 kHz). Les bas-médiums suivent
+  en racine carrée (240 à 420 Hz), présence et air en racine quatrième
+  (3,1 à 4,3 kHz, plateau de 8 à 11 kHz).
 - **Sortie** : le compresseur de sortie est dosé par style
   (`Style::glue`, avec Control), le plafond mis à -1 dB, et le
   de-esseur de sortie réglé à la vérification d'après les sifflantes

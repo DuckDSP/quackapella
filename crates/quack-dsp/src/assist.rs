@@ -365,8 +365,13 @@ impl Style {
 const MID: (f32, f32) = (500.0, 1600.0);
 const MUD: (f32, f32) = (200.0, 400.0);
 /// Where the low mids are corrected: a wide bell, so that it does not
-/// single out the note sung.
+/// single out the note sung. These three are for a voice centred on
+/// [`REFERENCE_HZ`]; [`Analysis::bands`] moves them with the voice.
 const MUD_HZ: f32 = 300.0;
+const PRESENCE_HZ: f32 = 3500.0;
+const AIR_HZ: f32 = 9000.0;
+/// The middle of the tenor the targets were set on (F#3).
+const REFERENCE_HZ: f32 = 185.0;
 const PRESENCE: (f32, f32) = (2500.0, 5000.0);
 const AIR: (f32, f32) = (8000.0, 14_000.0);
 const SIBILANT: (f32, f32) = (4000.0, 12_000.0);
@@ -431,7 +436,41 @@ fn zone_db(bands: &[f32; BANDS], zone: (f32, f32)) -> f32 {
     10.0 * (sum / n.max(1.0)).max(1e-20).log10()
 }
 
+/// Where this voice's low mids, presence and air are: the zones they
+/// are measured in and the frequencies the EQ works at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bands {
+    pub mud: (f32, f32),
+    pub mud_hz: f32,
+    pub presence: (f32, f32),
+    pub presence_hz: f32,
+    pub air: (f32, f32),
+    pub air_hz: f32,
+}
+
 impl Analysis {
+    /// The zones and EQ frequencies for this voice's range. The low
+    /// mids hang under the notes sung, so they follow them (as the
+    /// square root: a bass's mud near 240 Hz, a soprano's near 400).
+    /// Presence and air come from the vocal tract, which changes far
+    /// less than the pitch between a low voice and a high one (fourth
+    /// root: 3.1 to 4.2 kHz, shelf from 8 to 11 kHz).
+    #[must_use]
+    pub fn bands(&self) -> Bands {
+        let k = (self.median_hz / REFERENCE_HZ).clamp(0.4, 3.0);
+        let (low, high) = (k.sqrt().clamp(0.75, 1.4), k.sqrt().sqrt().clamp(0.88, 1.22));
+        let scale = |z: (f32, f32), f: f32| (z.0 * f, z.1 * f);
+        Bands {
+            mud: scale(MUD, low),
+            mud_hz: (MUD_HZ * low / 10.0).round() * 10.0,
+            presence: scale(PRESENCE, high),
+            presence_hz: (PRESENCE_HZ * high / 100.0).round() * 100.0,
+            // The air zone stays under the top of the analysis.
+            air: (AIR.0 * high, (AIR.1 * high).min(16_000.0)),
+            air_hz: (AIR_HZ * high / 500.0).round() * 500.0,
+        }
+    }
+
     /// Level of a zone against the mids, on the sound after the layers
     /// with what the chain adds after them: what the EQ has to shape.
     fn balance(&self, zone: (f32, f32)) -> f32 {
@@ -1032,6 +1071,8 @@ struct Plan {
     /// Threshold, ratio, make-up, reduction aimed at.
     comp: Option<(f32, f32, f32, f32)>,
     mud: (f32, f32),
+    presence_hz: f32,
+    air_hz: f32,
     resonance: Option<(f32, f32)>,
     presence: f32,
     air: f32,
@@ -1120,9 +1161,10 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
     });
     // A crowded mix moves the targets: more presence, leaner low mids.
     let (lift, lean) = a.unmask().unwrap_or((0.0, 0.0));
-    let mud = correction(r.mud - lean, a.balance(MUD), amount, r.reach);
-    let presence = correction(r.presence + lift, a.balance(PRESENCE), amount, r.reach);
-    let air = correction(r.air, a.balance(AIR), amount, r.reach);
+    let b = a.bands();
+    let mud = correction(r.mud - lean, a.balance(b.mud), amount, r.reach);
+    let presence = correction(r.presence + lift, a.balance(b.presence), amount, r.reach);
+    let air = correction(r.air, a.balance(b.air), amount, r.reach);
     let resonance = a
         .resonance()
         .map(|(hz, over)| (hz, -((over - 2.0).min(5.0) * amount)))
@@ -1132,7 +1174,9 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
         gate,
         deess,
         comp,
-        mud: (MUD_HZ, mud),
+        mud: (b.mud_hz, mud),
+        presence_hz: b.presence_hz,
+        air_hz: b.air_hz,
         resonance,
         presence,
         air,
@@ -1213,10 +1257,10 @@ pub fn propose(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Propo
         None => c.push((res[1], 0.0)),
     }
     c.extend([
-        (pres[0], 3500.0),
+        (pres[0], f64::from(p.presence_hz)),
         (pres[1], half(p.presence)),
         (pres[2], 0.8),
-        (ParamId::EqHighShelfFreq, 9000.0),
+        (ParamId::EqHighShelfFreq, f64::from(p.air_hz)),
         (ParamId::EqHighShelfGain, half(p.air)),
     ]);
     c.push((ParamId::ExciterAmount, f64::from(p.exciter)));
@@ -1305,17 +1349,22 @@ fn hz_words(hz: f32) -> String {
 pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<String> {
     let r = style.rules();
     let p = plan(a, style, amount);
+    let b = a.bands();
+    let k = |hz: f32| format!("{}k", (hz / 100.0).round() / 10.0);
     let mut out = vec![format!(
-        "{}, {} to {}. Low cut at {:.0} Hz.",
+        "{}, {} to {}. Low cut {:.0} Hz, EQ {:.0}/{}/{}.",
         a.voice_type(),
         note_name(a.low_hz),
         note_name(a.high_hz),
-        p.low_cut
+        p.low_cut,
+        b.mud_hz,
+        k(b.presence_hz),
+        k(b.air_hz)
     )];
     // Tone: each zone against the style, in words.
     let gap = |target: f32, zone: (f32, f32)| a.balance(zone) - target;
     let mut tone: Vec<String> = Vec::new();
-    let mud = gap(r.mud, MUD);
+    let mud = gap(r.mud, b.mud);
     if mud > 1.5 {
         tone.push("muddy".to_owned());
     } else if mud < -2.5 {
@@ -1324,13 +1373,13 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<
     if let Some((hz, _)) = p.resonance {
         tone.push(format!("hard at {}", hz_words(hz)));
     }
-    let pres = gap(r.presence, PRESENCE);
+    let pres = gap(r.presence, b.presence);
     if pres < -1.5 {
         tone.push("lacks presence".to_owned());
     } else if pres > 2.0 {
         tone.push("forward".to_owned());
     }
-    let air = gap(r.air, AIR);
+    let air = gap(r.air, b.air);
     if air < -2.0 {
         tone.push("little air".to_owned());
     } else if air > 2.5 {
@@ -1623,5 +1672,18 @@ mod tests {
             line(&mix(-22.0))
         );
         assert!(line(&plain).contains("in use"));
+    }
+
+    #[test]
+    fn the_eq_bands_follow_the_voice() {
+        let heard = sing(48_000.0, 146.8, -9.0, 12.0, 0.2, 0.001)
+            .finish(&[0.0; BANDS])
+            .expect("analysis");
+        let at = |median_hz: f32| Analysis { median_hz, ..heard }.bands();
+        let (bass, tenor, soprano) = (at(98.0), at(REFERENCE_HZ), at(520.0));
+        assert!((tenor.mud_hz, tenor.presence_hz, tenor.air_hz) == (300.0, 3500.0, 9000.0));
+        assert!(bass.mud_hz < 250.0 && soprano.mud_hz > 380.0);
+        assert!(bass.presence_hz >= 3000.0 && soprano.presence_hz <= 4300.0);
+        assert!(bass.air_hz >= 8000.0 && soprano.air_hz <= 11_000.0);
     }
 }
