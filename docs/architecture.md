@@ -425,7 +425,7 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   si la voix est déjà brillante).
 - **Trois doses** (`Amounts`) : Clarity (EQ, de-esseur, exciter),
   Control (compresseur), Space (envois de chaque couche vers la reverb
-  et le delay : 20 % pour la voix lead à fond, harmonies plus loin
+  et le delay : 35 % pour la voix lead à fond, 17 % à 70 %, harmonies plus loin
   dans la reverb, vocodeur presque sec ; les retours sont fixés par le
   style ; à zéro, l'espace n'est pas touché).
 - `propose` est une fonction pure (mesures, style, dose) ; `describe`

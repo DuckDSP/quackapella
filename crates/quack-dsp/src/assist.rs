@@ -768,7 +768,7 @@ struct Plan {
 /// of them (voice, creative, harmony, vocoder): the lead stays the
 /// driest in reverb and carries the echoes, the harmonies sit further
 /// back, the vocoder stays close to dry.
-const LEAD_SEND: f32 = 20.0;
+const LEAD_SEND: f32 = 35.0;
 const REVERB_SHARE: [f32; 4] = [1.0, 0.8, 1.5, 0.5];
 const DELAY_SHARE: [f32; 4] = [1.0, 0.6, 0.4, 0.3];
 
@@ -828,7 +828,8 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
             0.0
         },
         space: (space >= 0.01).then(|| {
-            let send = LEAD_SEND * space;
+            // Squared: fine steps at the bottom, a generous top.
+            let send = LEAD_SEND * space * space;
             (send, if r.delay.0 > 0.0 { send } else { 0.0 })
         }),
     }
