@@ -40,6 +40,14 @@ au3_subtype = "Qkl3"
 au_tag = "Effects"
 vst3_subcategory = "Tools"
 
+# One installer for the two: Quackapella and its companion, each a
+# choice of its own in the installer.
+[[suite]]
+name = "Quackapella"
+bundle_id = "quackapella-suite"
+plugins = ["quack-plugin", "quack-link-plugin"]
+description = "Quackapella and Quackapella Link"
+
 # `cargo truce package` (scripts/package-macos.sh): one .pkg holding the
 # three formats. Notarization runs only when the script finds the
 # Developer ID identities and a notarytool profile (else --no-notarize).
