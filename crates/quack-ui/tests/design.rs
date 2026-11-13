@@ -321,8 +321,15 @@ fn editor_captures() {
                 quack_dsp::assist::Style::Pop,
                 96,
             );
-            for (tab, name) in [(FxTab::Input, "assistant"), (FxTab::Eq, "assistant-eq")] {
+            for (tab, name) in [
+                (FxTab::Input, "assistant"),
+                (FxTab::Eq, "assistant-eq"),
+                (FxTab::Reverb, "assistant-ask"),
+            ] {
                 st.set_fx_tab(tab);
+                if name == "assistant-ask" {
+                    st.ask_assistant(false);
+                }
                 let ctx = egui::Context::default();
                 theme::apply(&ctx, truce_font::JETBRAINS_MONO);
                 #[allow(clippy::cast_precision_loss)]

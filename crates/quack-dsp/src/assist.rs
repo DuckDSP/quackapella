@@ -1029,6 +1029,35 @@ pub const PARAMS: [ParamId; 56] = [
     DELAY_SEND_PARAMS[3],
 ];
 
+/// The effects: reverb, delay and the layers' sends (what Space doses).
+/// The user sets these by ear more than the rest, so the editor asks
+/// before touching them and a check never does.
+#[must_use]
+pub fn is_effect(id: ParamId) -> bool {
+    matches!(
+        id,
+        ParamId::ReverbOn
+            | ParamId::ReverbLevel
+            | ParamId::ReverbDecay
+            | ParamId::ReverbPredelay
+            | ParamId::ReverbLowCut
+            | ParamId::ReverbSize
+            | ParamId::ReverbDamping
+            | ParamId::Duck
+            | ParamId::DelayOn
+            | ParamId::DelaySync
+            | ParamId::DelayDivision
+            | ParamId::DelayFeedback
+            | ParamId::DelayLevel
+            | ParamId::DelayLowCut
+            | ParamId::DelayDuck
+            | ParamId::DelayTone
+            | ParamId::DelayPingPong
+            | ParamId::DelayToReverb
+    ) || REVERB_SEND_PARAMS.contains(&id)
+        || DELAY_SEND_PARAMS.contains(&id)
+}
+
 /// Parameter values the assistant proposes, in the order they are set.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Proposal {

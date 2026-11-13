@@ -1703,6 +1703,11 @@ impl UiState {
     ) {
         self.assist.show(analysis, style, tempo);
     }
+
+    /// The assistant's question before a listen (captures and tests).
+    pub fn ask_assistant(&mut self, effects: bool) {
+        self.assist.ask(effects);
+    }
 }
 
 type FxKnob<'a> = (ParamId, &'a str, &'a dyn Fn(f64) -> String, Color32);
