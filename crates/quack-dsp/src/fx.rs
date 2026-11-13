@@ -1502,7 +1502,9 @@ impl Exciter {
             self.post[c].set(sr, s.hz, 0.707);
             self.env[c].set(sr, 1.0, 60.0);
         }
-        self.gain = 0.5 * s.amount.clamp(0.0, 1.0);
+        // At full amount the harmonics stand well over the band they
+        // come from: less was hard to hear on a real voice.
+        self.gain = 1.5 * s.amount.clamp(0.0, 1.0);
         if s.amount > 0.0 && !was_on {
             self.reset();
         }
@@ -1728,7 +1730,7 @@ mod tests {
         let second = tone_level(tail, sr, 8000.0);
         let third = tone_level(tail, sr, 12_000.0);
         assert!(second > 0.01 && third > 0.003, "{second} {third}");
-        assert!(tail.iter().all(|v| v.abs() < 0.6));
+        assert!(tail.iter().all(|v| v.abs() < 1.0));
         // Nothing under the band: a low note makes no harmonics.
         let low = sine(sr, 200.0, 24_000, 0.25);
         let z: Vec<f32> = low.iter().map(|v| ex.tick(*v, *v).0).collect();
