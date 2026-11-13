@@ -1357,6 +1357,8 @@ impl Engine {
             } else {
                 (wet_l, wet_r)
             };
+            self.taps.output.push(0.5 * (wet_l + wet_r));
+            self.taps.side.push(0.5 * (sc_l + sc_r));
             let (dry_l, dry_r) = if self.swap {
                 (track_l, track_r)
             } else {

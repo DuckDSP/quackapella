@@ -59,11 +59,18 @@ fn main() {
     let mut autos: Vec<(f64, ParamId, f64)> = Vec::new();
     let mut side: Option<Vec<Vec<f32>>> = None;
     let mut assist: Option<(quack_dsp::assist::Style, f32)> = None;
+    let mut listens = 1_u32;
     for kv in &args[2..] {
         let (k, v) = kv.split_once('=').expect("key=value");
         if k == "assist" {
             // `assist=Pop` or `assist=Pop:0.6` (the amount).
-            let (name, amount) = v.split_once(':').unwrap_or((v, "1"));
+            // A third field, `assist=Pop:0.7:2`, listens that many
+            // times: the second listen checks the first proposal at
+            // the output.
+            let mut parts = v.split(':');
+            let name = parts.next().unwrap_or(v);
+            let amount = parts.next().unwrap_or("1");
+            listens = parts.next().map_or(1, |n| n.parse().expect("listens"));
             let style = quack_dsp::assist::Style::ALL
                 .into_iter()
                 .find(|s| s.name().eq_ignore_ascii_case(name))
@@ -114,7 +121,16 @@ fn main() {
     midi.sort_by(|a, b| a.0.total_cmp(&b.0));
     autos.sort_by(|a, b| a.0.total_cmp(&b.0));
     if let Some((style, amount)) = assist {
-        listen(f64::from(sr), &chans, &mut values, style, amount);
+        for _ in 0..listens {
+            listen(
+                f64::from(sr),
+                &chans,
+                side.as_deref(),
+                &mut values,
+                style,
+                amount,
+            );
+        }
     }
     let out = process(
         f64::from(sr),
@@ -129,9 +145,10 @@ fn main() {
 
 /// The mixing assistant, offline: listen to the whole take with the
 /// settings given, print what was heard, and add the proposal to them.
-fn listen(
+fn listen<'a>(
     sr: f64,
     chans: &[Vec<f32>],
+    side: Option<&'a [Vec<f32>]>,
     values: &mut ParamValues,
     style: quack_dsp::assist::Style,
     amount: f32,
@@ -144,16 +161,37 @@ fn listen(
     let mut l = chans[0].clone();
     let mut r = chans.get(1).unwrap_or(&chans[0]).clone();
     let mut ear = assist::Listener::new(sr);
-    let (mut a, mut b) = ([0.0_f32; 256], [0.0_f32; 256]);
+    let mut bufs = [[0.0_f32; 256]; 4];
+    let mut pos = 0;
     for (cl, cr) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
-        e.process(cl, cr);
         let n = cl.len();
+        // The side-chain file is the mix.
+        let sc = side.map(|s| {
+            let at = |c: &'a Vec<f32>| &c[pos.min(c.len())..(pos + n).min(c.len())];
+            (at(&s[0]), at(s.get(1).unwrap_or(&s[0])))
+        });
+        e.process_with_sidechain(cl, cr, sc);
+        pos += n;
+        let [a, b, c, d] = &mut bufs;
         taps.input.read(&mut a[..n]);
         taps.layers.read(&mut b[..n]);
+        taps.output.read(&mut c[..n]);
+        taps.side.read(&mut d[..n]);
         let hz = e.pitch().map_or(0.0, |p| p.hz);
-        ear.feed(&a[..n], &b[..n], hz);
+        ear.feed(
+            &assist::Heard {
+                input: &a[..n],
+                layers: &b[..n],
+                output: &c[..n],
+                side: side.is_some().then_some(&d[..n]),
+            },
+            hz,
+        );
     }
-    let Some(heard) = ear.finish() else {
+    // The EQ in force during the listen, per band.
+    #[allow(clippy::cast_possible_truncation)]
+    let eq_db = assist::eq_in_force(&|id| values.get(id), sr as f32);
+    let Some(heard) = ear.finish(&eq_db) else {
         eprintln!("assistant: not enough singing");
         return;
     };

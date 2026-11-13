@@ -17,8 +17,14 @@
 //! words. Part of what is measured is physical (range, sibilants,
 //! dynamics, noise); the targets of a style are taste, kept in one
 //! table ([`Style::rules`]) so they can be tuned by ear.
+//!
+//! Two more taps close the loop. The **output** tap tells what the
+//! chain adds after the layers (exciter, returns, output dynamics):
+//! a listen made with the effects on corrects the EQ for it. The
+//! **side-chain** tap, when the side-chain is free, is the mix: where
+//! it crowds the voice, the targets move.
 
-use crate::fx::{Division, LOW_CUT_OFF_HZ};
+use crate::fx::{Division, EqCurve, EqSettings, LOW_CUT_OFF_HZ};
 use crate::params::{DELAY_SEND_PARAMS, EQ_BELL_PARAMS, ParamId, REVERB_SEND_PARAMS};
 
 /// Third-octave bands of the analysis, from [`BAND_BASE_HZ`] up.
@@ -345,6 +351,17 @@ const PRESENCE: (f32, f32) = (2500.0, 5000.0);
 const AIR: (f32, f32) = (8000.0, 14_000.0);
 const SIBILANT: (f32, f32) = (4000.0, 12_000.0);
 
+/// The rest of the song, as far as the assistant could hear it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mix {
+    /// The side-chain is used for something else.
+    Taken,
+    /// Nothing came by the side-chain.
+    Silent,
+    /// Its average spectrum, dB per band.
+    Heard([f32; BANDS]),
+}
+
 /// What a listen measured.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Analysis {
@@ -356,6 +373,12 @@ pub struct Analysis {
     /// comes in, and the sound after the layers.
     pub input: [f32; BANDS],
     pub layers: [f32; BANDS],
+    /// What the rest of the chain adds after the layers (exciter,
+    /// reverb and delay returns, output dynamics), the EQ aside: dB per
+    /// band against the mids. Zero until effects are on.
+    pub colour: [f32; BANDS],
+    /// The mix, heard on the side-chain while the voice sings.
+    pub mix: Mix,
     /// Sibilants: their level against the sung parts (dB) and where
     /// they sit (Hz). `None`: none heard.
     pub sibilance: Option<(f32, f32)>,
@@ -383,9 +406,28 @@ fn zone_db(bands: &[f32; BANDS], zone: (f32, f32)) -> f32 {
 }
 
 impl Analysis {
-    /// Level of a zone against the mids, on the sound after the layers.
+    /// Level of a zone against the mids, on the sound after the layers
+    /// with what the chain adds after them: what the EQ has to shape.
     fn balance(&self, zone: (f32, f32)) -> f32 {
-        zone_db(&self.layers, zone) - zone_db(&self.layers, MID)
+        let mut shaped = self.layers;
+        for (s, c) in shaped.iter_mut().zip(&self.colour) {
+            *s += c;
+        }
+        zone_db(&shaped, zone) - zone_db(&shaped, MID)
+    }
+
+    /// How the mix crowds the voice: dB of presence to add and dB of
+    /// low mids to take off. A mix usually sits around -8 dB of
+    /// presence and +5 dB of low mids against its own mids; only its
+    /// shape is read, its level depends on the session.
+    fn unmask(&self) -> Option<(f32, f32)> {
+        let Mix::Heard(m) = &self.mix else {
+            return None;
+        };
+        let rel = |zone| zone_db(m, zone) - zone_db(m, MID);
+        let lift = ((rel(PRESENCE) + 8.0) * 0.5).clamp(0.0, 3.0);
+        let lean = ((rel(MUD) - 5.0) * 0.5).clamp(0.0, 2.0);
+        Some(((lift * 2.0).round() / 2.0, (lean * 2.0).round() / 2.0))
     }
 
     /// A band that stands out of its neighbours between 1 and 5 kHz:
@@ -419,6 +461,54 @@ impl Analysis {
     }
 }
 
+/// The output EQ in force, dB per band, read from the parameters
+/// through `get`: what [`Listener::finish`] needs to tell the EQ from
+/// what the rest of the chain adds.
+#[must_use]
+pub fn eq_in_force(get: &dyn Fn(ParamId) -> f64, sample_rate: f32) -> [f32; BANDS] {
+    #[allow(clippy::cast_possible_truncation)]
+    let f = |id: ParamId| get(id) as f32;
+    if get(ParamId::FxOn) < 0.5 || get(ParamId::EqOn) < 0.5 {
+        return [0.0; BANDS];
+    }
+    let bell = |ids: [ParamId; 3]| (f(ids[0]), f(ids[1]), f(ids[2]));
+    let curve = EqCurve::new(
+        &EqSettings {
+            low_cut_hz: f(ParamId::EqLowCut),
+            low_shelf_hz: f(ParamId::EqLowShelfFreq),
+            low_shelf_db: f(ParamId::EqLowShelfGain),
+            bells: EQ_BELL_PARAMS.map(bell),
+            high_shelf_hz: f(ParamId::EqHighShelfFreq),
+            high_shelf_db: f(ParamId::EqHighShelfGain),
+        },
+        sample_rate,
+    );
+    std::array::from_fn(|i| curve.gain_db(band_hz(i)))
+}
+
+/// A stretch of the engine's analysis taps ([`crate::tap`]), all of
+/// the same length.
+#[derive(Debug, Clone, Copy)]
+pub struct Heard<'a> {
+    pub input: &'a [f32],
+    pub layers: &'a [f32],
+    pub output: &'a [f32],
+    /// The side-chain when it carries the mix; `None` while it is used
+    /// for something else (the voice, the vocoder's carrier).
+    pub side: Option<&'a [f32]>,
+}
+
+#[derive(Clone, Copy)]
+enum Which {
+    Input,
+    Layers,
+    Output,
+    Side,
+}
+
+/// Summed band power of a windowed frame at about -60 dBFS.
+const MIX_FLOOR: f64 = 0.4;
+
 /// Accumulates what a listen hears. Off the audio thread: it allocates
 /// when made and is fed in blocks of any size.
 #[derive(Debug, Clone)]
@@ -426,6 +516,8 @@ pub struct Listener {
     sample_rate: f32,
     input: Vec<f32>,
     layers: Vec<f32>,
+    output: Vec<f32>,
+    side: Vec<f32>,
     fill: usize,
     re: Vec<f32>,
     im: Vec<f32>,
@@ -434,6 +526,13 @@ pub struct Listener {
     /// over the sibilant frames (input).
     sung_in: [f64; BANDS],
     sung_lay: [f64; BANDS],
+    /// The same at the output, and for the side-chain (the mix) with
+    /// the sung frames where it carried sound; `side_free` falls once
+    /// the side-chain is used for something else.
+    sung_out: [f64; BANDS],
+    sung_side: [f64; BANDS],
+    side_frames: u32,
+    side_free: bool,
     sib: [f64; BANDS],
     sung_frames: u32,
     sib_frames: u32,
@@ -492,12 +591,18 @@ impl Listener {
             sample_rate,
             input: vec![0.0; FRAME],
             layers: vec![0.0; FRAME],
+            output: vec![0.0; FRAME],
+            side: vec![0.0; FRAME],
             fill: 0,
             re: vec![0.0; FRAME],
             im: vec![0.0; FRAME],
             window,
             sung_in: [0.0; BANDS],
             sung_lay: [0.0; BANDS],
+            sung_out: [0.0; BANDS],
+            sung_side: [0.0; BANDS],
+            side_frames: 0,
+            side_free: true,
             sib: [0.0; BANDS],
             sung_frames: 0,
             sib_frames: 0,
@@ -531,25 +636,41 @@ impl Listener {
         s
     }
 
-    /// The same stretch of both taps (equal lengths) and the pitch
-    /// detected over it (0 while unvoiced).
-    pub fn feed(&mut self, input: &[f32], layers: &[f32], pitch_hz: f32) {
-        for (a, b) in input.iter().zip(layers) {
+    /// The same stretch of the taps and the pitch detected over it (0
+    /// while unvoiced).
+    pub fn feed(&mut self, heard: &Heard, pitch_hz: f32) {
+        if heard.side.is_none() {
+            self.side_free = false;
+        }
+        for (k, a) in heard.input.iter().enumerate() {
             self.input[self.fill] = *a;
-            self.layers[self.fill] = *b;
+            self.layers[self.fill] = heard.layers.get(k).copied().unwrap_or(0.0);
+            self.output[self.fill] = heard.output.get(k).copied().unwrap_or(0.0);
+            self.side[self.fill] = heard.side.and_then(|s| s.get(k)).copied().unwrap_or(0.0);
             self.fill += 1;
             if self.fill == FRAME {
                 self.frame(pitch_hz);
-                self.input.copy_within(HOP.., 0);
-                self.layers.copy_within(HOP.., 0);
+                for buf in [
+                    &mut self.input,
+                    &mut self.layers,
+                    &mut self.output,
+                    &mut self.side,
+                ] {
+                    buf.copy_within(HOP.., 0);
+                }
                 self.fill = FRAME - HOP;
             }
         }
     }
 
     /// Band powers of one windowed frame.
-    fn bands(&mut self, layers: bool) -> [f64; BANDS] {
-        let src = if layers { &self.layers } else { &self.input };
+    fn bands(&mut self, which: Which) -> [f64; BANDS] {
+        let src = match which {
+            Which::Input => &self.input,
+            Which::Layers => &self.layers,
+            Which::Output => &self.output,
+            Which::Side => &self.side,
+        };
         for (i, w) in self.window.iter().enumerate() {
             self.re[i] = src[i] * w;
             self.im[i] = 0.0;
@@ -580,7 +701,7 @@ impl Listener {
         #[allow(clippy::cast_precision_loss)]
         let mean_sq = self.input.iter().map(|x| x * x).sum::<f32>() / FRAME as f32;
         let level = 10.0 * mean_sq.max(1e-12).log10();
-        let bands = self.bands(false);
+        let bands = self.bands(Which::Input);
         let total: f64 = bands.iter().sum::<f64>().max(1e-30);
         let top: f64 = bands
             .iter()
@@ -589,12 +710,21 @@ impl Listener {
             .map(|(_, p)| *p)
             .sum();
         if pitch_hz > 0.0 && level > -60.0 {
-            let lay = self.bands(true);
-            for (sum, p) in self.sung_in.iter_mut().zip(&bands) {
-                *sum += p;
-            }
-            for (sum, p) in self.sung_lay.iter_mut().zip(&lay) {
-                *sum += p;
+            let lay = self.bands(Which::Layers);
+            let out = self.bands(Which::Output);
+            let side = self.bands(Which::Side);
+            let add = |sum: &mut [f64; BANDS], frame: &[f64; BANDS]| {
+                for (s, p) in sum.iter_mut().zip(frame) {
+                    *s += p;
+                }
+            };
+            add(&mut self.sung_in, &bands);
+            add(&mut self.sung_lay, &lay);
+            add(&mut self.sung_out, &out);
+            // The mix counts where it plays (over about -60 dBFS).
+            if side.iter().sum::<f64>() > MIX_FLOOR {
+                add(&mut self.sung_side, &side);
+                self.side_frames += 1;
             }
             self.sung_frames += 1;
             self.sung_levels[level_bin(level)] += 1;
@@ -618,7 +748,7 @@ impl Listener {
 
     /// What was measured, once enough singing was heard.
     #[must_use]
-    pub fn finish(&self) -> Option<Analysis> {
+    pub fn finish(&self, eq_db: &[f32; BANDS]) -> Option<Analysis> {
         if self.voiced_seconds() < MIN_VOICED_S {
             return None;
         }
@@ -672,12 +802,54 @@ impl Listener {
         // Silence: at least half a second between the phrases.
         let noise_db = (self.quiet_frames as f32 * self.frame_s() > 0.5)
             .then(|| percentile(&self.quiet_levels, 0.5));
+        let layers = db(&self.sung_lay);
+        // What the chain adds after the layers, the EQ aside: output
+        // against layers, less the EQ in force, less what the mids got
+        // (a gain is not a colour).
+        let output = db(&self.sung_out);
+        let top = layers.iter().copied().fold(f32::MIN, f32::max);
+        let mut colour = [0.0_f32; BANDS];
+        for (i, c) in colour.iter_mut().enumerate() {
+            *c = output[i] - layers[i] - eq_db[i];
+        }
+        let (mut mid, mut mids) = (0.0_f32, 0.0_f32);
+        for (i, c) in colour.iter().enumerate() {
+            if (MID.0..=MID.1).contains(&band_hz(i)) {
+                mid += c;
+                mids += 1.0;
+            }
+        }
+        let mid = mid / mids.max(1.0);
+        for (i, c) in colour.iter_mut().enumerate() {
+            // Nothing is said of bands the voice hardly reaches.
+            *c = if layers[i] > top - 50.0 {
+                (*c - mid).clamp(-6.0, 6.0)
+            } else {
+                0.0
+            };
+        }
+        let mix = if !self.side_free {
+            Mix::Taken
+        } else if self.side_frames * 2 < self.sung_frames {
+            Mix::Silent
+        } else {
+            let m = f64::from(self.side_frames);
+            let mut out = [-120.0_f32; BANDS];
+            for (o, p) in out.iter_mut().zip(&self.sung_side) {
+                #[allow(clippy::cast_possible_truncation)]
+                let v = (10.0 * (p / m).max(1e-12).log10()) as f32;
+                *o = v;
+            }
+            Mix::Heard(out)
+        };
         Some(Analysis {
             low_hz: note_at(0.05),
             median_hz: note_at(0.5),
             high_hz: note_at(0.95),
             input: db(&self.sung_in),
-            layers: db(&self.sung_lay),
+            layers,
+            colour,
+            mix,
             sibilance,
             loud_db,
             soft_db,
@@ -885,8 +1057,10 @@ fn plan(a: &Analysis, style: Style, amounts: Amounts) -> Plan {
             reduction,
         )
     });
-    let mud = correction(r.mud, a.balance(MUD), amount, r.reach);
-    let presence = correction(r.presence, a.balance(PRESENCE), amount, r.reach);
+    // A crowded mix moves the targets: more presence, leaner low mids.
+    let (lift, lean) = a.unmask().unwrap_or((0.0, 0.0));
+    let mud = correction(r.mud - lean, a.balance(MUD), amount, r.reach);
+    let presence = correction(r.presence + lift, a.balance(PRESENCE), amount, r.reach);
     let air = correction(r.air, a.balance(AIR), amount, r.reach);
     let resonance = a
         .resonance()
@@ -1106,18 +1280,16 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<
         (Some(_), None) => "Sibilants under control.".to_owned(),
         (None, _) => "No sibilants heard.".to_owned(),
     });
-    let spread = a.loud_db - a.soft_db;
-    out.push(match p.comp {
-        Some((_, ratio, _, red)) => {
-            format!("{spread:.0} dB soft to loud: {ratio:.0}:1, about {red:.0} dB of reduction.",)
-        }
-        None => format!("{spread:.0} dB soft to loud: no compression."),
-    });
-    out.push(match (a.noise_db, p.gate) {
-        (Some(n), Some(g)) => format!("Noise at {n:.0} dB between phrases: gate at {g:.0} dB."),
-        (Some(n), None) => format!("Quiet between phrases ({n:.0} dB): no gate."),
-        (None, _) => "No pause heard: gate left off.".to_owned(),
-    });
+    let comp = match p.comp {
+        Some((_, ratio, _, red)) => format!("Comp {ratio:.0}:1, about {red:.0} dB."),
+        None => "No compression.".to_owned(),
+    };
+    let gate = match (a.noise_db, p.gate) {
+        (Some(_), Some(g)) => format!("Gate at {g:.0} dB."),
+        (Some(_), None) => "Quiet pauses, no gate.".to_owned(),
+        (None, _) => "No pause heard, no gate.".to_owned(),
+    };
+    out.push(format!("{comp} {gate}"));
     let decay = reverb_times(&r, tempo).0;
     let bpm = if tempo > 20.0 {
         format!("{tempo:.0} BPM: r")
@@ -1131,6 +1303,20 @@ pub fn describe(a: &Analysis, style: Style, amount: Amounts, tempo: f32) -> Vec<
         ),
         Some((send, _)) => format!("{bpm}everb {decay:.1} s, no delay, lead send at {send:.0} %."),
         None => "Reverb and delay left as they are.".to_owned(),
+    });
+    out.push(match (a.mix, a.unmask()) {
+        (Mix::Taken, _) => "Mix: side-chain in use, not heard.".to_owned(),
+        (Mix::Silent, _) | (_, None) => "Mix: nothing on the side-chain.".to_owned(),
+        (_, Some((lift, lean))) if lift > 0.0 && lean > 0.0 => {
+            format!("Mix dense: presence +{lift:.1} dB, low mids -{lean:.1} dB.")
+        }
+        (_, Some((lift, _))) if lift > 0.0 => {
+            format!("Mix dense at 3 kHz: presence +{lift:.1} dB.")
+        }
+        (_, Some((_, lean))) if lean > 0.0 => {
+            format!("Mix full in the low mids: voice -{lean:.1} dB there.")
+        }
+        _ => "Mix heard: it leaves room for the voice.".to_owned(),
     });
     out
 }
@@ -1183,7 +1369,15 @@ mod tests {
                 }
                 block.push(x);
             }
-            l.feed(&block, &block, if voiced { f0 } else { 0.0 });
+            l.feed(
+                &Heard {
+                    input: &block,
+                    layers: &block,
+                    output: &block,
+                    side: None,
+                },
+                if voiced { f0 } else { 0.0 },
+            );
         }
         l
     }
@@ -1191,7 +1385,7 @@ mod tests {
     #[test]
     fn hears_range_dynamics_sibilants_and_noise() {
         let a = sing(48_000.0, 146.8, -9.0, 12.0, 0.2, 0.001)
-            .finish()
+            .finish(&[0.0; BANDS])
             .expect("enough singing");
         assert!((a.median_hz - 146.8).abs() < 5.0, "{}", a.median_hz);
         assert_eq!(a.voice_type(), "Baritone");
@@ -1211,7 +1405,7 @@ mod tests {
     fn too_little_singing_gives_no_diagnosis() {
         assert!(
             sing(48_000.0, 220.0, -9.0, 1.5, 0.0, 0.0)
-                .finish()
+                .finish(&[0.0; BANDS])
                 .is_none()
         );
     }
@@ -1219,13 +1413,13 @@ mod tests {
     #[test]
     fn proposal_brightens_a_dull_voice_and_darkens_a_bright_one() {
         let dull = sing(48_000.0, 220.0, -12.0, 9.0, 0.05, 0.0)
-            .finish()
+            .finish(&[0.0; BANDS])
             .expect("analysis");
         let p = propose(&dull, Style::Pop, Amounts::all(1.0), 120.0);
         assert!(p.get(ParamId::EqHighShelfGain).expect("air") > 2.0);
         assert!(p.get(EQ_BELL_PARAMS[2][1]).expect("presence") > 1.0);
         let bright = sing(48_000.0, 220.0, -3.0, 9.0, 0.05, 0.0)
-            .finish()
+            .finish(&[0.0; BANDS])
             .expect("analysis");
         let q = propose(&bright, Style::Pop, Amounts::all(1.0), 120.0);
         assert!(q.get(ParamId::EqHighShelfGain).expect("air") < -2.0);
@@ -1239,7 +1433,7 @@ mod tests {
     #[test]
     fn amount_scales_and_zero_leaves_the_colour_alone() {
         let a = sing(48_000.0, 220.0, -12.0, 9.0, 0.3, 0.002)
-            .finish()
+            .finish(&[0.0; BANDS])
             .expect("analysis");
         let none = propose(&a, Style::Trap, Amounts::all(0.0), 120.0);
         assert!(none.get(ParamId::EqHighShelfGain).expect("air").abs() < 1e-9);
@@ -1299,5 +1493,56 @@ mod tests {
                 "{lines:?}"
             );
         }
+    }
+
+    #[test]
+    fn what_the_chain_adds_and_a_crowded_mix_move_the_eq() {
+        let plain = sing(48_000.0, 220.0, -9.0, 9.0, 0.05, 0.0)
+            .finish(&[0.0; BANDS])
+            .expect("analysis");
+        assert!(plain.colour.iter().all(|c| c.abs() < 0.01));
+        assert_eq!(plain.mix, Mix::Taken);
+        let air = |a: &Analysis| {
+            // A light amount, to stay within the EQ's reach.
+            propose(a, Style::Pop, Amounts::all(0.3), 120.0)
+                .get(ParamId::EqHighShelfGain)
+                .expect("air")
+        };
+        let pres = |a: &Analysis| {
+            propose(a, Style::Pop, Amounts::all(0.3), 120.0)
+                .get(EQ_BELL_PARAMS[2][1])
+                .expect("presence")
+        };
+        // The exciter and the reverb already add 4 dB of air: the EQ
+        // adds that much less.
+        let mut bright = plain;
+        for (i, c) in bright.colour.iter_mut().enumerate() {
+            if band_hz(i) >= 7000.0 {
+                *c = 4.0;
+            }
+        }
+        assert!(air(&bright) < air(&plain) - 0.9);
+        // A mix busy around 3 kHz: more presence for the voice. A mix
+        // that falls away up there: none.
+        let mix = |pres_db: f32| {
+            let mut a = plain;
+            a.mix = Mix::Heard(std::array::from_fn(|i| {
+                if (PRESENCE.0 * 0.9..=PRESENCE.1 * 1.1).contains(&band_hz(i)) {
+                    pres_db
+                } else {
+                    -20.0
+                }
+            }));
+            a
+        };
+        assert!(pres(&mix(-22.0)) > pres(&mix(-32.0)) + 0.4);
+        assert!((pres(&mix(-32.0)) - pres(&plain)).abs() < 1e-9);
+        let line = |a: &Analysis| describe(a, Style::Pop, Amounts::all(1.0), 120.0)[5].clone();
+        assert!(
+            line(&mix(-22.0)).contains("presence"),
+            "{}",
+            line(&mix(-22.0))
+        );
+        assert!(line(&plain).contains("in use"));
     }
 }

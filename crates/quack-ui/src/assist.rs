@@ -7,6 +7,12 @@
 //! Control and Space set how far the tone, the dynamics and the reverb
 //! and delay go towards the style.
 //!
+//! A second Listen, with the proposal playing, checks it at the output
+//! and corrects the EQ for what the exciter and the reverb add. When the
+//! side-chain is free (not the voice, not the vocoder's carrier), what
+//! comes by it is taken for the mix and the voice is shaped to cut
+//! through it.
+//!
 //! The listening runs here, on the UI thread, from the engine's
 //! analysis taps ([`quack_dsp::tap`]): nothing is added to the audio
 //! path, so no latency. The thinking is in [`quack_dsp::assist`].
@@ -14,9 +20,11 @@
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::assist::{
-    Amounts, Analysis, FULL_VOICED_S, Listener, MIN_VOICED_S, PARAMS, Style, describe, propose,
+    Amounts, Analysis, BANDS, FULL_VOICED_S, Heard, Listener, MIN_VOICED_S, PARAMS, Style,
+    describe, eq_in_force, propose,
 };
 use quack_dsp::tap::TAP_LEN;
+use quack_dsp::vocoder::Carrier;
 
 use crate::controls::{self, KNOB_TRAVEL};
 use crate::paint::{knob as paint_knob, knob_value, panel, rounded, text, well};
@@ -40,7 +48,7 @@ pub(crate) struct AssistUi {
     /// A listen in progress, and the tap position it has read up to.
     listener: Option<Listener>,
     seen: usize,
-    scratch: [Vec<f32>; 2],
+    scratch: [Vec<f32>; 4],
     /// Why the last listen gave nothing.
     note: &'static str,
     analysis: Option<Analysis>,
@@ -65,7 +73,7 @@ impl Default for AssistUi {
             amounts: [AMOUNT_DEFAULT; 3],
             listener: None,
             seen: 0,
-            scratch: [vec![0.0; TAP_LEN], vec![0.0; TAP_LEN]],
+            scratch: std::array::from_fn(|_| vec![0.0; TAP_LEN]),
             note: "",
             analysis: None,
             before: None,
@@ -103,9 +111,10 @@ impl AssistUi {
         }
     }
 
-    fn stop(&mut self) {
+    /// End the listen; `eq_db` is the EQ in force while it ran.
+    fn stop(&mut self, eq_db: &[f32; BANDS]) {
         if let Some(l) = self.listener.take() {
-            match l.finish() {
+            match l.finish(eq_db) {
                 Some(a) => {
                     self.analysis = Some(a);
                     self.played = None;
@@ -115,6 +124,17 @@ impl AssistUi {
             }
         }
     }
+}
+
+/// The output EQ as it is set now, dB per analysis band.
+fn eq_now(params: &dyn ParamAccess, view: &View) -> [f32; BANDS] {
+    #[allow(clippy::cast_possible_truncation)]
+    let sr = if view.sample_rate > 0.0 {
+        view.sample_rate as f32
+    } else {
+        48_000.0
+    };
+    eq_in_force(&|id| params.get_plain(id), sr)
 }
 
 fn snapshot(params: &dyn ParamAccess) -> Vec<(ParamId, f64)> {
@@ -140,12 +160,27 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
         let written = taps.input.written();
         let n = written.wrapping_sub(a.seen).min(TAP_LEN);
         a.seen = written;
-        let [x, y] = &mut a.scratch;
+        let [x, y, z, w] = &mut a.scratch;
         taps.input.read(&mut x[..n]);
         taps.layers.read(&mut y[..n]);
-        l.feed(&x[..n], &y[..n], view.pitch_hz);
+        taps.output.read(&mut z[..n]);
+        taps.side.read(&mut w[..n]);
+        // The side-chain is the mix unless it brings the voice or the
+        // vocoder's carrier.
+        let taken = params.get_plain(ParamId::VocoderSwap) >= 0.5
+            || (params.get_plain(ParamId::VocoderOn) >= 0.5
+                && Carrier::from_index(params.get_plain(ParamId::Carrier)) == Carrier::Sidechain);
+        l.feed(
+            &Heard {
+                input: &x[..n],
+                layers: &y[..n],
+                output: &z[..n],
+                side: (!taken).then_some(&w[..n]),
+            },
+            view.pitch_hz,
+        );
         if l.voiced_seconds() >= FULL_VOICED_S || l.seconds() >= LISTEN_MAX_S {
-            a.stop();
+            a.stop(&eq_now(params, view));
         }
     }
     a.hints.clear();
@@ -389,8 +424,13 @@ pub(crate) fn assistant_panel(
         );
         line(2, "settings. You hear them at once.", color::TEXT_DIM);
         line(3, "Compare with before, or Undo it all.", color::TEXT_DIM);
+        line(
+            4,
+            "Send the mix to the side-chain: it is heard too.",
+            color::TEXT_DIM,
+        );
         if !st.assist.note.is_empty() {
-            line(4, st.assist.note, color::METER_HOT);
+            line(5, st.assist.note, color::METER_HOT);
         }
     }
 
@@ -425,7 +465,7 @@ pub(crate) fn assistant_panel(
         accent,
     ) {
         if listening {
-            a.stop();
+            a.stop(&eq_now(params, view));
         } else if let Some(taps) = &st.eq.taps {
             let sr = if view.sample_rate > 0.0 {
                 view.sample_rate

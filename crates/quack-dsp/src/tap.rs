@@ -69,6 +69,12 @@ pub struct Taps {
     /// After the layers, just before the output EQ: the transformed
     /// sound, without what the EQ and the output dynamics do to it.
     pub layers: Arc<Tap>,
+    /// The processed sound as it leaves the effects (after the EQ, the
+    /// returns and the output dynamics, before the dry mix).
+    pub output: Arc<Tap>,
+    /// The side-chain input as it comes in: the mix, when it is not
+    /// used as the voice or the vocoder's carrier.
+    pub side: Arc<Tap>,
 }
 
 #[cfg(test)]
