@@ -48,6 +48,47 @@ fn main() {
         }
         return;
     }
+    if args[0] == "--key" {
+        // Key detection on a voice (and, as a third argument, a mix):
+        // Learn's result and when, then Auto's key every second.
+        let (sr, chans) = read_wav(&args[1]);
+        let mix = args.get(2).map(|p| read_wav(p).1);
+        for mode in [
+            quack_dsp::key::KeyDetect::Learn,
+            quack_dsp::key::KeyDetect::Auto,
+        ] {
+            let mut det = quack_dsp::pitch::Yin::new(f64::from(sr));
+            let mut kf = quack_dsp::key::KeyFinder::default();
+            kf.prepare(f64::from(sr));
+            kf.set_mode(mode);
+            let mut last = None;
+            for (i, x) in chans[0].iter().enumerate() {
+                det.push_sample(*x);
+                if let Some(m) = &mix {
+                    kf.mix(m[0].get(i).copied().unwrap_or(0.0));
+                }
+                kf.voice(quack_dsp::pitch::PitchDetector::estimate(&det));
+                if let Some(g) = kf.take_pending() {
+                    let r = kf.reading();
+                    println!(
+                        "{:?} {:.2}s: {}{} (sure {:.0} %)",
+                        mode,
+                        i as f64 / f64::from(sr),
+                        [
+                            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+                        ][usize::from(g.tonic)],
+                        if g.minor { " minor" } else { " major" },
+                        r.confidence * 100.0
+                    );
+                    last = Some(g);
+                }
+            }
+            if last.is_none() {
+                println!("{mode:?}: nothing sure, best {:?}", kf.reading());
+            }
+        }
+        return;
+    }
     if args[0] == "--demo" {
         let x = demo_singer(48_000.0);
         write_wav(&args[1], 48_000, &[x]);

@@ -84,6 +84,7 @@ fn editor_captures() {
             v.set(ParamId::Scale, 2.0);
             v.set(ParamId::NoteF, 0.0);
             v.set(ParamId::Source, 1.0);
+            v.set(ParamId::KeyDetect, 2.0);
         }
         // A factory preset of the mode loaded, its macros half up, one
         // parameter learned.
@@ -177,6 +178,10 @@ fn editor_captures() {
             },
             midi_out_notes: if mode == 1.0 { 1 << 57 } else { 0 },
             link: [false; 2],
+            key: (mode == 1.0).then_some((9, true)),
+            key_confidence: 0.86,
+            key_progress: 1.0,
+            key_mix: mode == 1.0,
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);

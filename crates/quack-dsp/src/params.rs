@@ -302,9 +302,10 @@ pub enum ParamId {
     EqBell3Dyn,
     Whisper,
     WhisperTone,
+    KeyDetect,
 }
 
-pub const PARAM_COUNT: usize = 198;
+pub const PARAM_COUNT: usize = 199;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -2398,6 +2399,16 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "key_detect",
+        host_id: 321,
+        name: "Key Detect",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: crate::key::KeyDetect::COUNT,
+            default: 0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -2600,6 +2611,7 @@ impl ParamId {
         Self::EqBell3Dyn,
         Self::Whisper,
         Self::WhisperTone,
+        Self::KeyDetect,
     ];
 
     #[must_use]

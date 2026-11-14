@@ -281,6 +281,7 @@ impl QuackDsp {
                     for (x, y) in a.iter().zip(b.iter()) {
                         taps.link.push(0.5 * (x + y));
                     }
+                    self.engine.key_mix(a, b);
                 }
             }
             // A Link's carrier takes the side-chain's place.
@@ -445,6 +446,17 @@ impl PluginLogic for Quackapella {
         if total > 0 {
             params.shared.publish_link(state.linked[0], state.linked[1]);
         }
+        // Key detection: the key found goes to Key and Scale (as MIDI
+        // learn moves parameters); Learn then switches itself off.
+        if let Some((key, scale, learned)) = state.engine.take_key() {
+            set_plain(params, ParamId::Key, f64::from(key));
+            #[allow(clippy::cast_precision_loss)]
+            set_plain(params, ParamId::Scale, scale as usize as f64);
+            if learned {
+                set_plain(params, ParamId::KeyDetect, 0.0);
+            }
+        }
+        params.shared.publish_key(state.engine.key_reading());
         state.update_midi_out(&params.engine_values(), peak, total);
         #[allow(clippy::cast_possible_truncation)]
         let at = total.saturating_sub(1) as u32;

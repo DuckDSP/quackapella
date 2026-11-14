@@ -35,6 +35,7 @@ use quack_dsp::creative::{GlitchMode, GlitchRate, glitch_step};
 use quack_dsp::harmony::{
     HarmonyMode, interval_degree, interval_quality, interval_semitones, interval_short,
 };
+use quack_dsp::key::KeyDetect;
 use quack_dsp::latency::VoiceRange;
 use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::vocoder::{Carrier, VocoderMode, bands_from_index};
@@ -107,6 +108,12 @@ pub struct View {
     pub midi_out_notes: u128,
     /// A Quackapella Link sends the mix, the carrier (in that order).
     pub link: [bool; 2],
+    /// Key detection: the key heard (tonic, minor), how clearly (0-1),
+    /// how far Learn is (0-1), and whether a mix is heard too.
+    pub key: Option<(u8, bool)>,
+    pub key_confidence: f32,
+    pub key_progress: f32,
+    pub key_mix: bool,
 }
 
 /// Seconds of pitch history in the graph.
@@ -2111,6 +2118,62 @@ fn fx_panel(
     }
 }
 
+/// Where the key detection is, on the hint line of the Tune panel.
+fn key_detect_hint(
+    p: &egui::Painter,
+    view: &View,
+    detect: KeyDetect,
+    at: egui::Pos2,
+    max_w: f32,
+    accent: Color32,
+) {
+    let name = |(tonic, minor): (u8, bool)| {
+        let n = note_name(tonic + 60);
+        format!(
+            "{} {}",
+            n.trim_end_matches(char::is_numeric),
+            if minor { "minor" } else { "major" }
+        )
+    };
+    let heard = if view.key_mix { "voice + mix" } else { "voice" };
+    let (main, rest) = match (detect, view.key) {
+        (KeyDetect::Learn, Some(k)) if view.key_confidence >= 0.4 => (
+            format!("Learning the key  {:.0} %", view.key_progress * 100.0),
+            format!("  ·  {} so far  ·  {heard}", name(k)),
+        ),
+        (KeyDetect::Learn, _) => (
+            format!("Learning the key  {:.0} %", view.key_progress * 100.0),
+            format!("  ·  sing or play a few phrases  ·  {heard}"),
+        ),
+        (_, Some(k)) => (
+            format!("Auto  {}", name(k)),
+            format!("  ·  sure {:.0} %  ·  {heard}", view.key_confidence * 100.0),
+        ),
+        (_, None) => (
+            "Auto  listening".to_owned(),
+            format!("  ·  sets the key as the song goes  ·  {heard}"),
+        ),
+    };
+    let h1 = paint::text_fit(
+        p,
+        at,
+        Align2::LEFT_CENTER,
+        &main,
+        size::CAPTION,
+        accent,
+        max_w,
+    );
+    paint::text_fit(
+        p,
+        pos2(h1.right(), at.y),
+        Align2::LEFT_CENTER,
+        &rest,
+        size::CAPTION,
+        color::TEXT_FAINT,
+        (max_w - h1.width()).max(0.0),
+    );
+}
+
 fn held_class(held: u128, class: u8) -> bool {
     (0..128u8).any(|n| n % 12 == class && held & (1u128 << n) != 0)
 }
@@ -2189,10 +2252,38 @@ fn tune_panel(
     let scale_notes = scale_mask(key, scale);
     let edited =
         (0..12).any(|pc| scale_notes & (1 << pc) != 0 && params.get_plain(NOTE_PARAMS[pc]) < 0.5);
+    // Reset, then the key detection: Learn (once) and Auto.
+    let pill_w = (scale_r.width() - 2.0 * space::S) / 3.0;
     let reset_r = Rect::from_min_size(
         pos2(scale_r.left(), scale_r.bottom() + space::S),
-        vec2(scale_r.width(), 26.0),
+        vec2(pill_w, 26.0),
     );
+    let detect = KeyDetect::from_index(params.get_plain(ParamId::KeyDetect));
+    for (i, (mode, label)) in [(KeyDetect::Learn, "Learn"), (KeyDetect::Auto, "Auto")]
+        .into_iter()
+        .enumerate()
+    {
+        #[allow(clippy::cast_precision_loss)]
+        let x = reset_r.right() + space::S + (pill_w + space::S) * i as f32;
+        let pr = Rect::from_min_size(pos2(x, reset_r.top()), reset_r.size());
+        let resp = ui.interact(pr, ui.id().with(("quack-key-detect", i)), Sense::click());
+        if resp.clicked() {
+            // A second click stops it.
+            let to = if detect == mode { KeyDetect::Off } else { mode };
+            #[allow(clippy::cast_precision_loss)]
+            set_once(params, ParamId::KeyDetect, to as usize as f64);
+        }
+        let on = detect == mode;
+        paint::pill(p, pr, label, on, resp.hovered(), accent);
+        if on && mode == KeyDetect::Learn {
+            // Learn's progress fills its pill.
+            let fill = Rect::from_min_size(
+                pr.left_top(),
+                vec2(pr.width() * view.key_progress.clamp(0.0, 1.0), pr.height()),
+            );
+            p.rect_filled(fill, 5.0, accent.gamma_multiply(0.25));
+        }
+    }
     let resp = ui.interact(
         reset_r,
         ui.id().with("quack-reset-notes"),
@@ -2205,14 +2296,7 @@ fn tune_panel(
             }
         }
     }
-    paint::pill(
-        p,
-        reset_r,
-        "Reset notes",
-        false,
-        resp.hovered() && edited,
-        accent,
-    );
+    paint::pill(p, reset_r, "Reset", false, resp.hovered() && edited, accent);
     if !edited {
         p.rect_filled(reset_r, 5.0, color::PANEL.gamma_multiply(0.6));
     }
@@ -2235,26 +2319,37 @@ fn tune_panel(
         p.rect_filled(veil, 6.0, color::PANEL.gamma_multiply(alpha));
     }
     let hy = notes_r.bottom() + 16.0;
-    let h1 = text(
-        p,
-        pos2(key_r.left() + 2.0, hy),
-        Align2::LEFT_CENTER,
-        hint,
-        size::CAPTION,
-        if source == Source::Scale {
-            color::TEXT_FAINT
-        } else {
-            accent
-        },
-    );
-    text(
-        p,
-        pos2(h1.right(), hy),
-        Align2::LEFT_CENTER,
-        hint2,
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
+    if detect != KeyDetect::Off {
+        key_detect_hint(
+            p,
+            view,
+            detect,
+            pos2(key_r.left() + 2.0, hy),
+            key_r.width(),
+            accent,
+        );
+    } else {
+        let h1 = text(
+            p,
+            pos2(key_r.left() + 2.0, hy),
+            Align2::LEFT_CENTER,
+            hint,
+            size::CAPTION,
+            if source == Source::Scale {
+                color::TEXT_FAINT
+            } else {
+                accent
+            },
+        );
+        text(
+            p,
+            pos2(h1.right(), hy),
+            Align2::LEFT_CENTER,
+            hint2,
+            size::CAPTION,
+            color::TEXT_FAINT,
+        );
+    }
     if st.scale_menu {
         let names: Vec<&str> = Scale::ALL.iter().map(|s| s.name()).collect();
         st.scale_menu = controls::choice_menu(ui, params, ParamId::Scale, scale_r, &names, accent);
@@ -2677,6 +2772,7 @@ mod tests {
                 eq_dyn_db: [0.0; 3],
                 midi_out_notes: 0,
                 link: [false; 2],
+                ..View::default()
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));
