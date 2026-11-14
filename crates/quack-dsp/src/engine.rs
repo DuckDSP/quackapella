@@ -658,7 +658,9 @@ impl Engine {
             | ParamId::SnapshotKeys
             | ParamId::MidiOut
             | ParamId::MidiOutChannel
-            | ParamId::MidiOutSource => return,
+            | ParamId::MidiOutSource
+            // The Link channel picks the wire, in the adapter.
+            | ParamId::LinkChannel => return,
             _ => {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();

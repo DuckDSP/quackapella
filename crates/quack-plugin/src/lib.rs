@@ -20,7 +20,7 @@ use quack_dsp::ParamId;
 use quack_dsp::midiout::{MidiBuf, OutSource, Reading, Tracker};
 use quack_dsp::params::ParamValues;
 use quack_dsp::snapshot::{Glide, SnapshotKeys, in_snapshot, morph_value};
-use quack_link::{Channel, Receiver, Role};
+use quack_link::{Channel, LINKS, Receiver, Role};
 use truce::prelude::*;
 use truce_core::events::EventBody;
 
@@ -55,8 +55,10 @@ pub struct QuackDsp {
     sc_right: Box<[f32; SCRATCH_FRAMES]>,
     /// What Quackapella Link sends from other tracks: the mix and the
     /// carrier (`None`: the system gave no shared memory).
-    link_mix: Option<Receiver>,
-    link_carrier: Option<Receiver>,
+    link_mix: [Option<Receiver>; LINKS],
+    link_carrier: [Option<Receiver>; LINKS],
+    /// The Link channel listened to (parameter Link Channel).
+    link: usize,
     /// Whether each was received in the last block.
     linked: [bool; 2],
     sample_rate: f64,
@@ -88,8 +90,9 @@ impl Default for QuackDsp {
             right: Box::new([0.0; SCRATCH_FRAMES]),
             sc_left: Box::new([0.0; SCRATCH_FRAMES]),
             sc_right: Box::new([0.0; SCRATCH_FRAMES]),
-            link_mix: None,
-            link_carrier: None,
+            link_mix: Default::default(),
+            link_carrier: Default::default(),
+            link: 0,
             linked: [false; 2],
             sample_rate: 48_000.0,
             morph: Morph::default(),
@@ -274,7 +277,7 @@ impl QuackDsp {
                 r.copy_from_slice(l);
             }
             // The mix a Link sends goes to its tap, for the assistant.
-            if let Some(rx) = &mut self.link_mix {
+            if let Some(rx) = &mut self.link_mix[self.link] {
                 let (a, b) = (&mut self.sc_left[..n], &mut self.sc_right[..n]);
                 self.linked[0] = rx.receive(a, b);
                 if self.linked[0] {
@@ -286,8 +289,7 @@ impl QuackDsp {
             }
             // A Link's carrier takes the side-chain's place.
             let (a, b) = (&mut self.sc_left[..n], &mut self.sc_right[..n]);
-            self.linked[1] = self
-                .link_carrier
+            self.linked[1] = self.link_carrier[self.link]
                 .as_mut()
                 .is_some_and(|rx| rx.receive(a, b));
             let side = if self.linked[1] {
@@ -372,9 +374,11 @@ impl PluginLogic for Quackapella {
         state.midi_on = false;
         state.morph = Morph::default();
         state.vport.start();
-        let rx = |role| Channel::open(role).map(|ch| Receiver::new(ch, config.sample_rate));
-        state.link_mix = rx(Role::Mix);
-        state.link_carrier = rx(Role::Carrier);
+        let rx = |role, link| {
+            Channel::open_on(role, link).map(|ch| Receiver::new(ch, config.sample_rate))
+        };
+        state.link_mix = std::array::from_fn(|i| rx(Role::Mix, i));
+        state.link_carrier = std::array::from_fn(|i| rx(Role::Carrier, i));
         state.linked = [false; 2];
         params.shared.publish_link(false, false);
         #[allow(clippy::cast_possible_truncation)]
@@ -424,6 +428,10 @@ impl PluginLogic for Quackapella {
                 }
             }
             return ProcessStatus::Normal;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            state.link = (target.get(ParamId::LinkChannel).round() as usize).min(LINKS - 1);
         }
         let peak = buffer.input(0)[..total]
             .iter()

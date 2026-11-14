@@ -1593,6 +1593,27 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
         size::LABEL,
         color::TUNE,
     );
+    // Quackapella Link channel: the Links set on the same letter.
+    let ab = Rect::from_min_size(
+        pos2(gl_r.right() - space::L - 64.0, title_y - 13.0),
+        vec2(64.0, 26.0),
+    );
+    text(
+        p,
+        pos2(ab.left() - space::S, title_y),
+        Align2::RIGHT_CENTER,
+        "Link",
+        size::CAPTION,
+        color::TEXT_DIM,
+    );
+    controls::segmented(
+        ui,
+        params,
+        ParamId::LinkChannel,
+        ab,
+        &["A", "B"],
+        &[color::TUNE],
+    );
     let gain = |v: f64| format!("{v:+.0}");
     let pct = |v: f64| format!("{v:.0}");
     #[allow(clippy::type_complexity)]

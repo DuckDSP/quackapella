@@ -303,9 +303,10 @@ pub enum ParamId {
     Whisper,
     WhisperTone,
     KeyDetect,
+    LinkChannel,
 }
 
-pub const PARAM_COUNT: usize = 199;
+pub const PARAM_COUNT: usize = 200;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -2409,6 +2410,16 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0,
         },
     },
+    ParamSpec {
+        key: "link_channel",
+        host_id: 1400,
+        name: "Link Channel",
+        unit: "",
+        kind: ParamKind::Enum {
+            count: 2,
+            default: 0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -2612,6 +2623,7 @@ impl ParamId {
         Self::Whisper,
         Self::WhisperTone,
         Self::KeyDetect,
+        Self::LinkChannel,
     ];
 
     #[must_use]
