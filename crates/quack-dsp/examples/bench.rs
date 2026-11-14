@@ -120,6 +120,7 @@ const CASES: &[Case] = &[
             ("vocoder_gate", -70.0),
             ("ensemble", 60.0),
             ("carrier_sub", 40.0),
+            ("whisper", 50.0),
         ],
         notes: &[48, 55, 60, 64, 67, 71, 74, 79],
     },

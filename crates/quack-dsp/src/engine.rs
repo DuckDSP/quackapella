@@ -508,7 +508,9 @@ impl Engine {
             | ParamId::VocoderTilt
             | ParamId::VocoderGate
             | ParamId::Ensemble
-            | ParamId::CarrierSub => {
+            | ParamId::CarrierSub
+            | ParamId::Whisper
+            | ParamId::WhisperTone => {
                 self.update_vocoder(snap);
                 return;
             }
@@ -1038,6 +1040,8 @@ impl Engine {
         s.gate_db = v.get(ParamId::VocoderGate);
         s.ensemble = pct(ParamId::Ensemble);
         s.sub = pct(ParamId::CarrierSub);
+        s.whisper = pct(ParamId::Whisper);
+        s.whisper_tone_db = v.get(ParamId::WhisperTone);
         // Inputs swapped: the voice comes by the side-chain, the track
         // (a synth) is the carrier.
         let swap = v.get(ParamId::VocoderSwap) >= 0.5;

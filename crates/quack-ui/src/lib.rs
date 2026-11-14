@@ -1378,6 +1378,7 @@ fn vocoder_panel(
     let vocoder_only = mode != VocoderMode::Talkbox;
     let pitched = !matches!(carrier, Carrier::Noise | Carrier::Sidechain);
     let synth = carrier != Carrier::Sidechain;
+    let whispered = params.get_plain(ParamId::Whisper) > 0.5;
     // Tabs: the voice and the effects, or the carrier synth; the inputs
     // swap on the right (the voice by the side-chain, like the EVOC).
     let tab_y = car_r.bottom() + space::S + 26.0 + space::S;
@@ -1408,9 +1409,10 @@ fn vocoder_panel(
         (ParamId::VocoderTilt, "Tilt", &db_fmt, true),
         (ParamId::VocoderGate, "Gate", &gate_fmt, true),
     ];
-    let voice_row2: [Knob; 5] = [
+    let voice_row2: [Knob; 6] = [
         (ParamId::Sibilance, "Sibilance", &off, true),
         (ParamId::Consonants, "Consonants", &off, true),
+        (ParamId::Whisper, "Whisper", &off, true),
         (ParamId::VocoderWidth, "Width", &off, true),
         (ParamId::Ensemble, "Ensemble", &off, true),
         (ParamId::VocoderLofi, "Lo-Fi", &off, true),
@@ -1423,7 +1425,10 @@ fn vocoder_panel(
         (ParamId::CarrierGlide, "Glide", &off, pitched),
         (ParamId::CarrierRelease, "Release", &ms, synth),
     ];
-    let carrier_row2: [Knob; 1] = [(ParamId::BendRange, "Bend", &st_fmt, pitched)];
+    let carrier_row2: [Knob; 2] = [
+        (ParamId::WhisperTone, "Whisper Tone", &db_fmt, whispered),
+        (ParamId::BendRange, "Bend", &st_fmt, pitched),
+    ];
     let kw = (r.width() - 2.0 * space::L) / 6.0;
     let y1 = tab_y + 24.0 + 12.0 + knob_d / 2.0;
     let y2 = r.bottom() - 58.0;

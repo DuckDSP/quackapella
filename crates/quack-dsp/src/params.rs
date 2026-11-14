@@ -300,9 +300,11 @@ pub enum ParamId {
     EqBell1Dyn,
     EqBell2Dyn,
     EqBell3Dyn,
+    Whisper,
+    WhisperTone,
 }
 
-pub const PARAM_COUNT: usize = 196;
+pub const PARAM_COUNT: usize = 198;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -2374,6 +2376,28 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0.0,
         },
     },
+    ParamSpec {
+        key: "whisper",
+        host_id: 1007,
+        name: "Whisper",
+        unit: "%",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "whisper_tone",
+        host_id: 1008,
+        name: "Whisper Tone",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: -12.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -2574,6 +2598,8 @@ impl ParamId {
         Self::EqBell1Dyn,
         Self::EqBell2Dyn,
         Self::EqBell3Dyn,
+        Self::Whisper,
+        Self::WhisperTone,
     ];
 
     #[must_use]
