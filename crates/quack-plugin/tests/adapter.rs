@@ -67,6 +67,7 @@ fn run(
 #[test]
 fn reported_latency_is_the_real_one() {
     for sr in [44_100.0, 48_000.0, 96_000.0] {
+        quack_link::keep_private();
         let params = QuackParams::default();
         let mut dsp = QuackDsp::default();
         Quackapella::reset(&mut dsp, &params, &AudioConfig::new(sr, 512));
@@ -90,6 +91,7 @@ fn reported_latency_is_the_real_one() {
 
 #[test]
 fn voice_range_moves_the_reported_latency() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
@@ -123,6 +125,7 @@ fn voice_range_moves_the_reported_latency() {
 
 #[test]
 fn midi_notes_reach_the_engine() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
@@ -163,6 +166,7 @@ fn midi_notes_reach_the_engine() {
 
 #[test]
 fn detected_pitch_reaches_the_editor() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
@@ -181,6 +185,7 @@ fn detected_pitch_reaches_the_editor() {
 #[cfg(feature = "rt-paranoid")]
 #[test]
 fn process_does_not_allocate() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 4096));
@@ -210,6 +215,7 @@ fn process_does_not_allocate() {
 
 #[test]
 fn learned_cc_and_program_change_move_the_parameters() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
@@ -269,6 +275,7 @@ fn control_state_is_saved_with_the_session() {
 
 #[test]
 fn macros_reach_the_engine_values() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     params.control.set_depth(0, ParamId::Pitch, 25);
     params.set_plain(ParamId::Macro1.spec().host_id, 100.0);
@@ -306,6 +313,7 @@ fn set(params: &QuackParams, id: ParamId, v: f64) {
 
 #[test]
 fn morph_writes_the_parameters_between_the_snapshots() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
@@ -334,6 +342,7 @@ fn morph_writes_the_parameters_between_the_snapshots() {
 
 #[test]
 fn snapshot_keys_glide_and_go_no_further() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
@@ -387,6 +396,7 @@ fn snapshot_keys_glide_and_go_no_further() {
 
 #[test]
 fn midi_out_plays_the_sung_note() {
+    quack_link::keep_private();
     let params = QuackParams::default();
     let mut dsp = QuackDsp::default();
     Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 64));
@@ -451,6 +461,7 @@ fn midi_out_plays_the_sung_note() {
 fn midi_out_onset_per_voice_range() {
     for (i, range) in VoiceRange::ALL.iter().enumerate() {
         for low in [false, true] {
+            quack_link::keep_private();
             let params = QuackParams::default();
             let mut dsp = QuackDsp::default();
             params.voice.set_index(i as u32);
@@ -486,4 +497,32 @@ fn midi_out_onset_per_voice_range() {
             assert!(ms < 25.0);
         }
     }
+}
+
+/// What a Quackapella Link sends as the mix reaches the assistant's
+/// tap. (Only the mix here: these tests run side by side and share the
+/// machine's channels; a carrier would land in the others' side-chain.)
+#[test]
+fn a_linked_mix_reaches_its_tap() {
+    use quack_link::{Channel, Role, Sender};
+    quack_link::keep_private();
+    let params = QuackParams::default();
+    let mut dsp = QuackDsp::default();
+    Quackapella::reset(&mut dsp, &params, &AudioConfig::new(SR, 512));
+    let x = vec![0.0f32; 64];
+    run(&mut dsp, &params, &x, &EventList::default());
+    assert_eq!(params.shared.view().link, [false, false]);
+
+    let mut tx = Sender::new(Channel::open(Role::Mix).expect("channel"), 77, SR);
+    let tone: Vec<f32> = (0..64).map(|i| (i as f32 * 0.3).sin() * 0.4).collect();
+    for _ in 0..80 {
+        tx.send(&tone, &tone, 1.0);
+        run(&mut dsp, &params, &x, &EventList::default());
+    }
+    assert_eq!(params.shared.view().link, [true, false]);
+    let mut heard = vec![0.0f32; 1024];
+    params.shared.taps.link.read(&mut heard);
+    let peak = heard.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+    assert!((peak - 0.4).abs() < 0.02, "{peak}");
+    assert!(tx.listened(64));
 }

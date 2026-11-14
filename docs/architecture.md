@@ -450,6 +450,13 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   Quand le style ou une dose bouge ensuite, l'éditeur affiche
   « Changed: check again » et le bouton Check, allumé, refait la seule
   vérification (4 s de chant) sans refaire le diagnostic de la voix.
+- **Effets** (`is_effect` : reverb, delay, sends des couches) : Listen
+  demande d'abord s'il peut les régler (« Keep mine » ou « Set the
+  effects », la dernière réponse est allumée). Ensuite seul ce qui a
+  bougé est écrit : Clarity, Control et un Check ne touchent jamais aux
+  effets, Space et le tempo ne touchent qu'à eux, un nouveau style
+  écrit tout. Avec « Keep mine », Space affiche « Kept » ; le tourner
+  revient à demander les effets.
 - **Tessiture** : `Analysis::bands` déplace les zones mesurées et les
   fréquences de l'EQ avec la médiane chantée, autour d'un ténor de
   référence (185 Hz : 300 Hz, 3,5 kHz, 9 kHz). Les bas-médiums suivent
@@ -473,6 +480,63 @@ d'analyse et le pitch détecté. Aucune latence ajoutée.
   Compare bascule entre avant et après, Undo remet tout ; elle reste
   alors affichée en points blancs sur les boutons et Apply la rejoue.
   Un réglage fait à la main n'est pas écrasé.
+
+### Bandes dynamiques de l'EQ de sortie
+
+Chaque cloche de l'EQ de sortie a un réglage **Dyn Cut** (0 à 12 dB,
+ids 1317 à 1319, 0 par défaut : rien ne change pour les presets
+existants). La bande n'est creusée que lorsqu'elle enfle au-dessus de
+sa part habituelle du son (une note qui gonfle dans le bas, une voyelle
+dure), et laissée telle quelle le reste du temps.
+
+- Pas de seuil à régler : le détecteur compare la bande au signal
+  entier, puis ce rapport à sa propre moyenne sur 1,5 s. La coupe suit
+  la voix quel que soit son niveau. Marge de 1 dB, pente 1,5, attaque
+  5 ms, relâchement 90 ms.
+- La coupe vaut `entrée − profondeur · bande` (filtre à variable d'état
+  alimenté par l'entrée) : exacte au centre, stable à toute profondeur,
+  **aucune latence** (pas d'anticipation). À 0 la bande ne coûte rien.
+- Sur le graphe, une tige sous la poignée montre jusqu'où la coupe peut
+  aller, et un trait épais ce qu'elle retire à l'instant.
+- L'assistant mesure, pendant l'écoute, de combien chaque zone (bas
+  médiums, médiums, présence) dépasse sa part habituelle sur ses
+  moments forts. Au-delà de 3 dB il règle le Dyn Cut de la cloche
+  concernée (6 dB au plus, dosé par Clarity) et le dit (« uneven lows »,
+  « uneven highs »).
+
+## Quackapella Link (plugin compagnon)
+
+Un second plugin (`crates/quack-link-plugin`, AU `aufx` `Qklk`, sans
+MIDI) à poser sur une autre piste : il laisse passer l'audio sans y
+toucher (latence nulle) et en envoie une copie à Quackapella. Logic ne
+donne pas de menu Side Chain à un `aumf` en insert d'une piste audio,
+et le side-chain ne porte qu'une source : Link règle les deux.
+
+- **Rôles** (paramètre `Send As`) : `Mix`, le reste du morceau pour
+  l'assistant ; `Carrier`, la porteuse du vocodeur (ou la voix avec
+  Voice from Side-chain). Un seul émetteur par rôle : le second affiche
+  « Another Link already sends… » et prend la place une demi-seconde
+  après l'arrêt du premier. `Send Level` (-24 à +12 dB) ne règle que la
+  copie envoyée.
+- **Le fil** (`crates/quack-link`) : une région de mémoire partagée par
+  rôle (`shm_open`, à défaut un fichier du dossier temporaire), parce
+  que deux plugins sont deux bibliothèques et que certains hôtes les
+  isolent dans deux processus. Un en-tête d'atomiques (émetteur,
+  battement, compteur d'écriture, fréquence d'échantillonnage) et un
+  anneau de 16 384 trames stéréo. Les deux bouts sont sans attente ;
+  rien n'est ouvert ni alloué hors de `reset`.
+- **Réception** (`quack-plugin`) : la porteuse reçue prend la place du
+  side-chain de l'hôte (le moteur ne voit pas la différence) ; le mix
+  reçu va dans la prise `Taps::link`, que l'assistant préfère au
+  side-chain. Une fréquence d'échantillonnage différente n'est pas
+  reçue.
+- **Retard du son relié** : le récepteur lit en retrait du plus grand
+  bloc de l'émetteur plus deux des siens (96 échantillons à 32, soit
+  2 ms), pour qu'un hôte qui rend l'autre piste par gros blocs ne le
+  laisse jamais à court. Ce retard ne touche que le son relié : la voix
+  n'attend jamais le fil, et la latence déclarée ne change pas.
+- **Éditeur** (`quack_ui::link`) : rôle, niveau, vu-mètre de ce qui
+  part, et l'état du lien en bas (reçu, personne n'écoute, rôle pris).
 
 ## Modes
 

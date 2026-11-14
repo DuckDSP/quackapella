@@ -21,7 +21,7 @@ use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::assist::{
     Amounts, Analysis, BANDS, FULL_VOICED_S, Heard, Listener, MIN_VOICED_S, PARAMS, Style,
-    describe, eq_in_force, propose,
+    describe, eq_in_force, is_effect, propose,
 };
 use quack_dsp::tap::TAP_LEN;
 use quack_dsp::vocoder::Carrier;
@@ -77,6 +77,33 @@ pub(crate) struct AssistUi {
     /// Style and amounts the output was last checked with: once they
     /// move, the check is stale and Check asks for another.
     checked_with: Option<(Style, [f32; 3])>,
+    /// The user let this listen set the effects (reverb, delay, sends):
+    /// asked before each one, `asking` while the question is up.
+    effects: bool,
+    asking: bool,
+    /// What the next proposal may write (after a check: not the
+    /// effects).
+    scope: Scope,
+}
+
+/// Which of the proposed values are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    All,
+    /// Everything but the effects.
+    Rest,
+    /// The effects only.
+    Effects,
+}
+
+impl Scope {
+    fn takes(self, id: ParamId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Rest => !is_effect(id),
+            Self::Effects => is_effect(id),
+        }
+    }
 }
 
 impl Default for AssistUi {
@@ -100,6 +127,9 @@ impl Default for AssistUi {
             amount_drag: None,
             played: None,
             checked_with: None,
+            effects: true,
+            asking: false,
+            scope: Scope::All,
         }
     }
 }
@@ -121,12 +151,20 @@ impl AssistUi {
         self.checked_with = Some((style, self.amounts));
     }
 
+    /// Put the question a listen starts with (captures and tests),
+    /// as answered `effects` the last time.
+    pub fn ask(&mut self, effects: bool) {
+        self.asking = true;
+        self.effects = effects;
+    }
+
     fn amounts(&self) -> Amounts {
         let [clarity, control, space] = self.amounts;
         Amounts {
             clarity,
             control,
-            space,
+            // At 0 the proposal leaves the effects out.
+            space: if self.effects { space } else { 0.0 },
         }
     }
 
@@ -174,6 +212,8 @@ impl AssistUi {
                 };
                 self.analysis = Some(a);
                 self.played = None;
+                // What the user set on the effects since stays.
+                self.scope = Scope::Rest;
             }
             // Not enough singing for the check: the first diagnosis
             // stands.
@@ -181,6 +221,7 @@ impl AssistUi {
             (Some(a), false) => {
                 self.analysis = Some(a);
                 self.played = None;
+                self.scope = Scope::All;
                 self.note = "";
                 self.verdict.clear();
                 self.checked_with = None;
@@ -274,12 +315,21 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
         taps.input.read(&mut x[..n]);
         taps.layers.read(&mut y[..n]);
         taps.output.read(&mut z[..n]);
-        taps.side.read(&mut w[..n]);
-        // The side-chain is the mix unless it brings the voice or the
+        // The mix comes from Quackapella Link when one sends it, else
+        // from the side-chain unless that brings the voice or the
         // vocoder's carrier.
-        let taken = params.get_plain(ParamId::VocoderSwap) >= 0.5
-            || (params.get_plain(ParamId::VocoderOn) >= 0.5
-                && Carrier::from_index(params.get_plain(ParamId::Carrier)) == Carrier::Sidechain);
+        let linked = taps.linked.load(std::sync::atomic::Ordering::Relaxed);
+        if linked {
+            taps.link.read(&mut w[..n]);
+        } else {
+            taps.side.read(&mut w[..n]);
+        }
+        let taken = !linked
+            && (view.link[1]
+                || params.get_plain(ParamId::VocoderSwap) >= 0.5
+                || (params.get_plain(ParamId::VocoderOn) >= 0.5
+                    && Carrier::from_index(params.get_plain(ParamId::Carrier))
+                        == Carrier::Sidechain));
         l.feed(
             &Heard {
                 input: &x[..n],
@@ -309,12 +359,39 @@ pub(crate) fn tick(params: &dyn ParamAccess, st: &mut UiState, view: &View) {
         // or Space is heard at once. What the user then sets by hand
         // is left alone (and the difference shown as dots).
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let key = (a.style, a.amounts, view.tempo.max(0.0).round() as u32);
+        let dose = a.amounts();
+        let key = (
+            a.style,
+            [dose.clarity, dose.control, dose.space],
+            view.tempo.max(0.0).round() as u32,
+        );
         if a.played != Some(key) {
             if a.before.is_none() {
                 a.before = Some(snapshot(params));
             }
-            set_all(params, &changes);
+            // Only what moved is written: Clarity and Control leave the
+            // effects as the user set them, Space and the tempo leave
+            // the rest. A new style or a new listen writes it all.
+            let scope = match a.played {
+                None => a.scope,
+                Some((style, _, _)) if style != key.0 => Scope::All,
+                Some((_, was, tempo)) => {
+                    let effects = was[2] != key.1[2] || tempo != key.2;
+                    let rest = was[0] != key.1[0] || was[1] != key.1[1];
+                    match (effects, rest) {
+                        (true, false) => Scope::Effects,
+                        (false, true) => Scope::Rest,
+                        _ => Scope::All,
+                    }
+                }
+            };
+            let write: Vec<(ParamId, f64)> = changes
+                .iter()
+                .copied()
+                .filter(|(id, _)| scope.takes(*id))
+                .collect();
+            set_all(params, &write);
+            a.scope = Scope::All;
             a.played = Some(key);
         }
         for (id, v) in changes {
@@ -393,30 +470,50 @@ fn amount_knob(ui: &egui::Ui, st: &mut UiState, which: usize, centre: egui::Pos2
         };
         let moved = (now.x - origin.x) - (now.y - origin.y);
         a.amounts[which] = (from + moved / KNOB_TRAVEL * fine).clamp(0.0, 1.0);
+        // Turning Space is asking for the effects.
+        a.effects |= which == 2;
     }
     if resp.drag_stopped() && a.amount_drag.is_some_and(|(w, _)| w == which) {
         a.amount_drag = None;
     }
     if resp.double_clicked() {
         a.amounts[which] = AMOUNT_DEFAULT;
+        a.effects |= which == 2;
     } else if resp.hovered() && a.amount_drag.is_none() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             a.amounts[which] = (a.amounts[which] + 0.01 * scroll.signum()).clamp(0.0, 1.0);
+            a.effects |= which == 2;
         }
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
     let p = ui.painter();
-    paint_knob(p, centre, SIZE, a.amounts[which], accent);
-    knob_value(
+    // Space at rest while the effects are the user's own.
+    let kept = which == 2 && !a.effects;
+    paint_knob(
         p,
-        area,
-        &format!("{:.0}", a.amounts[which] * 100.0),
-        "%",
-        size::VALUE,
+        centre,
+        SIZE,
+        a.amounts[which],
+        if kept {
+            accent.gamma_multiply(0.35)
+        } else {
+            accent
+        },
     );
+    if kept {
+        knob_value(p, area, "Kept", "", size::VALUE);
+    } else {
+        knob_value(
+            p,
+            area,
+            &format!("{:.0}", a.amounts[which] * 100.0),
+            "%",
+            size::VALUE,
+        );
+    }
     text(
         p,
         centre + vec2(0.0, SIZE * 0.5 + 12.0),
@@ -510,7 +607,53 @@ pub(crate) fn assistant_panel(
             box_r.width() - 2.0 * space::M,
         );
     };
-    if let Some(l) = &st.assist.listener {
+    if st.assist.asking {
+        line(0, "Should this listen set the effects too?", color::TEXT);
+        line(
+            1,
+            "Reverb, delay and the layers' sends. Keep mine",
+            color::TEXT_DIM,
+        );
+        line(2, "leaves them exactly as they are.", color::TEXT_DIM);
+        let bw = (box_r.width() - 3.0 * space::M) / 2.0;
+        let slot = |i: f32| {
+            Rect::from_min_size(
+                pos2(
+                    box_r.left() + space::M + (bw + space::M) * i,
+                    box_r.bottom() - 28.0 - space::M,
+                ),
+                vec2(bw, 28.0),
+            )
+        };
+        // The last answer is the lit one.
+        let was = st.assist.effects;
+        let mut answer = None;
+        if button(ui, "fx-keep", slot(0.0), "Keep mine", true, !was, accent) {
+            answer = Some(false);
+        }
+        if button(
+            ui,
+            "fx-set",
+            slot(1.0),
+            "Set the effects",
+            true,
+            was,
+            accent,
+        ) {
+            answer = Some(true);
+        }
+        if let (Some(effects), Some(taps)) = (answer, &st.eq.taps) {
+            let a = &mut st.assist;
+            a.effects = effects;
+            a.asking = false;
+            a.listener = Some(Listener::new(view.sample_rate.max(8000.0)));
+            a.seen = taps.input.written();
+            a.note = "";
+            a.checking = false;
+            a.check_from = None;
+            a.verdict.clear();
+        }
+    } else if let Some(l) = &st.assist.listener {
         let wanted = st.assist.wanted();
         if st.assist.checking {
             line(0, "Checking the result at the output.", color::TEXT);
@@ -566,7 +709,7 @@ pub(crate) fn assistant_panel(
         line(3, "Compare with before, or Undo it all.", color::TEXT_DIM);
         line(
             4,
-            "Send the mix to the side-chain: it is heard too.",
+            "Quackapella Link on the mix: it is heard too.",
             color::TEXT_DIM,
         );
         if !st.assist.note.is_empty() {
@@ -597,33 +740,33 @@ pub(crate) fn assistant_panel(
         ui,
         "listen",
         top(0),
-        if listening { "Stop" } else { "Listen" },
+        if listening {
+            "Stop"
+        } else if a.asking {
+            "Cancel"
+        } else {
+            "Listen"
+        },
         has_taps,
-        listening,
+        listening || a.asking,
         accent,
     ) {
-        if listening {
+        if a.asking {
+            a.asking = false;
+        } else if listening {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let settle = (view.sample_rate.max(8000.0) * SETTLE_S) as usize;
             let deessing = params.get_plain(ParamId::OutDeEss) >= 1.0;
             a.stop(&eq_now(params, view), view.tempo, settle, deessing);
-        } else if let Some(taps) = &st.eq.taps {
-            let sr = if view.sample_rate > 0.0 {
-                view.sample_rate
-            } else {
-                48_000.0
-            };
-            a.listener = Some(Listener::new(sr));
-            a.seen = taps.input.written();
-            a.note = "";
-            a.checking = false;
+        } else {
+            // First the question: the effects too, or not?
+            a.asking = true;
             a.check_from = None;
-            a.verdict.clear();
         }
     }
     // Another check at the output: lit when the style or an amount
     // moved since the last one, or when it was skipped.
-    let can_check = has_taps && !listening && !a.comparing && a.analysis.is_some();
+    let can_check = has_taps && !listening && !a.asking && !a.comparing && a.analysis.is_some();
     let due = can_check && (a.stale() || a.analysis.as_ref().is_some_and(|an| !an.checked));
     if button(ui, "check", top(1), "Check", can_check, due, accent)
         && let Some(taps) = &st.eq.taps
@@ -631,7 +774,7 @@ pub(crate) fn assistant_panel(
         a.check_from = Some(taps.input.written());
         a.verdict.clear();
     }
-    let can_apply = !listening && !a.comparing && !a.hints.is_empty();
+    let can_apply = !listening && !a.asking && !a.comparing && !a.hints.is_empty();
     if button(ui, "apply", top(2), "Apply", can_apply, false, accent) {
         if a.before.is_none() {
             a.before = Some(snapshot(params));
@@ -639,7 +782,7 @@ pub(crate) fn assistant_panel(
         set_all(params, &a.hints);
         a.hints.clear();
     }
-    let applied = a.before.is_some() && !listening;
+    let applied = a.before.is_some() && !listening && !a.asking;
     if button(
         ui,
         "compare",

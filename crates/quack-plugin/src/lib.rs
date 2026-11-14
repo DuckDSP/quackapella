@@ -8,6 +8,9 @@
 //! - drive the snapshot morph (it writes parameters) and send the
 //!   MIDI output (host port, and a virtual source on macOS).
 //!
+//! - receive what a Quackapella Link sends from another track: the
+//!   carrier takes the side-chain's place, the mix goes to its tap.
+//!
 //! No DSP and no smoothing here: both belong to `quack-dsp`.
 
 use std::sync::Arc;
@@ -17,6 +20,7 @@ use quack_dsp::ParamId;
 use quack_dsp::midiout::{MidiBuf, OutSource, Reading, Tracker};
 use quack_dsp::params::ParamValues;
 use quack_dsp::snapshot::{Glide, SnapshotKeys, in_snapshot, morph_value};
+use quack_link::{Channel, Receiver, Role};
 use truce::prelude::*;
 use truce_core::events::EventBody;
 
@@ -49,6 +53,12 @@ pub struct QuackDsp {
     /// Side-chain input (the vocoder's external carrier).
     sc_left: Box<[f32; SCRATCH_FRAMES]>,
     sc_right: Box<[f32; SCRATCH_FRAMES]>,
+    /// What Quackapella Link sends from other tracks: the mix and the
+    /// carrier (`None`: the system gave no shared memory).
+    link_mix: Option<Receiver>,
+    link_carrier: Option<Receiver>,
+    /// Whether each was received in the last block.
+    linked: [bool; 2],
     sample_rate: f64,
     morph: Morph,
     tracker: Tracker,
@@ -78,6 +88,9 @@ impl Default for QuackDsp {
             right: Box::new([0.0; SCRATCH_FRAMES]),
             sc_left: Box::new([0.0; SCRATCH_FRAMES]),
             sc_right: Box::new([0.0; SCRATCH_FRAMES]),
+            link_mix: None,
+            link_carrier: None,
+            linked: [false; 2],
             sample_rate: 48_000.0,
             morph: Morph::default(),
             tracker: Tracker::default(),
@@ -239,7 +252,13 @@ impl QuackDsp {
     /// the scratch (mono in feeds both sides). The main input has as
     /// many channels as the output; input channels past them are the
     /// side-chain.
-    fn run(&mut self, buffer: &mut AudioBuffer, offset: usize, frames: usize) {
+    fn run(
+        &mut self,
+        buffer: &mut AudioBuffer,
+        offset: usize,
+        frames: usize,
+        taps: &quack_dsp::tap::Taps,
+    ) {
         let (ins, outs) = (buffer.num_input_channels(), buffer.num_output_channels());
         let main = outs.min(ins);
         let sc = ins - main;
@@ -254,8 +273,25 @@ impl QuackDsp {
             } else {
                 r.copy_from_slice(l);
             }
-            let side = if sc > 0 {
+            // The mix a Link sends goes to its tap, for the assistant.
+            if let Some(rx) = &mut self.link_mix {
                 let (a, b) = (&mut self.sc_left[..n], &mut self.sc_right[..n]);
+                self.linked[0] = rx.receive(a, b);
+                if self.linked[0] {
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        taps.link.push(0.5 * (x + y));
+                    }
+                }
+            }
+            // A Link's carrier takes the side-chain's place.
+            let (a, b) = (&mut self.sc_left[..n], &mut self.sc_right[..n]);
+            self.linked[1] = self
+                .link_carrier
+                .as_mut()
+                .is_some_and(|rx| rx.receive(a, b));
+            let side = if self.linked[1] {
+                Some((&a[..], &b[..]))
+            } else if sc > 0 {
                 a.copy_from_slice(&buffer.input(main)[at..at + n]);
                 if sc > 1 {
                     b.copy_from_slice(&buffer.input(main + 1)[at..at + n]);
@@ -335,6 +371,11 @@ impl PluginLogic for Quackapella {
         state.midi_on = false;
         state.morph = Morph::default();
         state.vport.start();
+        let rx = |role| Channel::open(role).map(|ch| Receiver::new(ch, config.sample_rate));
+        state.link_mix = rx(Role::Mix);
+        state.link_carrier = rx(Role::Carrier);
+        state.linked = [false; 2];
+        params.shared.publish_link(false, false);
         #[allow(clippy::cast_possible_truncation)]
         params
             .shared
@@ -391,7 +432,7 @@ impl PluginLogic for Quackapella {
         for e in events.iter() {
             let at = (e.sample_offset as usize).min(total);
             if at > pos {
-                state.run(buffer, pos, at - pos);
+                state.run(buffer, pos, at - pos, &params.shared.taps);
                 pos = at;
             }
             if state.handle(&e.body, params) {
@@ -399,7 +440,10 @@ impl PluginLogic for Quackapella {
             }
         }
         if pos < total {
-            state.run(buffer, pos, total - pos);
+            state.run(buffer, pos, total - pos, &params.shared.taps);
+        }
+        if total > 0 {
+            params.shared.publish_link(state.linked[0], state.linked[1]);
         }
         state.update_midi_out(&params.engine_values(), peak, total);
         #[allow(clippy::cast_possible_truncation)]
@@ -432,6 +476,9 @@ impl PluginLogic for Quackapella {
         params
             .shared
             .publish_output_reduction(state.engine.output_reduction_db());
+        params
+            .shared
+            .publish_eq_dynamic(state.engine.eq_dynamic_cut_db());
         ProcessStatus::Normal
     }
 

@@ -9,7 +9,7 @@
 //! Nothing here is on the signal path: no latency.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 /// Samples kept by a tap (a power of two).
 pub const TAP_LEN: usize = 4096;
@@ -75,6 +75,11 @@ pub struct Taps {
     /// The side-chain input as it comes in: the mix, when it is not
     /// used as the voice or the vocoder's carrier.
     pub side: Arc<Tap>,
+    /// The mix as Quackapella Link sends it from another track (the
+    /// adapter writes it, the engine never sees it), and whether a
+    /// Link is sending it now.
+    pub link: Arc<Tap>,
+    pub linked: Arc<AtomicBool>,
 }
 
 #[cfg(test)]

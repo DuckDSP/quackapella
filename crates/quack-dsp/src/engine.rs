@@ -612,7 +612,10 @@ impl Engine {
             | ParamId::EqHighShelfFreq
             | ParamId::EqHighShelfGain
             | ParamId::ExciterAmount
-            | ParamId::ExciterFreq => {
+            | ParamId::ExciterFreq
+            | ParamId::EqBell1Dyn
+            | ParamId::EqBell2Dyn
+            | ParamId::EqBell3Dyn => {
                 self.update_fx(snap);
                 return;
             }
@@ -700,6 +703,7 @@ impl Engine {
                 low_shelf_hz: f(ParamId::EqLowShelfFreq),
                 low_shelf_db: f(ParamId::EqLowShelfGain),
                 bells: crate::params::EQ_BELL_PARAMS.map(bell),
+                dynamic: crate::params::EQ_DYN_PARAMS.map(f),
                 high_shelf_hz: f(ParamId::EqHighShelfFreq),
                 high_shelf_db: f(ParamId::EqHighShelfGain),
             },
@@ -833,6 +837,13 @@ impl Engine {
     #[must_use]
     pub fn output_reduction_db(&self) -> (f32, f32) {
         self.output.reduction_db()
+    }
+
+    /// What each bell of the output EQ cuts dynamically right now, dB
+    /// (≥ 0).
+    #[must_use]
+    pub fn eq_dynamic_cut_db(&self) -> [f32; crate::fx::EQ_BELLS] {
+        self.eq.dynamic_cut_db()
     }
 
     /// Whether the Creative layer is on.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the macOS installer: one .pkg with AU v2, VST3 and CLAP
+# Build the macOS installer: one .pkg with Quackapella and Quackapella
+# Link (the `[[suite]]` of truce.toml), each in AU v2, VST3 and CLAP
 # (universal arm64 + x86_64), via `cargo truce package`.
 #
 #   scripts/package-macos.sh          # signed + notarized when possible
@@ -14,8 +15,8 @@
 # gitignored .cargo/config.toml [env]) override the detection. Without
 # a Developer ID the bundles are signed ad hoc and the .pkg is unsigned:
 # fine on this Mac, but Gatekeeper blocks it on any other one.
-# Output: target/dist/<crate>-<version>-macos.pkg, copied into dist/ as
-# Quackapella-<version>-macos.pkg.
+# Output: target/dist/quackapella-suite-<version>-macos.pkg, copied into
+# dist/ as Quackapella-<version>-macos.pkg.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -46,7 +47,7 @@ else
 fi
 [[ $check_only -eq 1 ]] && exit 0
 
-args=(package -p quack-plugin --formats au2,vst3,clap)
+args=(package --suite Quackapella --no-per-plugin --formats au2,vst3,clap)
 [[ -n "$app_id" ]] && export TRUCE_SIGNING_IDENTITY="$app_id"
 [[ -n "$inst_id" ]] && export TRUCE_INSTALLER_SIGNING_IDENTITY="$inst_id"
 export TRUCE_NOTARY_PROFILE="$profile"
@@ -55,9 +56,9 @@ export TRUCE_NOTARY_PROFILE="$profile"
 cargo truce "${args[@]}"
 
 mkdir -p dist
-for src in target/dist/quack-plugin-*.pkg; do
+for src in target/dist/quackapella-suite-*.pkg; do
     [[ -e "$src" ]] || continue
-    pkg="dist/$(basename "$src" | sed 's/^quack-plugin-/Quackapella-/')"
+    pkg="dist/$(basename "$src" | sed 's/^quackapella-suite-/Quackapella-/')"
     cp "$src" "$pkg"
     echo "== $pkg"
     pkgutil --check-signature "$pkg" || true

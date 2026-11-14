@@ -33,9 +33,14 @@ pub struct Shared {
     deess_db: AtomicU32,
     out_comp_db: AtomicU32,
     out_deess_db: AtomicU32,
+    /// What each bell of the output EQ cuts dynamically (f32 dB bits).
+    eq_dyn_db: [AtomicU32; 3],
     /// Notes the MIDI output plays.
     midi_out_lo: AtomicU64,
     midi_out_hi: AtomicU64,
+    /// A Quackapella Link sends the mix, the carrier.
+    link_mix: AtomicBool,
+    link_carrier: AtomicBool,
     /// Analysis taps the engine writes and the editor's spectrum reads.
     pub taps: quack_dsp::tap::Taps,
 }
@@ -92,11 +97,23 @@ impl Shared {
         self.out_deess_db.store(deess.to_bits(), Ordering::Relaxed);
     }
 
+    pub fn publish_eq_dynamic(&self, cut: [f32; 3]) {
+        for (slot, db) in self.eq_dyn_db.iter().zip(cut) {
+            slot.store(db.to_bits(), Ordering::Relaxed);
+        }
+    }
+
     pub fn publish_midi_out(&self, mask: u128) {
         #[allow(clippy::cast_possible_truncation)]
         self.midi_out_lo.store(mask as u64, Ordering::Relaxed);
         self.midi_out_hi
             .store((mask >> 64) as u64, Ordering::Relaxed);
+    }
+
+    pub fn publish_link(&self, mix: bool, carrier: bool) {
+        self.link_mix.store(mix, Ordering::Relaxed);
+        self.link_carrier.store(carrier, Ordering::Relaxed);
+        self.taps.linked.store(mix, Ordering::Relaxed);
     }
 
     pub fn publish_frozen(&self, frozen: bool) {
@@ -138,8 +155,15 @@ impl Shared {
             deess_db: f32::from_bits(self.deess_db.load(Ordering::Relaxed)),
             out_comp_db: f32::from_bits(self.out_comp_db.load(Ordering::Relaxed)),
             out_deess_db: f32::from_bits(self.out_deess_db.load(Ordering::Relaxed)),
+            eq_dyn_db: std::array::from_fn(|i| {
+                f32::from_bits(self.eq_dyn_db[i].load(Ordering::Relaxed))
+            }),
             midi_out_notes: u128::from(self.midi_out_lo.load(Ordering::Relaxed))
                 | (u128::from(self.midi_out_hi.load(Ordering::Relaxed)) << 64),
+            link: [
+                self.link_mix.load(Ordering::Relaxed),
+                self.link_carrier.load(Ordering::Relaxed),
+            ],
         }
     }
 }

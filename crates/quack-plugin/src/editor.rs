@@ -60,17 +60,19 @@ pub fn build(params: Arc<QuackParams>) -> Box<dyn Editor> {
         ctx: None,
     };
     session.st.set_taps(shared.taps.clone());
-    let mut themed = false;
     // Zoom applied to egui and the window (percent).
     let mut zoom_applied: Option<u16> = None;
     // Time of the last resize request: until the window follows (or
     // 1.5 s pass), its size is not read back as a zoom.
     let mut resize_pending: Option<f64> = None;
     EguiEditor::new(params, (BASE_W, BASE_H), move |ui, ctx| {
-        if !std::mem::replace(&mut themed, true) {
-            quack_ui::theme::apply(ui.ctx(), truce_font::JETBRAINS_MONO);
-            // Fonts apply on the next frame, and the titles use a named
-            // family egui's defaults lack: skip drawing this one.
+        // A context without the theme: the first frame, the window
+        // reopened, or a new graphics device. Fonts apply on the next
+        // frame, and the titles use a named family egui's defaults
+        // lack: skip drawing this one. The zoom is the context's too.
+        if quack_ui::theme::ensure(ui.ctx(), truce_font::JETBRAINS_MONO) {
+            zoom_applied = None;
+            resize_pending = None;
             ui.ctx().request_repaint();
             return;
         }

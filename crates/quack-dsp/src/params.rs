@@ -297,9 +297,12 @@ pub enum ParamId {
     EqHighShelfGain,
     ExciterAmount,
     ExciterFreq,
+    EqBell1Dyn,
+    EqBell2Dyn,
+    EqBell3Dyn,
 }
 
-pub const PARAM_COUNT: usize = 193;
+pub const PARAM_COUNT: usize = 196;
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -326,6 +329,13 @@ pub const EQ_BELL_PARAMS: [[ParamId; 3]; 3] = [
         ParamId::EqBell3Gain,
         ParamId::EqBell3Q,
     ],
+];
+
+/// The bells' dynamic cut, dB (0: the bell is static).
+pub const EQ_DYN_PARAMS: [ParamId; 3] = [
+    ParamId::EqBell1Dyn,
+    ParamId::EqBell2Dyn,
+    ParamId::EqBell3Dyn,
 ];
 
 /// The four macro knobs (see [`crate::control`]).
@@ -2331,6 +2341,39 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 3500.0,
         },
     },
+    ParamSpec {
+        key: "eq_bell_1_dyn",
+        host_id: 1317,
+        name: "EQ Bell 1 Dyn",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_2_dyn",
+        host_id: 1318,
+        name: "EQ Bell 2 Dyn",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
+    ParamSpec {
+        key: "eq_bell_3_dyn",
+        host_id: 1319,
+        name: "EQ Bell 3 Dyn",
+        unit: "dB",
+        kind: ParamKind::Float {
+            min: 0.0,
+            max: 12.0,
+            default: 0.0,
+        },
+    },
 ];
 
 impl ParamId {
@@ -2528,6 +2571,9 @@ impl ParamId {
         Self::EqHighShelfGain,
         Self::ExciterAmount,
         Self::ExciterFreq,
+        Self::EqBell1Dyn,
+        Self::EqBell2Dyn,
+        Self::EqBell3Dyn,
     ];
 
     #[must_use]

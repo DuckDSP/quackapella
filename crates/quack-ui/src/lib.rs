@@ -23,6 +23,7 @@ mod brand;
 mod controls;
 mod eq;
 pub mod library;
+pub mod link;
 mod paint;
 pub mod perform;
 pub mod theme;
@@ -100,8 +101,12 @@ pub struct View {
     /// The same, for the output dynamics.
     pub out_comp_db: f32,
     pub out_deess_db: f32,
+    /// What each bell of the output EQ cuts dynamically, dB (≥ 0).
+    pub eq_dyn_db: [f32; 3],
     /// Notes the MIDI output plays, bit n = note n.
     pub midi_out_notes: u128,
+    /// A Quackapella Link sends the mix, the carrier (in that order).
+    pub link: [bool; 2],
 }
 
 /// Seconds of pitch history in the graph.
@@ -1321,7 +1326,9 @@ fn vocoder_panel(
     let carrier = if swapped { Carrier::Sidechain } else { carrier };
     let status = match (mode, carrier) {
         _ if !layer => "Off".to_owned(),
+        _ if swapped && view.link[1] => "Voice: Link · Carrier: track".to_owned(),
         _ if swapped => "Voice: side-chain · Carrier: track".to_owned(),
+        (_, Carrier::Sidechain) if view.link[1] => "Quackapella Link".to_owned(),
         (_, Carrier::Sidechain) => "Side-chain".to_owned(),
         _ if !playing.is_empty() && view.held_notes == 0 && follow => {
             format!("Follow · {shown}{more}")
@@ -1685,6 +1692,11 @@ impl UiState {
     }
 
     /// The engine's analysis taps, for the EQ graph's spectrum.
+    /// Show this band of the output EQ on the EQ tab's knobs.
+    pub fn select_eq_band(&mut self, band: usize) {
+        self.eq.band = band;
+    }
+
     pub fn set_taps(&mut self, taps: quack_dsp::tap::Taps) {
         self.eq.taps = Some(taps);
     }
@@ -1697,6 +1709,11 @@ impl UiState {
         tempo: u32,
     ) {
         self.assist.show(analysis, style, tempo);
+    }
+
+    /// The assistant's question before a listen (captures and tests).
+    pub fn ask_assistant(&mut self, effects: bool) {
+        self.assist.ask(effects);
     }
 }
 
@@ -2652,7 +2669,9 @@ mod tests {
                 deess_db: -1.0,
                 out_comp_db: 0.0,
                 out_deess_db: 0.0,
+                eq_dyn_db: [0.0; 3],
                 midi_out_notes: 0,
+                link: [false; 2],
             };
             for _ in 0..2 {
                 let _ = ctx.run_ui(input(), |ui| draw(ui, &params, &view, &mut st));

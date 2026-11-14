@@ -205,6 +205,25 @@ pub fn apply(ctx: &egui::Context, mono: &'static [u8]) {
     });
 }
 
+/// Apply the theme to `ctx` unless it already has it. `true` when it
+/// was just applied: the fonts are bound from the next frame on, so the
+/// caller draws nothing this one.
+///
+/// The host can hand the editor a new context at any time (the window
+/// reopened, the graphics device lost) while the editor's own state
+/// lives on: the theme has to be tied to the context, not to that
+/// state. Drawing a title on a context without the fonts panics (its
+/// family is not bound) and leaves the window black.
+pub fn ensure(ctx: &egui::Context, mono: &'static [u8]) -> bool {
+    let id = egui::Id::new("quack-themed");
+    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        return false;
+    }
+    apply(ctx, mono);
+    ctx.data_mut(|d| d.insert_temp(id, true));
+    true
+}
+
 /// WCAG 2 contrast ratio between two opaque colours (1 to 21).
 #[must_use]
 pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {

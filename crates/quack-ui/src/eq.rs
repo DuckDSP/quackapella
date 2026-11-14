@@ -10,7 +10,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::assist::fft;
 use quack_dsp::fx::{EQ_BANDS, EqCurve, EqSettings, LOW_CUT_OFF_HZ};
-use quack_dsp::params::EQ_BELL_PARAMS;
+use quack_dsp::params::{EQ_BELL_PARAMS, EQ_DYN_PARAMS};
 use quack_dsp::tap::Taps;
 
 use crate::controls;
@@ -42,6 +42,8 @@ pub(crate) struct Band {
     pub freq: ParamId,
     pub gain: Option<ParamId>,
     pub q: Option<ParamId>,
+    /// The bell's dynamic cut, and which bell it is.
+    pub dynamic: Option<(ParamId, usize)>,
 }
 
 pub(crate) const BANDS: [Band; EQ_BANDS] = [
@@ -50,12 +52,14 @@ pub(crate) const BANDS: [Band; EQ_BANDS] = [
         freq: ParamId::EqLowCut,
         gain: None,
         q: None,
+        dynamic: None,
     },
     Band {
         name: "Low",
         freq: ParamId::EqLowShelfFreq,
         gain: Some(ParamId::EqLowShelfGain),
         q: None,
+        dynamic: None,
     },
     bell(0),
     bell(1),
@@ -65,6 +69,7 @@ pub(crate) const BANDS: [Band; EQ_BANDS] = [
         freq: ParamId::EqHighShelfFreq,
         gain: Some(ParamId::EqHighShelfGain),
         q: None,
+        dynamic: None,
     },
 ];
 
@@ -74,6 +79,7 @@ const fn bell(i: usize) -> Band {
         freq: EQ_BELL_PARAMS[i][0],
         gain: Some(EQ_BELL_PARAMS[i][1]),
         q: Some(EQ_BELL_PARAMS[i][2]),
+        dynamic: Some((EQ_DYN_PARAMS[i], i)),
     }
 }
 
@@ -87,6 +93,7 @@ pub(crate) fn settings(params: &dyn ParamAccess) -> EqSettings {
         low_shelf_hz: f(ParamId::EqLowShelfFreq),
         low_shelf_db: f(ParamId::EqLowShelfGain),
         bells: EQ_BELL_PARAMS.map(|ids| (f(ids[0]), f(ids[1]), f(ids[2]))),
+        dynamic: EQ_DYN_PARAMS.map(f),
         high_shelf_hz: f(ParamId::EqHighShelfFreq),
         high_shelf_db: f(ParamId::EqHighShelfGain),
     }
@@ -506,7 +513,31 @@ pub(crate) fn graph_panel(
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         let lit = i == sel;
-        let flat = b.gain.map_or(low_cut_off(hz), |_| gain.abs() < 0.01);
+        // The dynamic cut: a stem down to how far it may go, and over
+        // it what it takes off right now.
+        #[allow(clippy::cast_possible_truncation)]
+        let range = b.dynamic.map_or(0.0, |(id, _)| params.get_plain(id) as f32);
+        if on && range > 0.0 {
+            let now = b
+                .dynamic
+                .map_or(0.0, |(_, k)| view.eq_dyn_db[k].clamp(0.0, range));
+            let end = pos2(at.x, y_of(gain - range));
+            let soft = accent.gamma_multiply(0.45);
+            // From under the handle, so its number stays clear.
+            let from = pos2(at.x, (at.y + HANDLE_R).min(end.y));
+            clip.line_segment([from, end], Stroke::new(1.5_f32, soft));
+            clip.line_segment(
+                [pos2(end.x - 5.0, end.y), pos2(end.x + 5.0, end.y)],
+                Stroke::new(1.5_f32, soft),
+            );
+            if now > 0.05 {
+                clip.line_segment(
+                    [from, pos2(at.x, y_of(gain - now).max(from.y))],
+                    Stroke::new(4.0_f32, accent),
+                );
+            }
+        }
+        let flat = b.gain.map_or(low_cut_off(hz), |_| gain.abs() < 0.01) && range <= 0.0;
         let ring = if !on {
             color::TEXT_FAINT
         } else if lit || !flat {
@@ -535,8 +566,8 @@ pub(crate) fn graph_panel(
     }
 }
 
-/// The EQ tab: which band the knobs show, its frequency, gain and
-/// width, then the exciter.
+/// The EQ tab: which band the knobs show, its frequency, gain, width
+/// and dynamic cut, then the exciter.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tab(
     ui: &egui::Ui,
@@ -579,7 +610,14 @@ pub(crate) fn tab(
             format!("{v:.0}")
         }
     };
-    let kw = inner_w / 5.0;
+    let dynamic = |v: f64| {
+        if v < 0.25 {
+            "Off".to_owned()
+        } else {
+            format!("-{v:.1}")
+        }
+    };
+    let kw = inner_w / 6.0;
     #[allow(clippy::cast_precision_loss)]
     let slot = |i: usize| pos2(r.left() + space::L + kw * (i as f32 + 0.5), y2);
     let knob = |ui: &egui::Ui,
@@ -616,8 +654,11 @@ pub(crate) fn tab(
         let flat = b.gain.is_some_and(|g| params.get_plain(g).abs() < 0.01);
         knob(ui, st, id, 2, "Q", &q, if flat { dim } else { live }, true);
     }
+    if let Some((id, _)) = b.dynamic {
+        knob(ui, st, id, 3, "Dyn Cut", &dynamic, live, false);
+    }
     // The exciter, apart on the right.
-    let x = r.left() + space::L + kw * 3.0;
+    let x = r.left() + space::L + kw * 4.0;
     p.line_segment(
         [pos2(x, y2 - 34.0), pos2(x, y2 + 44.0)],
         Stroke::new(1.0_f32, color::BORDER),
@@ -627,7 +668,7 @@ pub(crate) fn tab(
         ui,
         st,
         ParamId::ExciterAmount,
-        3,
+        4,
         "Exciter",
         &off,
         live,
@@ -637,7 +678,7 @@ pub(crate) fn tab(
         ui,
         st,
         ParamId::ExciterFreq,
-        4,
+        5,
         "From",
         &hz,
         if exciting { live } else { dim },

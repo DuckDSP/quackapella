@@ -333,6 +333,7 @@ fn off_default(infos: &[clap_param_info]) -> Vec<(u32, f64)> {
 
 #[test]
 fn state_round_trip_restores_every_parameter() {
+    quack_link::keep_private();
     let a = Plugin::new();
     let infos = a.params();
     let wanted = off_default(&infos);
@@ -360,6 +361,7 @@ fn state_round_trip_restores_every_parameter() {
 
 #[test]
 fn percent_parameters_read_as_percent() {
+    quack_link::keep_private();
     let p = Plugin::new();
     assert_eq!(p.text(2, 100.0), "100%");
     assert_eq!(p.text(2, 37.0), "37%");
@@ -369,6 +371,7 @@ fn percent_parameters_read_as_percent() {
 /// save, reload into a fresh instance and read back.
 #[test]
 fn state_round_trip_after_process() {
+    quack_link::keep_private();
     let a = Plugin::new();
     let wanted = off_default(&a.params());
     a.activate();
@@ -409,6 +412,7 @@ fn state_round_trip_after_process() {
 /// request, and `latency.changed` only from inside `activate`.
 #[test]
 fn latency_change_while_active_goes_through_a_restart() {
+    quack_link::keep_private();
     let p = Plugin::new();
     p.activate();
     let before = p.latency();

@@ -117,6 +117,7 @@ fn editor_captures() {
             v.set(ParamId::EqBell1Freq, 280.0);
             v.set(ParamId::EqBell1Gain, -4.0);
             v.set(ParamId::EqBell1Q, 1.4);
+            v.set(ParamId::EqBell1Dyn, 6.0);
             v.set(ParamId::EqBell3Freq, 3500.0);
             v.set(ParamId::EqBell3Gain, 3.0);
             v.set(ParamId::EqHighShelfGain, 4.0);
@@ -159,6 +160,11 @@ fn editor_captures() {
             deess_db: if mode == 5.0 { -1.5 } else { 0.0 },
             out_comp_db: 0.0,
             out_deess_db: 0.0,
+            eq_dyn_db: if mode == 5.0 {
+                [3.5, 0.0, 0.0]
+            } else {
+                [0.0; 3]
+            },
             vocoder_notes: if mode == 4.0 {
                 (1 << 45) | (1 << 48) | (1 << 52)
             } else {
@@ -170,6 +176,7 @@ fn editor_captures() {
                 0
             },
             midi_out_notes: if mode == 1.0 { 1 << 57 } else { 0 },
+            link: [false; 2],
         };
         let ctx = egui::Context::default();
         theme::apply(&ctx, truce_font::JETBRAINS_MONO);
@@ -267,6 +274,8 @@ fn editor_captures() {
                     continue;
                 }
                 st.set_fx_tab(tab);
+                // The first bell, with its dynamic cut at work.
+                st.select_eq_band(2);
                 let ctx = egui::Context::default();
                 theme::apply(&ctx, truce_font::JETBRAINS_MONO);
                 #[allow(clippy::cast_precision_loss)]
@@ -302,6 +311,7 @@ fn editor_captures() {
             });
             st.show_assistant(
                 quack_dsp::assist::Analysis {
+                    swell: [4.5, 2.0, 2.5],
                     low_hz: 123.5,
                     median_hz: 185.0,
                     high_hz: 233.1,
@@ -320,8 +330,15 @@ fn editor_captures() {
                 quack_dsp::assist::Style::Pop,
                 96,
             );
-            for (tab, name) in [(FxTab::Input, "assistant"), (FxTab::Eq, "assistant-eq")] {
+            for (tab, name) in [
+                (FxTab::Input, "assistant"),
+                (FxTab::Eq, "assistant-eq"),
+                (FxTab::Reverb, "assistant-ask"),
+            ] {
                 st.set_fx_tab(tab);
+                if name == "assistant-ask" {
+                    st.ask_assistant(false);
+                }
                 let ctx = egui::Context::default();
                 theme::apply(&ctx, truce_font::JETBRAINS_MONO);
                 #[allow(clippy::cast_precision_loss)]

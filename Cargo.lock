@@ -1223,12 +1223,39 @@ name = "quack-dsp"
 version = "0.0.1"
 
 [[package]]
+name = "quack-link"
+version = "0.0.1"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "quack-link-plugin"
+version = "0.0.1"
+dependencies = [
+ "clap-sys",
+ "egui",
+ "quack-link",
+ "quack-ui",
+ "truce",
+ "truce-au",
+ "truce-clap",
+ "truce-core",
+ "truce-egui",
+ "truce-font",
+ "truce-params",
+ "truce-test",
+ "truce-vst3",
+]
+
+[[package]]
 name = "quack-plugin"
 version = "0.0.1"
 dependencies = [
  "clap-sys",
  "egui",
  "quack-dsp",
+ "quack-link",
  "quack-ui",
  "truce",
  "truce-au",
