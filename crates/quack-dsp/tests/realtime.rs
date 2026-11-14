@@ -131,6 +131,8 @@ fn heavy(mode: f64) -> ParamValues {
     set("vocoder_gate", -70.0);
     set("ensemble", 50.0);
     set("carrier_sub", 30.0);
+    set("whisper", 50.0);
+    set("whisper_tone", 4.0);
     set("fx_on", 1.0);
     set("gate", -60.0);
     set("deess", 50.0);

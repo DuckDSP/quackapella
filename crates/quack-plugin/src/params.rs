@@ -2052,6 +2052,28 @@ pub struct QuackParams {
     )]
     pub eq_bell_3_dyn: FloatParam,
 
+    /// Whispered layer of the vocoder (voice-shaped noise) and its tone.
+    #[param(
+        id = 1007,
+        name = "Whisper",
+        range = "linear(0, 200)",
+        default = 0.0,
+        unit = "%",
+        format = "fmt_percent",
+        smooth = "none"
+    )]
+    pub whisper: FloatParam,
+
+    #[param(
+        id = 1008,
+        name = "Whisper Tone",
+        range = "linear(-24, 24)",
+        default = 0.0,
+        unit = "dB",
+        smooth = "none"
+    )]
+    pub whisper_tone: FloatParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -2441,6 +2463,8 @@ impl QuackParams {
             (ParamId::EqBell1Dyn, &self.eq_bell_1_dyn),
             (ParamId::EqBell2Dyn, &self.eq_bell_2_dyn),
             (ParamId::EqBell3Dyn, &self.eq_bell_3_dyn),
+            (ParamId::Whisper, &self.whisper),
+            (ParamId::WhisperTone, &self.whisper_tone),
         ] {
             v.set(id, FloatParamReadF64::value(p));
         }

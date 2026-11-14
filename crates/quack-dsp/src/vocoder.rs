@@ -43,6 +43,19 @@
 //! to the internal carrier, and *Pulse* is a slowly modulated pulse
 //! wave (PWM). None of them adds latency.
 //!
+//! *Whisper* (ids 1007-1008) lays a whispered copy of the voice over
+//! the vocoder: white noise through the talkbox's all-pole filter (the
+//! voice's mouth, by linear prediction), in both modes (on the vocoder
+//! the band bank sounded like hiss, the mouth like a whisper), mixed to
+//! the pitched result, always on, voiced or not, so the voice breathes
+//! through the synth (the dark eighties vocoder with a breath over it).
+//! At 50 % it is as loud as the vocoder, at 100 % twice, at 200 % four
+//! times, the vocoder coming down meanwhile. *Whisper Tone* tilts it
+//! around 1 kHz, ±24 dB; below 0 a low-pass also closes on it, down to
+//! 400 Hz (a deep, muffled breath). It speaks with the voice alone (no note
+//! needed) and adds no latency: on the vocoder, the pitched part waits
+//! for the (later) mouth analysis inside the budget the engine pays.
+//!
 //! Latency: none added. The filters are causal; the output is delayed
 //! to line up with the rest of the engine, by the engine's latency minus
 //! the analysis lag (the talkbox's frame is centred in the past), so the
@@ -113,6 +126,16 @@ const GATE_CLOSE_S: f64 = 0.04;
 const CONSONANT_NOISE: f64 = 0.6;
 /// Brightness pivot (Hz).
 const TILT_HZ: f64 = 1_000.0;
+/// Whisper: tone pivot (Hz), level against the pitched vocoder (unit
+/// = as loud, measured on a vowel), and how far the pitched part comes
+/// down at the top of the range.
+const WHISPER_TONE_HZ: f64 = 1_000.0;
+const WHISPER_VOCODER: f64 = 0.85;
+const WHISPER_TALKBOX: f64 = 0.75;
+/// Whisper Tone at -24 dB: the low-pass of the whisper is down there.
+const WHISPER_DARK_HZ: f64 = 400.0;
+/// Top of the Whisper range (2 = 200 %).
+pub const WHISPER_MAX: f64 = 2.0;
 /// Ensemble: base delay, slow and fast modulation depths (s), rates (Hz).
 const ENS_BASE_S: f64 = 0.007;
 const ENS_SLOW_S: f64 = 0.0025;
@@ -344,6 +367,11 @@ pub struct VocoderSettings {
     pub ensemble: f64,
     /// Square one octave below the carrier, 0..1.
     pub sub: f64,
+    /// Whispered layer (voice-shaped noise) over the vocoder,
+    /// 0..[`WHISPER_MAX`].
+    pub whisper: f64,
+    /// Tilt of the whisper around [`WHISPER_TONE_HZ`], dB.
+    pub whisper_tone_db: f64,
 }
 
 impl Default for VocoderSettings {
@@ -373,6 +401,8 @@ impl Default for VocoderSettings {
             gate_db: GATE_OFF_DB,
             ensemble: 0.0,
             sub: 0.0,
+            whisper: 0.0,
+            whisper_tone_db: 0.0,
         }
     }
 }
@@ -399,6 +429,17 @@ impl Biquad {
         self.b1 = 0.0;
         self.b2 = -alpha / a0;
         self.a1 = -2.0 * w.cos() / a0;
+        self.a2 = (1.0 - alpha) / a0;
+    }
+
+    fn low_pass(&mut self, sr: f64, hz: f64) {
+        let w = std::f64::consts::TAU * hz.clamp(10.0, 0.49 * sr) / sr;
+        let alpha = w.sin() / std::f64::consts::SQRT_2;
+        let (c, a0) = (w.cos(), 1.0 + alpha);
+        self.b0 = (1.0 - c) / 2.0 / a0;
+        self.b1 = (1.0 - c) / a0;
+        self.b2 = self.b0;
+        self.a1 = -2.0 * c / a0;
         self.a2 = (1.0 - alpha) / a0;
     }
 
@@ -505,6 +546,17 @@ pub struct Vocoder {
     // Vocoder.
     voice_bands: [Band; MAX_BANDS],
     carrier_bands: [Band; MAX_BANDS],
+    /// Whisper: on the vocoder, the pitched part's wait for the mouth
+    /// analysis (talkbox lag minus band lag).
+    align: DelayLine,
+    /// Whisper: talkbox lattice fed with noise, tone low part and gains.
+    whisper_lattice: [f64; MAX_ORDER + 1],
+    whisper_lo: f64,
+    /// Whisper Tone below 0: a low-pass closing down to
+    /// [`WHISPER_DARK_HZ`].
+    whisper_lp: Biquad,
+    whisper_tone_coef: f64,
+    whisper_tone_gains: (f64, f64),
     band_att: f64,
     band_rel: f64,
     carrier_env: f64,
@@ -594,6 +646,12 @@ impl Default for Vocoder {
             applied: None,
             voice_bands: [Band::default(); MAX_BANDS],
             carrier_bands: [Band::default(); MAX_BANDS],
+            align: DelayLine::default(),
+            whisper_lattice: [0.0; MAX_ORDER + 1],
+            whisper_lo: 0.0,
+            whisper_lp: Biquad::default(),
+            whisper_tone_coef: 0.0,
+            whisper_tone_gains: (1.0, 1.0),
             band_att: 0.0,
             band_rel: 0.0,
             carrier_env: 0.0,
@@ -692,6 +750,7 @@ impl Vocoder {
         self.ring = vec![0.0; 2 * w + 2];
         self.frame = vec![0.0; w];
         self.out_delay.prepare(max_latency);
+        self.align.prepare(max_latency);
         self.rms_coef = coef(sample_rate, 0.01);
         self.carrier_att = coef(sample_rate, 0.0005);
         self.carrier_rel = coef(sample_rate, CARRIER_ENV_S);
@@ -709,6 +768,8 @@ impl Vocoder {
         self.gate_open_coef = coef(sample_rate, GATE_OPEN_S);
         self.gate_close_coef = coef(sample_rate, GATE_CLOSE_S);
         self.tilt_coef = 1.0 - (-std::f64::consts::TAU * TILT_HZ / sample_rate).exp();
+        self.whisper_tone_coef =
+            1.0 - (-std::f64::consts::TAU * WHISPER_TONE_HZ / sample_rate).exp();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let ens = ((ENS_BASE_S + ENS_SLOW_S + ENS_FAST_S) * sample_rate) as usize + 4;
         self.ens = vec![0.0; ens];
@@ -721,8 +782,24 @@ impl Vocoder {
     /// Line the output up with an engine latency of `latency` samples.
     pub fn set_latency(&mut self, latency: usize) {
         self.latency = latency;
-        self.out_delay
-            .set_delay(latency.saturating_sub(self.analysis_lag()));
+        // Vocoder: the bands answer sooner than the mouth analysis (of
+        // the whisper); the pitched part waits for it, in the budget.
+        let late = latency.saturating_sub(self.lpc_lag());
+        let early = latency.saturating_sub(self.analysis_lag());
+        self.align.set_delay(early - late.min(early));
+        self.out_delay.set_delay(late.min(early));
+    }
+
+    /// How late the talkbox analysis (and the whisper) follows the
+    /// voice: half the window, read at the Band Shift's rate.
+    fn lpc_lag(&self) -> usize {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let lag = (self.window.len() as f64 * self.talk_shift() / 2.0) as usize;
+        lag
     }
 
     /// How late the analysis follows the voice (samples): half the
@@ -735,7 +812,7 @@ impl Vocoder {
                 clippy::cast_sign_loss,
                 clippy::cast_precision_loss
             )]
-            VocoderMode::Talkbox => (self.window.len() as f64 * self.talk_shift() / 2.0) as usize,
+            VocoderMode::Talkbox => self.lpc_lag(),
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             _ => (0.25 * self.settings.response_s * self.sample_rate) as usize,
         }
@@ -749,6 +826,10 @@ impl Vocoder {
         {
             b.reset();
         }
+        self.align.reset();
+        self.whisper_lattice = [0.0; MAX_ORDER + 1];
+        self.whisper_lo = 0.0;
+        self.whisper_lp.reset();
         self.carrier_env = 0.0;
         self.ring.iter_mut().for_each(|x| *x = 0.0);
         self.ring_pos = 0;
@@ -825,6 +906,14 @@ impl Vocoder {
         self.lag_hz = LAG_WINDOW_HZ / resonance_factor(s.resonance);
         let half = 10f64.powf(s.tilt_db.clamp(-24.0, 24.0) / 40.0);
         self.tilt_gains = (1.0 / half, half);
+        let half = 10f64.powf(s.whisper_tone_db.clamp(-48.0, 48.0) / 40.0);
+        self.whisper_tone_gains = (1.0 / half, half);
+        if s.whisper_tone_db < 0.0 {
+            // -24 dB: 400 Hz, -12 dB: 2.8 kHz, 0: 20 kHz (open).
+            let t = (s.whisper_tone_db / -24.0).min(1.0);
+            let hz = 20_000.0 * (WHISPER_DARK_HZ / 20_000.0f64).powf(t);
+            self.whisper_lp.low_pass(sr, hz);
+        }
         self.band_rel = coef(sr, s.response_s);
         self.band_att = coef(sr, 0.25 * s.response_s);
         self.release_coef = coef(sr, s.release_s / 4.0);
@@ -1264,9 +1353,33 @@ impl Vocoder {
             carrier = carrier * (1.0 - 0.5 * k) + n * k * CONSONANT_NOISE;
             amp = amp.max(k);
         }
-        let wet = match s.mode {
-            VocoderMode::Talkbox => self.talkbox(x, carrier, amp, k),
-            _ => self.vocode(x, carrier, amp, k),
+        let (wet, whisper) = match s.mode {
+            VocoderMode::Talkbox => {
+                self.lpc_track(x);
+                let t = self.talkbox(carrier, amp, k);
+                (t, self.whisper(WHISPER_TALKBOX))
+            }
+            _ => {
+                let t = self.vocode(x, carrier, amp, k);
+                #[allow(clippy::cast_possible_truncation)]
+                let t = f64::from(self.align.tick(t as f32));
+                let w = if s.whisper > 0.0 {
+                    self.lpc_track(x);
+                    self.whisper(WHISPER_VOCODER)
+                } else {
+                    0.0
+                };
+                (t, w)
+            }
+        };
+        let wet = if s.whisper > 0.0 {
+            let w = s.whisper.min(WHISPER_MAX);
+            // 0 dB to 50 %, -3.7 dB at 100 %, -8 dB at 200 %.
+            let duck =
+                1.0 - 0.35 * ((w - 0.5) / 0.5).clamp(0.0, 1.0) - 0.25 * (w - 1.0).clamp(0.0, 1.0);
+            wet * duck + self.whisper_tone(whisper) * 2.0 * w
+        } else {
+            wet
         };
         // Sibilance: the voice's top, where the voice is unvoiced.
         let d = f64::from(dry);
@@ -1306,6 +1419,21 @@ impl Vocoder {
         self.gate_gain
     }
 
+    /// Whisper Tone: the whisper tilted around [`WHISPER_TONE_HZ`].
+    fn whisper_tone(&mut self, y: f64) -> f64 {
+        if self.settings.whisper_tone_db == 0.0 {
+            return y;
+        }
+        self.whisper_lo += (y - self.whisper_lo) * self.whisper_tone_coef;
+        let (lo, hi) = self.whisper_tone_gains;
+        let y = self.whisper_lo * lo + (y - self.whisper_lo) * hi;
+        if self.settings.whisper_tone_db < 0.0 {
+            self.whisper_lp.tick(y)
+        } else {
+            y
+        }
+    }
+
     /// Brightness: the result tilted around [`TILT_HZ`].
     fn tilt(&mut self, y: f64) -> f64 {
         if self.settings.tilt_db == 0.0 {
@@ -1337,6 +1465,7 @@ impl Vocoder {
             cb.env += (a - cb.env) * if a > cb.env { c_att } else { c_coef };
             y += c * vb.env / cb.env.max(CARRIER_FLOOR);
         }
+
         // Keyboard envelopes and a carrier at rest stay audible as such.
         let gate = if self.settings.carrier == Carrier::Sidechain {
             let a = carrier.abs();
@@ -1349,8 +1478,9 @@ impl Vocoder {
         y * gate * self.band_gain * VOCODER_MAKEUP
     }
 
-    fn talkbox(&mut self, x: f64, carrier: f64, amp: f64, k: f64) -> f64 {
-        // Analysis: pre-emphasised voice into the ring, a frame per hop.
+    /// Mouth analysis: the pre-emphasised voice into the ring, a frame
+    /// per hop, the lattice coefficients gliding between frames.
+    fn lpc_track(&mut self, x: f64) {
         let pre = x - PRE_EMPHASIS * self.prev_in;
         self.prev_in = x;
         let w = self.ring.len();
@@ -1372,6 +1502,11 @@ impl Vocoder {
             self.k[i] += self.k_step[i];
         }
         self.lpc_gain += self.lpc_gain_step;
+    }
+
+    /// The carrier through the mouth (after [`Self::lpc_track`]).
+    fn talkbox(&mut self, carrier: f64, amp: f64, k: f64) -> f64 {
+        let p = self.order;
         // Carrier at unit level, times the voice's residual level.
         let c2 = carrier * carrier;
         let c = if c2 > self.carrier_rms {
@@ -1399,6 +1534,26 @@ impl Vocoder {
             return 0.0;
         }
         f * TALKBOX_MAKEUP
+    }
+
+    /// Whisper: unit-RMS noise through the mouth (after
+    /// [`Self::lpc_track`]), 0 when Whisper is off.
+    fn whisper(&mut self, makeup: f64) -> f64 {
+        if self.settings.whisper <= 0.0 {
+            return 0.0;
+        }
+        let p = self.order;
+        let mut g = self.noise() * 3f64.sqrt() * self.lpc_gain.max(0.0);
+        for i in (1..=p).rev() {
+            g -= self.k[i] * self.whisper_lattice[i - 1];
+            self.whisper_lattice[i] = self.k[i] * g + self.whisper_lattice[i - 1];
+        }
+        self.whisper_lattice[0] = g;
+        if !g.is_finite() {
+            self.whisper_lattice = [0.0; MAX_ORDER + 1];
+            return 0.0;
+        }
+        g * TALKBOX_MAKEUP * makeup
     }
 
     /// LPC of the last window (Levinson-Durbin): reflection coefficients
@@ -1705,6 +1860,88 @@ mod tests {
     }
 
     /// Noise-like "s": white noise high-passed.
+    /// Whispered voice alone: no note, no Follow, so only the whisper
+    /// speaks (voiced, so no Consonants either).
+    fn whisper_only(mode: VocoderMode, w: f64, tone: f64, x: &[f32]) -> Vec<f32> {
+        let mut v = played(mode);
+        v.set_notes(&NoteStack::default());
+        v.settings.follow = false;
+        v.settings.whisper = w;
+        v.settings.whisper_tone_db = tone;
+        v.apply_settings();
+        run(&mut v, x, Some(60.0))
+    }
+
+    #[test]
+    fn whisper_is_as_loud_as_the_vocoder_at_half() {
+        for mode in [VocoderMode::Vocoder, VocoderMode::Talkbox] {
+            for (f1, f2) in [(700.0, 1200.0), (300.0, 2300.0)] {
+                let x = vowel(48_000, f1, f2);
+                let mut v = played(mode);
+                let pitched = rms(&run(&mut v, &x, Some(60.0))[24_000..]);
+                let whisper = rms(&whisper_only(mode, 0.5, 0.0, &x)[24_000..]);
+                let db = 20.0 * (whisper / pitched).log10();
+                eprintln!("WHISPER {mode:?} {f1}/{f2}: {db:.1} dB");
+                assert!(db.abs() < 3.0, "{mode:?} {f1}/{f2}: {db:.1} dB");
+            }
+        }
+    }
+
+    #[test]
+    fn whisper_speaks_without_a_note_and_rests_in_silence() {
+        for mode in [VocoderMode::Vocoder, VocoderMode::Talkbox] {
+            let x = vowel(24_000, 700.0, 1200.0);
+            assert!(rms(&whisper_only(mode, 0.0, 0.0, &x)[12_000..]) < 1e-4);
+            let y = whisper_only(mode, 1.0, 0.0, &x);
+            assert!(rms(&y[12_000..]) > 0.3 * rms(&x[12_000..]), "{mode:?}");
+            assert!(y.iter().all(|s| s.is_finite()));
+            let y = whisper_only(mode, 1.0, 12.0, &vec![0.0; 24_000]);
+            assert!(rms(&y[12_000..]) < 1e-4, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn whisper_mixes_with_the_vocoder_and_its_tone_tilts() {
+        let x = vowel(48_000, 700.0, 1200.0);
+        let mut v = played(VocoderMode::Vocoder);
+        let plain = run(&mut v, &x, Some(60.0));
+        let mut v = played(VocoderMode::Vocoder);
+        v.settings.whisper = 1.0;
+        v.apply_settings();
+        let mixed = run(&mut v, &x, Some(60.0));
+        // Full whisper: louder, but still the vocoder underneath.
+        let (p, m) = (rms(&plain[24_000..]), rms(&mixed[24_000..]));
+        assert!(m > 1.4 * p && m < 4.0 * p, "{p} {m}");
+        let corr: f64 = plain[24_000..]
+            .iter()
+            .zip(&mixed[24_000..])
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum::<f64>()
+            / (p * m * 24_000.0);
+        assert!(corr > 0.2, "{corr}");
+        // Tone: the top of the whisper against its body.
+        let top = |y: &[f32]| {
+            let mut hp = [Biquad::default(); 2];
+            hp.iter_mut().for_each(|f| f.high_pass(SR, 4_000.0));
+            let t: Vec<f32> = y
+                .iter()
+                .map(|s| {
+                    let a = hp[0].tick(f64::from(*s));
+                    hp[1].tick(a) as f32
+                })
+                .collect();
+            rms(&t[24_000..])
+        };
+        let dark = top(&whisper_only(VocoderMode::Vocoder, 1.0, -24.0, &x));
+        let bright = top(&whisper_only(VocoderMode::Vocoder, 1.0, 24.0, &x));
+        assert!(bright > 8.0 * dark, "{dark} {bright}");
+        // 200 %: louder again, still sane.
+        let full = whisper_only(VocoderMode::Vocoder, 1.0, 0.0, &x);
+        let max = whisper_only(VocoderMode::Vocoder, WHISPER_MAX, 0.0, &x);
+        assert!(rms(&max[24_000..]) > 1.5 * rms(&full[24_000..]));
+        assert!(max.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+    }
+
     fn hiss(n: usize) -> Vec<f32> {
         let mut hp = Biquad::default();
         hp.high_pass(SR, 4_000.0);
@@ -1795,7 +2032,12 @@ mod tests {
     #[test]
     fn output_is_lined_up_with_the_latency() {
         let mut v = played(VocoderMode::Vocoder);
-        assert_eq!(v.out_delay.delay(), 480 - v.analysis_lag());
+        // The pitched part waits for the whisper's (later) analysis.
+        assert_eq!(
+            v.align.delay() + v.out_delay.delay(),
+            480 - v.analysis_lag()
+        );
+        assert_eq!(v.out_delay.delay(), 480 - 480);
         v.settings.mode = VocoderMode::Talkbox;
         v.apply_settings();
         assert_eq!(v.out_delay.delay(), 480 - 480);
