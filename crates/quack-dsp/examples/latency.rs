@@ -110,6 +110,11 @@ fn main() {
     let mut v = ParamValues::default();
     v.set(ParamId::Correction, 0.0);
     let arg = std::env::args().nth(1);
+    if arg.as_deref() == Some("--onset") {
+        detector_onset();
+        onset();
+        return;
+    }
     if arg.as_deref() == Some("--attack") {
         attack_quality();
         return;
@@ -258,4 +263,87 @@ fn steady(hz: f64, n: usize) -> Vec<f32> {
     let mut x = vowel_with(hz, n as f64 / SR + 0.01, 0.0);
     x.truncate(n);
     x
+}
+
+/// Note onsets: how long the start of a note after silence comes out
+/// at its sung pitch before the transposition takes over, per note
+/// and voice range (+5 st, Tune and Natural).
+fn onset() {
+    // Normalised square difference of `y` around `c` at `lag`.
+    fn nsdf(y: &[f32], c: usize, lag: f64, w: usize) -> f64 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let l = lag.round() as usize;
+        let a = c.saturating_sub(w / 2);
+        let (mut num, mut den) = (0.0, 0.0);
+        for i in a..a + w {
+            let (x0, x1) = (f64::from(y[i]), f64::from(y[i + l]));
+            num += 2.0 * x0 * x1;
+            den += x0 * x0 + x1 * x1;
+        }
+        if den > 0.0 { num / den } else { 0.0 }
+    }
+    let mut v = ParamValues::default();
+    v.set(ParamId::Pitch, 5.0);
+    for (mode, name) in [(1.0, "Tune"), (0.0, "Natural")] {
+        v.set(ParamId::Mode, mode);
+        v.set(ParamId::Retune, 0.0);
+        v.set(ParamId::Correction, 0.0);
+        for range in [VoiceRange::High, VoiceRange::Tenor] {
+            v.set(ParamId::Voice, f64::from(range as u8));
+            let mut row = format!("{name:<8} {:<14}", range.name());
+            for hz in [147.0, 196.0, 262.0, 392.0] {
+                let gap = vec![0.0f32; (0.3 * SR) as usize];
+                let mut x = gap.clone();
+                x.extend(vowel(hz, 0.4));
+                x.extend(gap);
+                let mut e = Engine::new();
+                e.prepare(SR, 32);
+                e.set_all(&v, true);
+                let (mut l, mut r) = (x.clone(), x.clone());
+                for (cl, cr) in l.chunks_mut(32).zip(r.chunks_mut(32)) {
+                    e.process(cl, cr);
+                }
+                // First output sample above -30 dB of the note's level.
+                let peak = l.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                let start = l.iter().position(|v| v.abs() > 0.03 * peak).unwrap_or(0);
+                let (p_in, p_out) = (SR / hz, SR / (hz * f64::from(semitones_to_ratio(5.0))));
+                let w = (2.0 * p_in) as usize;
+                // Last 0.5 ms step, in the first 80 ms, still nearer
+                // the sung pitch than the target.
+                let mut last_sung = None;
+                let step = (SR * 0.0005) as usize;
+                let mut c = start + w / 2;
+                while c < start + (0.08 * SR) as usize {
+                    if nsdf(&l, c, p_in, w) > nsdf(&l, c, p_out, w) {
+                        last_sung = Some(c);
+                    }
+                    c += step;
+                }
+                let ms = last_sung.map_or(0.0, |c| (c - start) as f64 / SR * 1000.0);
+                row += &format!("  {hz:>3.0} Hz {ms:>5.1} ms");
+            }
+            println!("{row}");
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn detector_onset() {
+    for hz in [147.0, 196.0, 262.0, 392.0] {
+        let mut x = vec![0.0f32; (0.3 * SR) as usize];
+        x.extend(vowel(hz, 0.4));
+        let mut y = Yin::new(SR);
+        let peak = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let start = x.iter().position(|v| v.abs() > 0.03 * peak).unwrap();
+        for (i, s) in x.iter().enumerate() {
+            y.push_sample(*s);
+            if y.estimate().is_some() {
+                println!(
+                    "{hz} Hz: detector after {:.1} ms",
+                    (i - start) as f64 / SR * 1000.0
+                );
+                break;
+            }
+        }
+    }
 }

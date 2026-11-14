@@ -57,6 +57,15 @@ const MARK_LOWPASS_HZ: f64 = 1_000.0;
 /// first grains of a note move from the sung pitch to the target (a
 /// short scoop) instead of jumping, which would click.
 const GLIDE_S: f64 = 0.012;
+/// The voicing's glide when the voice comes in: shorter, so a note
+/// reaches its target sooner (it starts quiet, a fast scoop does not
+/// click).
+const GLIDE_IN_S: f64 = 0.005;
+/// Most pulses a note's start gets back (see [`Psola::backfill`]).
+const BACKFILL_MAX: usize = 32;
+/// A pulse back from the first one counts while its peak is at least
+/// this share of the first one's.
+const BACKFILL_LEVEL: f32 = 0.25;
 /// A detector dropout shorter than this keeps the last period, so a
 /// rough onset does not flip between shifted and unshifted grains.
 const HOLD_S: f64 = 0.010;
@@ -298,6 +307,13 @@ pub struct Psola {
     /// 0 (unvoiced, unshifted) to 1 (voiced, fully shifted).
     voicing: f64,
     glide: f64,
+    /// Note starts transposed from their first pulse (see [`Self::backfill`]).
+    backfill: bool,
+    /// First mark of a note backfilled from its start: its grains
+    /// start fully voiced.
+    snap_from: Option<usize>,
+    /// The same, for the voice coming in (shorter: see [`GLIDE_IN_S`]).
+    glide_in: f64,
     /// Last detected period and how many samples it is still held for.
     held_period: f32,
     hold: usize,
@@ -394,6 +410,8 @@ impl Psola {
         self.marks = vec![Mark::default(); MARKS];
         self.lowpass = [Biquad::lowpass(sr, MARK_LOWPASS_HZ); 2];
         self.glide = sr * GLIDE_S;
+        self.glide_in = sr * GLIDE_IN_S;
+        self.backfill = true;
         self.noisy_coef = (1.0 - (-1.0 / (sr * NOISY_S)).exp()) as f32;
         self.noisy_ratio = (NOISY_RATIO_44K * (44_100.0 / sr).powi(4)) as f32;
         self.hold_len = (sr * HOLD_S) as usize;
@@ -831,7 +849,85 @@ impl Psola {
                 best = k;
             }
         }
+        if self.backfill {
+            self.backfill(best, best_v, p, radius);
+        }
         self.push_mark(best, p, true);
+    }
+
+    /// The voice just came in (first voiced mark after unvoiced ones or
+    /// none). The detector needs about two periods to be sure, but the
+    /// output plays the input `latency` samples late: the start of the
+    /// note is still waiting in the buffer. Its unvoiced marks that no
+    /// grain has used yet are replaced by voiced ones, placed backwards
+    /// pulse by pulse from `first` while the note is there, so the
+    /// start of the note is transposed too instead of coming out at the
+    /// sung pitch. No latency added: only marks still ahead of the
+    /// output move.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn backfill(&mut self, first: i64, first_v: f32, p: f64, radius: i64) {
+        if first_v <= 0.0 {
+            return;
+        }
+        // Marks up to the last one a grain was placed on are in use
+        // (and none before the output position may move).
+        let c = self.n - self.latency;
+        let used = self
+            .last_grain
+            .filter(|(k, _)| k + MARKS > self.count && *k < self.count)
+            .map_or(i64::MIN, |(k, _)| self.mark(k).pos + 1);
+        let limit = c.max(used);
+        while self.count > 1 {
+            let m = self.mark(self.count - 1);
+            if m.voiced || m.pos <= limit {
+                break;
+            }
+            self.count -= 1;
+        }
+        let floor = if self.count > 0 {
+            let m = self.mark(self.count - 1);
+            if m.voiced {
+                return;
+            }
+            m.pos.max(limit)
+        } else {
+            limit
+        };
+        let mut found = [0i64; BACKFILL_MAX];
+        let mut len = 0;
+        // Whether the note's very start was reached.
+        let mut start = false;
+        let mut at = first;
+        while len < BACKFILL_MAX {
+            let pred = at - p.round() as i64;
+            let (from, to) = (pred - radius, pred + radius);
+            if from <= floor + (0.5 * p) as i64 {
+                break;
+            }
+            let mut best = pred;
+            let mut best_v = f32::MIN;
+            for k in from..=to {
+                let v = self.search[self.in_index(k)];
+                if v > best_v {
+                    best_v = v;
+                    best = k;
+                }
+            }
+            // Before the note (silence, a breath): stop there.
+            if best_v < BACKFILL_LEVEL * first_v {
+                start = true;
+                break;
+            }
+            found[len] = best;
+            len += 1;
+            at = best;
+        }
+        // From the very start, the note needs no glide in: there is
+        // nothing unshifted before it to glide from.
+        self.snap_from = start.then_some(self.count);
+        for &pos in found[..len].iter().rev() {
+            self.push_mark(pos, p, true);
+        }
     }
 
     /// Overlap-add the grain for the next synthesis mark, then move the
@@ -880,8 +976,14 @@ impl Psola {
         let right = self.right(k);
         let left = self.left(k);
         let step = right / self.glide;
+        if m.voiced && self.snap_from.is_some_and(|k0| k >= k0) {
+            self.voicing = 1.0;
+        }
+        if !m.voiced {
+            self.snap_from = None;
+        }
         self.voicing = if m.voiced {
-            (self.voicing + step).min(1.0)
+            (self.voicing + right / self.glide_in).min(1.0)
         } else {
             (self.voicing - step).max(0.0)
         };
@@ -1211,7 +1313,7 @@ impl Psola {
                 let left = self.left(k);
                 let step = right / self.glide;
                 let voicing = if m.voiced {
-                    (vs.voicing + step).min(1.0)
+                    (vs.voicing + right / self.glide_in).min(1.0)
                 } else {
                     (vs.voicing - step).max(0.0)
                 };
