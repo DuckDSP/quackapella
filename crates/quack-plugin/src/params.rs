@@ -2056,7 +2056,7 @@ pub struct QuackParams {
     #[param(
         id = 1007,
         name = "Whisper",
-        range = "linear(0, 100)",
+        range = "linear(0, 200)",
         default = 0.0,
         unit = "%",
         format = "fmt_percent",
@@ -2067,7 +2067,7 @@ pub struct QuackParams {
     #[param(
         id = 1008,
         name = "Whisper Tone",
-        range = "linear(-12, 12)",
+        range = "linear(-24, 24)",
         default = 0.0,
         unit = "dB",
         smooth = "none"

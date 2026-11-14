@@ -2383,7 +2383,7 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
         unit: "%",
         kind: ParamKind::Float {
             min: 0.0,
-            max: 100.0,
+            max: 200.0,
             default: 0.0,
         },
     },
@@ -2393,8 +2393,8 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
         name: "Whisper Tone",
         unit: "dB",
         kind: ParamKind::Float {
-            min: -12.0,
-            max: 12.0,
+            min: -24.0,
+            max: 24.0,
             default: 0.0,
         },
     },

@@ -1674,7 +1674,7 @@ pub const FACTORY: &[Factory] = &[
             VocoderDrive = 50.0,
             OutComp = 25.0
         ),
-        snapshot_b: vals!(Whisper = 85.0, WhisperTone = 7.0, VocoderReverb = 45.0),
+        snapshot_b: vals!(Whisper = 120.0, WhisperTone = 7.0, VocoderReverb = 45.0),
         macros: [
             VERSE_CHORUS,
             mac("Whisper", &[(P::Whisper, 0.4), (P::WhisperTone, 0.15)]),
