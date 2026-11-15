@@ -6,7 +6,7 @@
 [vendor]
 name = "DuckDSP"
 id = "com.duckdsp"
-url = "https://example.invalid/"
+url = "https://github.com/duckdsp/quackapella"
 au_manufacturer = "DKDS"
 
 [[plugin]]
