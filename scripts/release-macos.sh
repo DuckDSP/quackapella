@@ -35,7 +35,11 @@ pack() {
         echo "expected 2 .$1 bundles in the pkg, found $n" >&2
         exit 1
     fi
-    lipo -archs "$dir"/*."$1"/Contents/MacOS/*
+    local b
+    for b in "$dir"/*."$1"/Contents/MacOS/*; do
+        printf '%s: ' "$(basename "$b")"
+        lipo -archs "$b"
+    done
     (cd "$dir" && ditto -c -k --sequesterRsrc . "$OLDPWD/dist/Quackapella-$VERSION-macos-$2.zip")
     echo "packed dist/Quackapella-$VERSION-macos-$2.zip"
 }
