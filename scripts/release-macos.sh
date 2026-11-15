@@ -40,7 +40,7 @@ pack() {
         printf '%s: ' "$(basename "$b")"
         lipo -archs "$b"
     done
-    (cd "$dir" && ditto -c -k --sequesterRsrc . "$OLDPWD/dist/Quackapella-$VERSION-macos-$2.zip")
+    (cd "$dir" && ditto -c -k --norsrc . "$OLDPWD/dist/Quackapella-$VERSION-macos-$2.zip")
     echo "packed dist/Quackapella-$VERSION-macos-$2.zip"
 }
 pack vst3 vst3
