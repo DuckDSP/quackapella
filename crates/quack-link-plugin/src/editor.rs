@@ -11,6 +11,7 @@ use crate::LinkParams;
 
 const ROLE: u32 = 0;
 const LEVEL: u32 = 1;
+const LINK: u32 = 3;
 const LEVEL_MIN: f64 = -24.0;
 const LEVEL_MAX: f64 = 12.0;
 
@@ -42,6 +43,16 @@ impl LinkAccess for Host<'_> {
 
     fn end_level(&self) {
         self.0.end_edit(LEVEL);
+    }
+
+    fn link(&self) -> usize {
+        usize::from(PluginContextReadF64::get_param_plain(self.0, LINK) >= 0.5)
+    }
+
+    fn set_link(&self, link: usize) {
+        self.0.begin_edit(LINK);
+        self.0.set_param(LINK, if link == 0 { 0.0 } else { 1.0 });
+        self.0.end_edit(LINK);
     }
 }
 

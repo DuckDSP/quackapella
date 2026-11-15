@@ -27,6 +27,73 @@ pub trait LinkAccess {
     fn begin_level(&self);
     fn set_level_db(&self, db: f64);
     fn end_level(&self);
+    /// Link channel: 0 A, 1 B.
+    fn link(&self) -> usize {
+        0
+    }
+    fn set_link(&self, _link: usize) {}
+}
+
+/// The link channel (A / B), under its caption.
+fn link_choice(
+    ui: &egui::Ui,
+    p: &egui::Painter,
+    access: &dyn LinkAccess,
+    r: Rect,
+    accent: Color32,
+) {
+    text(
+        p,
+        pos2(r.left(), r.top() - 15.0),
+        Align2::LEFT_CENTER,
+        "Link",
+        size::LABEL,
+        color::TEXT_DIM,
+    );
+    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    let cur = access.link().min(quack_link_names().len() - 1);
+    let w = r.width() / 2.0;
+    for (i, name) in quack_link_names().iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let c = Rect::from_min_size(pos2(r.left() + w * i as f32, r.top()), vec2(w, r.height()));
+        let resp = ui.interact(c, ui.id().with(("quack-link-channel", i)), Sense::click());
+        if resp.clicked() && i != cur {
+            access.set_link(i);
+        }
+        if i == cur {
+            rounded(
+                p,
+                c.shrink(2.0),
+                radius::CONTROL - 1,
+                accent.gamma_multiply(0.22),
+                accent.gamma_multiply(0.8),
+            );
+        } else if resp.hovered() {
+            rounded(
+                p,
+                c.shrink(2.0),
+                radius::CONTROL - 1,
+                color::RAISED,
+                color::RAISED,
+            );
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        text(
+            p,
+            c.center(),
+            Align2::CENTER_CENTER,
+            name,
+            size::BODY,
+            if i == cur { accent } else { color::TEXT_DIM },
+        );
+    }
+}
+
+/// Names of the link channels (as `quack_link::LINK_NAMES`).
+pub const fn quack_link_names() -> [&'static str; 2] {
+    ["A", "B"]
 }
 
 /// Where the link stands.
@@ -162,9 +229,18 @@ pub fn draw(ui: &mut egui::Ui, access: &dyn LinkAccess, view: &LinkView, st: &mu
         size::LABEL,
         color::TEXT_DIM,
     );
+    // The link channel takes the end of the row.
+    let ab_w = 64.0;
     let seg = Rect::from_min_size(
         pos2(left, body.top() + space::L + 22.0),
-        vec2((text_right - left).min(230.0), 32.0),
+        vec2((text_right - left - ab_w - space::S).min(230.0), 32.0),
+    );
+    link_choice(
+        ui,
+        &p,
+        access,
+        Rect::from_min_size(pos2(seg.right() + space::S, seg.top()), vec2(ab_w, 32.0)),
+        accent,
     );
     rounded(&p, seg, radius::CONTROL, color::WELL, color::BORDER);
     let labels = ["Mix", "Carrier"];

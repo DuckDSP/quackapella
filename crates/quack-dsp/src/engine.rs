@@ -36,6 +36,7 @@ use crate::fx::{
     SpaceSettings, Tone, ToneSettings,
 };
 use crate::harmony::{Harmonizer, HarmonyMode, INTERVAL_VOICES, interval_semitones};
+use crate::key::{KeyDetect, KeyFinder, KeyReading};
 use crate::latency::{DelayLine, VoiceRange, latency_samples, max_latency_samples};
 use crate::midi::NoteStack;
 use crate::mode::VoiceMode;
@@ -144,6 +145,8 @@ pub struct Engine {
     taps: Taps,
     /// Transposition before the correction (the voice stays in key).
     keep_in_key: bool,
+    /// Key detection (Learn / Auto), off the signal path.
+    key: KeyFinder,
 }
 
 impl Default for Engine {
@@ -213,6 +216,7 @@ impl Engine {
             exciter: Exciter::default(),
             taps: Taps::default(),
             keep_in_key: false,
+            key: KeyFinder::default(),
         };
         e.prepare(48_000.0, 512);
         e
@@ -221,6 +225,7 @@ impl Engine {
     /// Allocates delay lines and resets state. Not for the audio thread.
     pub fn prepare(&mut self, sample_rate: f64, max_block: usize) {
         self.sample_rate = sample_rate;
+        self.key.prepare(sample_rate);
         // Allocated for the lowest range; the voice range picks the delay.
         let max = max_latency_samples(sample_rate);
         for d in self.dry.iter_mut().chain(self.track.iter_mut()) {
@@ -429,6 +434,10 @@ impl Engine {
             ParamId::Formant => (&mut self.formant, v),
             ParamId::KeepInKey => {
                 self.keep_in_key = v >= 0.5;
+                return;
+            }
+            ParamId::KeyDetect => {
+                self.key.set_mode(KeyDetect::from_index(f64::from(v)));
                 return;
             }
             ParamId::Throat => (&mut self.throat, v / 100.0),
@@ -649,7 +658,9 @@ impl Engine {
             | ParamId::SnapshotKeys
             | ParamId::MidiOut
             | ParamId::MidiOutChannel
-            | ParamId::MidiOutSource => return,
+            | ParamId::MidiOutSource
+            // The Link channel picks the wire, in the adapter.
+            | ParamId::LinkChannel => return,
             _ => {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();
@@ -1068,6 +1079,32 @@ impl Engine {
         }
     }
 
+    /// The mix a Quackapella Link sends, for the key detection only
+    /// (call before [`Self::process_with_sidechain`]).
+    pub fn key_mix(&mut self, left: &[f32], right: &[f32]) {
+        if self.key.mode() == KeyDetect::Off {
+            return;
+        }
+        for (a, b) in left.iter().zip(right) {
+            self.key.mix(0.5 * (sanitize(*a) + sanitize(*b)));
+        }
+    }
+
+    /// What the key detection hears.
+    #[must_use]
+    pub fn key_reading(&self) -> KeyReading {
+        self.key.reading()
+    }
+
+    /// A key found by Learn or Auto, to write to Key and Scale (once),
+    /// with the scale in the family already chosen, and whether Learn is
+    /// done (Key Detect goes back to Off).
+    pub fn take_key(&mut self) -> Option<(u8, Scale, bool)> {
+        let g = self.key.take_pending()?;
+        let scale = g.scale_from(Scale::from_index(self.values.get(ParamId::Scale)));
+        Some((g.tonic, scale, self.key.mode() == KeyDetect::Learn))
+    }
+
     /// Notes the vocoder's carrier plays now (bit n = note n).
     #[must_use]
     pub fn vocoder_notes(&self) -> u128 {
@@ -1200,6 +1237,11 @@ impl Engine {
         let _ftz = crate::denormal::NoDenormals::new();
         #[allow(clippy::cast_possible_truncation)]
         let sr = self.sample_rate as f32;
+        // A Link's mix fed this block takes the side-chain's place.
+        let hear_side = !self.key.take_mix_fed()
+            && sidechain.is_some()
+            && !self.swap
+            && self.vocoder.settings.carrier != Carrier::Sidechain;
         for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
             // A NaN or an infinity from the host (or a broken plugin
             // before us) would stay in the filters and delay lines for
@@ -1248,6 +1290,12 @@ impl Engine {
             };
             self.taps.input.push(0.5 * (voice_l + voice_r) * g_in);
             self.detector.push_sample(0.5 * (in_l + in_r));
+            self.key.voice(self.detector.estimate());
+            // The song's key from the mix too, when the side-chain
+            // carries one (a Link's mix comes by `key_mix`).
+            if hear_side {
+                self.key.mix(0.5 * (sc_l + sc_r));
+            }
             let period = self.detector.estimate().map(|e| sr / e.hz);
             let (dry_l, dry_r) = (self.dry[0].tick(voice_l), self.dry[1].tick(voice_r));
             // MIDI Gate: mutes the voice and the layers, not the

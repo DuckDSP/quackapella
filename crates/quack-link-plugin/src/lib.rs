@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use quack_link::{Channel, Role, Sender, Sent};
+use quack_link::{Channel, LINKS, Role, Sender, Sent};
 use quack_ui::link::{LinkState, LinkView};
 use truce::prelude::*;
 use truce_params::FloatParamReadF64;
@@ -28,6 +28,15 @@ pub enum RoleParam {
     Mix,
     #[name = "Carrier"]
     Carrier,
+}
+
+/// Link channels, in `quack_link::LINK_NAMES` order.
+#[derive(ParamEnum)]
+pub enum LinkParam {
+    #[name = "A"]
+    A,
+    #[name = "B"]
+    B,
 }
 
 #[derive(Params)]
@@ -47,6 +56,10 @@ pub struct LinkParams {
 
     #[param(id = 2, name = "Bypass", flags = "automatable | bypass")]
     pub bypass: BoolParam,
+
+    /// Which Quackapella hears it: the one set on the same letter.
+    #[param(id = 3, name = "Link", default = 0)]
+    pub link: EnumParam<LinkParam>,
 
     /// Audio → editor. Not a parameter, not saved.
     #[skip]
@@ -94,9 +107,9 @@ impl LinkShared {
 
 /// Audio-thread state.
 pub struct LinkDsp {
-    /// One sender per role, in `Role::ALL` order (`None`: the system
-    /// gave no shared memory).
-    senders: [Option<Sender>; 2],
+    /// One sender per link and role (link × 2 + role, roles in
+    /// `Role::ALL` order; `None`: the system gave no shared memory).
+    senders: [Option<Sender>; 2 * LINKS],
     left: Box<[f32; CHUNK]>,
     right: Box<[f32; CHUNK]>,
     /// Linear send gain at the end of the last block.
@@ -106,7 +119,7 @@ pub struct LinkDsp {
 impl Default for LinkDsp {
     fn default() -> Self {
         Self {
-            senders: [None, None],
+            senders: Default::default(),
             left: Box::new([0.0; CHUNK]),
             right: Box::new([0.0; CHUNK]),
             gain: 1.0,
@@ -136,8 +149,10 @@ impl PluginLogic for QuackLink {
 
     fn reset(state: &mut LinkDsp, params: &LinkParams, config: &AudioConfig) {
         let id = instance_id(state);
-        state.senders = Role::ALL
-            .map(|role| Channel::open(role).map(|ch| Sender::new(ch, id, config.sample_rate)));
+        state.senders = std::array::from_fn(|i| {
+            Channel::open_on(Role::ALL[i % 2], i / 2)
+                .map(|ch| Sender::new(ch, id, config.sample_rate))
+        });
         state.gain = db_to_gain(FloatParamReadF64::value(&params.level));
         params.shared.state.store(0, Ordering::Relaxed);
     }
@@ -156,9 +171,10 @@ impl PluginLogic for QuackLink {
         if ins == 0 || outs == 0 {
             return ProcessStatus::Normal;
         }
-        let role = usize::from(matches!(params.role.value(), RoleParam::Carrier));
+        let role = usize::from(matches!(params.role.value(), RoleParam::Carrier))
+            + 2 * usize::from(matches!(params.link.value(), LinkParam::B));
         let bypass = params.bypass.value();
-        // The other role is left to whoever wants it.
+        // The other roles and links are left to whoever wants them.
         for (i, s) in state.senders.iter().enumerate() {
             if let Some(s) = s
                 && (i != role || bypass)

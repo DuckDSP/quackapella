@@ -44,6 +44,7 @@ pub mod denormal;
 pub mod engine;
 pub mod fx;
 pub mod harmony;
+pub mod key;
 pub mod latency;
 pub mod midi;
 pub mod midiout;

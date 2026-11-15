@@ -41,6 +41,12 @@ pub struct Shared {
     /// A Quackapella Link sends the mix, the carrier.
     link_mix: AtomicBool,
     link_carrier: AtomicBool,
+    /// Key detection: guess (tonic + 12 if minor, +1; 0 = none),
+    /// confidence and progress (f32 bits), a mix is heard.
+    key_guess: AtomicU32,
+    key_confidence: AtomicU32,
+    key_progress: AtomicU32,
+    key_mix: AtomicBool,
     /// Analysis taps the engine writes and the editor's spectrum reads.
     pub taps: quack_dsp::tap::Taps,
 }
@@ -116,6 +122,18 @@ impl Shared {
         self.taps.linked.store(mix, Ordering::Relaxed);
     }
 
+    pub fn publish_key(&self, r: quack_dsp::key::KeyReading) {
+        let g = r
+            .guess
+            .map_or(0, |g| u32::from(g.tonic) + if g.minor { 13 } else { 1 });
+        self.key_guess.store(g, Ordering::Relaxed);
+        self.key_confidence
+            .store(r.confidence.to_bits(), Ordering::Relaxed);
+        self.key_progress
+            .store(r.progress.to_bits(), Ordering::Relaxed);
+        self.key_mix.store(r.mix, Ordering::Relaxed);
+    }
+
     pub fn publish_frozen(&self, frozen: bool) {
         self.frozen.store(frozen, Ordering::Relaxed);
     }
@@ -164,6 +182,14 @@ impl Shared {
                 self.link_mix.load(Ordering::Relaxed),
                 self.link_carrier.load(Ordering::Relaxed),
             ],
+            key: match self.key_guess.load(Ordering::Relaxed) {
+                0 => None,
+                #[allow(clippy::cast_possible_truncation)]
+                g => Some((((g - 1) % 12) as u8, g > 12)),
+            },
+            key_confidence: f32::from_bits(self.key_confidence.load(Ordering::Relaxed)),
+            key_progress: f32::from_bits(self.key_progress.load(Ordering::Relaxed)),
+            key_mix: self.key_mix.load(Ordering::Relaxed),
         }
     }
 }

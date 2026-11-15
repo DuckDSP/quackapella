@@ -89,6 +89,26 @@ pub enum ScaleParam {
     Blues,
 }
 
+/// Link channels, in `quack_link::LINK_NAMES` order.
+#[derive(ParamEnum)]
+pub enum LinkChannelParam {
+    #[name = "A"]
+    A,
+    #[name = "B"]
+    B,
+}
+
+/// Key detection, in `quack_dsp::key::KeyDetect` order.
+#[derive(ParamEnum)]
+pub enum KeyDetectParam {
+    #[name = "Off"]
+    Off,
+    #[name = "Learn"]
+    Learn,
+    #[name = "Auto"]
+    Auto,
+}
+
 /// Target sources, in `quack_dsp::autotune::Source` order.
 #[derive(ParamEnum)]
 pub enum SourceParam {
@@ -2074,6 +2094,14 @@ pub struct QuackParams {
     )]
     pub whisper_tone: FloatParam,
 
+    /// Key detection: Learn sets Key and Scale once, Auto follows the song.
+    #[param(id = 321, name = "Key Detect", default = 0)]
+    pub key_detect: EnumParam<KeyDetectParam>,
+
+    /// Quackapella Link channel: hears the Links set on the same letter.
+    #[param(id = 1400, name = "Link Channel", default = 0)]
+    pub link_channel: EnumParam<LinkChannelParam>,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -2123,6 +2151,14 @@ impl QuackParams {
             v.set(ParamId::Key, self.key.value().to_index() as f64);
             v.set(ParamId::Scale, self.scale.value().to_index() as f64);
             v.set(ParamId::Source, self.source.value().to_index() as f64);
+            v.set(
+                ParamId::KeyDetect,
+                self.key_detect.value().to_index() as f64,
+            );
+            v.set(
+                ParamId::LinkChannel,
+                self.link_channel.value().to_index() as f64,
+            );
         }
         let notes = [
             &self.note_c,

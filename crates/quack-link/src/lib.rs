@@ -71,6 +71,12 @@ impl Role {
     }
 }
 
+/// Link channels: each pair of a Link and a Quackapella set on the
+/// same letter talks on its own wire, so two singers (or two vocoders)
+/// in one session each get their own.
+pub const LINKS: usize = 2;
+pub const LINK_NAMES: [&str; LINKS] = ["A", "B"];
+
 /// The shared region. Zeroed memory is a valid, empty one.
 #[repr(C)]
 pub(crate) struct Region {
@@ -102,9 +108,24 @@ impl Channel {
     /// absent). Not for the audio thread.
     #[must_use]
     pub fn open(role: Role) -> Option<Self> {
+        Self::open_on(role, 0)
+    }
+
+    /// The channel for `role` on link `link` (0 = A, the original
+    /// wire, 1 = B...).
+    #[must_use]
+    pub fn open_on(role: Role, link: usize) -> Option<Self> {
+        let base = match link {
+            0 => role.key().to_owned(),
+            n => format!(
+                "{}-{}",
+                role.key(),
+                LINK_NAMES[n.min(LINKS - 1)].to_lowercase()
+            ),
+        };
         match PRIVATE.get() {
-            Some(suffix) => Self::open_named(&format!("{}{suffix}", role.key())),
-            None => Self::open_named(role.key()),
+            Some(suffix) => Self::open_named(&format!("{base}{suffix}")),
+            None => Self::open_named(&base),
         }
     }
 
@@ -402,6 +423,24 @@ mod tests {
         }
         let tail = &got[got.len() - 8192..];
         assert!(tail.windows(2).all(|w| (w[1] - w[0] - 1.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn links_a_and_b_are_separate_wires() {
+        keep_private();
+        let a = Channel::open_on(Role::Carrier, 0).expect("A");
+        let b = Channel::open_on(Role::Carrier, 1).expect("B");
+        let mut tx = Sender::new(a, 7, 48_000.0);
+        let mut rx_b = Receiver::new(b, 48_000.0);
+        let x = [0.5; 32];
+        let mut heard = false;
+        for _ in 0..50 {
+            assert_eq!(tx.send(&x, &x, 1.0), Sent::Sent);
+            let (mut l, mut r) = ([0.0; 32], [0.0; 32]);
+            heard |= rx_b.receive(&mut l, &mut r);
+        }
+        assert!(!heard, "B heard what was sent on A");
+        tx.release();
     }
 
     #[test]
