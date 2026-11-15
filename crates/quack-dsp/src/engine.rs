@@ -1791,6 +1791,24 @@ mod tests {
     }
 
     #[test]
+    fn keep_in_key_keeps_the_transposed_voice_on_the_scale() {
+        // A3 up a semitone in C major: A#3 without Keep in Key, a note
+        // of the scale with it, in both voice modes.
+        for mode in [0.0, 1.0] {
+            let mut v = ParamValues::default();
+            v.set(ParamId::Mode, mode);
+            v.set(ParamId::Scale, 1.0);
+            v.set(ParamId::Pitch, 1.0);
+            let got = tuned_note(&v, 0.0, None);
+            assert!((got - 58.0).abs() < 0.1, "mode {mode}: {got}");
+            v.set(ParamId::KeepInKey, 1.0);
+            let got = tuned_note(&v, 0.0, None);
+            let off = (got - 57.0).abs().min((got - 59.0).abs());
+            assert!(off < 0.1, "mode {mode}: {got}");
+        }
+    }
+
+    #[test]
     fn midi_exact_sings_the_played_note() {
         let mut v = ParamValues::default();
         v.set(ParamId::Mode, 1.0);

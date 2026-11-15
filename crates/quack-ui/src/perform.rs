@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::help::Hint;
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::control::{MACRO_COUNT, can_modulate};
@@ -1006,9 +1007,9 @@ pub(crate) fn perform_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut Ui
         );
         let lines = targets_text(params, m);
         if lines.is_empty() {
-            resp.on_hover_text("Right-click any control to assign it to this macro");
+            resp.hint("Right-click any control to assign it to this macro");
         } else {
-            resp.on_hover_text(format!("{}\n{}", names[m], lines.join("\n")));
+            resp.hint(format!("{}\n{}", names[m], lines.join("\n")));
         }
     }
 
@@ -1025,7 +1026,7 @@ pub(crate) fn perform_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut Ui
     let morph_on = params.get_plain(ParamId::MorphOn) >= 0.5;
     let mr = Rect::from_min_size(pos2(t.right() + space::L, title_y - 11.0), vec2(96.0, 22.0));
     controls::switch(ui, params, ParamId::MorphOn, mr, "Morph", accent)
-        .on_hover_text("On: A and B blend with the morph knob. Off: they recall at once");
+        .hint("On: A and B blend with the morph knob. Off: they recall at once");
     let ctl = params.control();
     let has = |s: usize| ctl.is_some_and(|c| c.has_snapshot(s));
     let morph = params.get_plain(ParamId::Morph);
@@ -1040,7 +1041,7 @@ pub(crate) fn perform_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut Ui
         {
             c.request_snapshot(i);
         }
-        resp.on_hover_text(format!("Recall snapshot {label}"));
+        resp.hint(format!("Recall snapshot {label}"));
         let sr = Rect::from_min_size(pos2(x, br.bottom() + 6.0), vec2(bw, 22.0));
         let sresp = ui.interact(sr, ui.id().with(("quack-btn", "save", i)), Sense::click());
         let p = ui.painter();
@@ -1067,7 +1068,7 @@ pub(crate) fn perform_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut Ui
         {
             c.store_snapshot(i, &values);
         }
-        sresp.on_hover_text(format!(
+        sresp.hint(format!(
             "Save the current sound as snapshot {label}{}",
             if has(i) { " (replaces it)" } else { "" }
         ));
@@ -1180,7 +1181,7 @@ pub(crate) fn settings_button(ui: &egui::Ui, st: &mut UiState, r: Rect) {
     };
     crate::paint::fill(p, r, radius::CONTROL, bg);
     crate::paint::gear_icon(p, r.center(), 7.5, color::TEXT_DIM);
-    resp.on_hover_text("Settings: zoom, program change, MIDI out");
+    resp.hint("Settings: zoom, program change, MIDI out");
 }
 
 /// The settings, under the gear: zoom, program change, MIDI out, MIDI
@@ -1435,6 +1436,7 @@ pub(crate) fn settings_menu(
 /// Right-click menu of a control: MIDI learn and macro depths; and, on
 /// a macro knob, its name.
 pub(crate) fn attach(ui: &egui::Ui, resp: &egui::Response, params: &dyn ParamAccess, id: ParamId) {
+    crate::help::param(resp, id);
     let Some(ctl) = params.control() else {
         return;
     };

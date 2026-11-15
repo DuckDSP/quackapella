@@ -22,6 +22,7 @@ mod assist;
 mod brand;
 mod controls;
 mod eq;
+mod help;
 pub mod library;
 pub mod link;
 mod paint;
@@ -41,6 +42,7 @@ use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::vocoder::{Carrier, VocoderMode, bands_from_index};
 use quack_dsp::{ParamId, VoiceMode};
 
+use help::Hint;
 use paint::{panel, spaced, text, value, well};
 use theme::{color, radius, size, space};
 
@@ -387,7 +389,7 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         color::TEXT_DIM,
     );
     ui.interact(lat_r, ui.id().with("quack-latency"), Sense::hover())
-        .on_hover_text("Latency the host compensates");
+        .hint("Latency the host compensates");
 
     // Layers strip: routing, the layers' cards, voice range and latency
     // switch.
@@ -458,11 +460,23 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         pos2(inner.right(), inner.bottom()),
     );
     paint::fill(&p, status, radius::CONTROL, color::CONTROL);
-    perform::learn_status(
-        ui,
-        params,
-        pos2(status.left() + space::M, status.center().y),
-    );
+    if let Some(hint) = help::current(ui.ctx()) {
+        paint::text_fit(
+            &p,
+            pos2(status.left() + space::M, status.center().y),
+            Align2::LEFT_CENTER,
+            &hint,
+            size::CAPTION - 2.5,
+            color::TEXT_DIM,
+            status.width() - 2.0 * space::M - 60.0,
+        );
+    } else {
+        perform::learn_status(
+            ui,
+            params,
+            pos2(status.left() + space::M, status.center().y),
+        );
+    }
     value(
         &p,
         pos2(status.right() - space::M, status.center().y),
@@ -513,7 +527,7 @@ fn bypass_button(ui: &egui::Ui, params: &dyn ParamAccess, r: Rect) {
         6.5,
         if on { color::QUACK } else { color::NATURAL },
     );
-    resp.on_hover_text(if on {
+    resp.hint(if on {
         "Bypassed: click to process again"
     } else {
         "Bypass"
@@ -670,7 +684,7 @@ fn layer_card(
             set_once(params, id, if on { 0.0 } else { 1.0 });
         }
         crate::perform::attach(ui, &resp, params, id);
-        resp.on_hover_text(if on { "Switch off" } else { "Switch on" })
+        resp.hint(if on { "Switch off" } else { "Switch on" })
     });
     let solo_resp = solo.map(|id| {
         let resp = ui.interact(
@@ -682,7 +696,7 @@ fn layer_card(
             set_once(params, id, if soloed { 0.0 } else { 1.0 });
         }
         crate::perform::attach(ui, &resp, params, id);
-        resp.on_hover_text("Solo: hear this layer alone")
+        resp.hint("Solo: hear this layer alone")
     });
     let over_parts = led_resp.as_ref().is_some_and(egui::Response::hovered)
         || solo_resp.as_ref().is_some_and(egui::Response::hovered);
@@ -820,7 +834,7 @@ fn routing_switch(ui: &egui::Ui, params: &dyn ParamAccess, at: egui::Pos2, w: f3
             set_once(params, ParamId::Routing, i as f64);
         }
         crate::perform::attach(ui, &resp, params, ParamId::Routing);
-        let resp = resp.on_hover_text(match routing {
+        let resp = resp.hint(match routing {
             Routing::Parallel => "Every layer is built from the voice, then mixed",
             Routing::Series => "Each module processes what comes before it",
         });
@@ -853,7 +867,7 @@ fn chain_link(ui: &egui::Ui, params: &dyn ParamAccess, r: Rect, chain: Chain, sl
     let hovered = if swappable {
         let resp = ui
             .interact(r, ui.id().with(("quack-chain", slot)), Sense::click())
-            .on_hover_text("Swap these two modules");
+            .hint("Swap these two modules");
         if resp.clicked() {
             #[allow(clippy::cast_precision_loss)]
             set_once(
@@ -939,7 +953,7 @@ fn voice_panel(
         },
     );
     ui.interact(shown, ui.id().with("quack-voice-summary"), Sense::hover())
-        .on_hover_text(line2);
+        .hint(line2);
     let st_fmt = |v: f64| format!("{v:+.1}");
     let ct_fmt = |v: f64| format!("{v:+.0}");
     let pct = |v: f64| format!("{v:.0}");
@@ -1312,15 +1326,13 @@ fn harmony_panel(
         "Close Voicing",
         accent,
     )
-    .on_hover_text("MIDI and Chord sources: the voices stay within an octave");
+    .hint("MIDI and Chord sources: the voices stay within an octave");
     let latch_r = Rect::from_min_size(pos2(tog_x, close_r.bottom() + space::M), vec2(tog_w, 24.0));
-    controls::switch(ui, params, ParamId::Latch, latch_r, "Latch", accent).on_hover_text(
-        match mode {
-            HarmonyMode::Midi => "Holds the notes; the sustain pedal holds them too",
-            HarmonyMode::Chord => "Holds the chord (the sustain pedal too)",
-            _ => "For the MIDI and Chord sources",
-        },
-    );
+    controls::switch(ui, params, ParamId::Latch, latch_r, "Latch", accent).hint(match mode {
+        HarmonyMode::Midi => "Holds the notes; the sustain pedal holds them too",
+        HarmonyMode::Chord => "Holds the chord (the sustain pedal too)",
+        _ => "For the MIDI and Chord sources",
+    });
 
     // Second row: what makes several singers out of one, and the doubler.
     let row2 = r.bottom() - 52.0;
@@ -1617,7 +1629,7 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
         if layer_live { acc } else { color::TEXT_FAINT },
     );
     ui.interact(t, ui.id().with("quack-sends-title"), Sense::hover())
-        .on_hover_text(if series {
+        .hint(if series {
             "In series one set of sends serves the whole chain"
         } else {
             "The sends of the layer shown above: pick another card to change it"
@@ -2442,7 +2454,7 @@ fn tune_panel(
         vec2(scale_r.width(), 24.0),
     );
     controls::switch(ui, params, ParamId::MidiGate, gate_r, "MIDI Gate", accent)
-        .on_hover_text("MIDI sources: silent while no note is held");
+        .hint("MIDI sources: silent while no note is held");
     if source == Source::Scale {
         p.rect_filled(gate_r, 5.0, color::PANEL.gamma_multiply(0.6));
     }
