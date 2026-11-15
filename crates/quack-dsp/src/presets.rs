@@ -57,6 +57,10 @@ pub fn in_preset(id: ParamId) -> bool {
             | ParamId::MidiOut
             | ParamId::MidiOutChannel
             | ParamId::MidiOutSource
+            | ParamId::SoloVoice
+            | ParamId::SoloCreative
+            | ParamId::SoloHarmony
+            | ParamId::SoloVocoder
     )
 }
 

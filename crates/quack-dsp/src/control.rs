@@ -53,6 +53,10 @@ pub fn can_modulate(id: ParamId) -> bool {
             | ParamId::MidiOut
             | ParamId::MidiOutChannel
             | ParamId::MidiOutSource
+            | ParamId::SoloVoice
+            | ParamId::SoloCreative
+            | ParamId::SoloHarmony
+            | ParamId::SoloVocoder
     )
 }
 

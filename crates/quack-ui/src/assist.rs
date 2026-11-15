@@ -430,13 +430,14 @@ fn button(
             accent,
         )
     } else if !enabled {
-        (color::PANEL, color::GRID_STRONG, color::BORDER)
+        (color::CONTROL, color::CONTROL, color::BORDER)
     } else if resp.hovered() {
-        (color::BORDER, color::BORDER, color::TEXT)
+        (color::HOVER, color::HOVER, color::TEXT)
     } else {
-        (color::RAISED, color::BORDER, color::TEXT_DIM)
+        (color::RAISED, color::RAISED, color::TEXT_DIM)
     };
-    rounded(p, r, radius::CONTROL, fill, border);
+    let _ = border;
+    rounded(p, r, radius::CONTROL, fill, fill);
     text(p, r.center(), Align2::CENTER_CENTER, label, size::BODY, ink);
     enabled && resp.clicked()
 }

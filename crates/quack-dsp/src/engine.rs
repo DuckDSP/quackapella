@@ -114,6 +114,10 @@ pub struct Engine {
     /// the side-chain, and its level.
     vocoder: Vocoder,
     vocoder_level: Ramp,
+    /// Solo: each layer's gain (0 while another is soloed), and
+    /// whether any solo is on (for the series chain).
+    solo: [Ramp; 4],
+    soloing: Ramp,
     double: Ramp,
     /// Layer routing and, in series, the order of the modules.
     routing: Routing,
@@ -195,6 +199,8 @@ impl Engine {
             harmony_level: Ramp::new(0.0),
             vocoder: Vocoder::default(),
             vocoder_level: Ramp::new(0.0),
+            solo: [Ramp::new(1.0); 4],
+            soloing: Ramp::new(0.0),
             double: Ramp::new(0.0),
             routing: Routing::Parallel,
             chain: Chain::default(),
@@ -245,9 +251,11 @@ impl Engine {
             &mut self.vocoder_level,
             &mut self.double,
             &mut self.fx_return,
+            &mut self.soloing,
         ]
         .into_iter()
         .chain(self.layers.iter_mut())
+        .chain(self.solo.iter_mut())
         .chain(self.sends.iter_mut())
         .chain(self.delay_sends.iter_mut())
         .chain(self.chorus_amounts.iter_mut())
@@ -661,6 +669,13 @@ impl Engine {
             | ParamId::MidiOutSource
             // The Link channel picks the wire, in the adapter.
             | ParamId::LinkChannel => return,
+            ParamId::SoloVoice
+            | ParamId::SoloCreative
+            | ParamId::SoloHarmony
+            | ParamId::SoloVocoder => {
+                self.update_solo(snap);
+                return;
+            }
             _ => {
                 // Key, scale, note switches: the harmonies count in them.
                 self.update_tune();
@@ -1000,6 +1015,26 @@ impl Engine {
         } else {
             self.lead.set(lead);
             self.harmony_level.set(level);
+        }
+    }
+
+    /// Solo: with any layer soloed, the others are silent.
+    fn update_solo(&mut self, snap: bool) {
+        let on = crate::params::SOLO_PARAMS.map(|id| self.values.get(id) >= 0.5);
+        let any = on.iter().any(|s| *s);
+        for (ramp, s) in self.solo.iter_mut().zip(on) {
+            let g = if !any || s { 1.0 } else { 0.0 };
+            if snap {
+                ramp.snap(g);
+            } else {
+                ramp.set(g);
+            }
+        }
+        let any = if any { 1.0 } else { 0.0 };
+        if snap {
+            self.soloing.snap(any);
+        } else {
+            self.soloing.set(any);
         }
     }
 
@@ -1346,13 +1381,16 @@ impl Engine {
             let choruses = tick4(&mut self.chorus_amounts);
             let drives = tick4(&mut self.drive_amounts);
             let fx_return = self.fx_return.tick();
+            let solo = tick4(&mut self.solo);
+            let soloing = self.soloing.tick();
             let fx = self.fx_on;
             let drive_on = fx && self.drive_on;
             // Each layer: its drive, then its share of the chorus, the
             // delay and the reverb.
             let mut bus = FxBus::default();
-            let mut layer = |i: usize, x: (f32, f32), drv: &mut Distortion| {
-                let x = (x.0 * gate, x.1 * gate);
+            let mut layer = |i: usize, x: (f32, f32), drv: &mut Distortion, solo: f32| {
+                let g = gate * solo;
+                let x = (x.0 * g, x.1 * g);
                 let x = if drive_on {
                     drv.tick(x.0, x.1, drives[i])
                 } else {
@@ -1370,21 +1408,41 @@ impl Engine {
                     let [cl, cr] = buses.creative;
                     let (cl, cr) = self.glitch.tick(cl, cr);
                     let (cl, cr) = (cl * creative_level, cr * creative_level);
-                    layer(0, (buses.lead[0], buses.lead[1]), &mut self.drives[0]);
-                    layer(1, (cl, cr), &mut self.drives[1]);
-                    layer(2, (buses.harmony[0], buses.harmony[1]), &mut self.drives[2]);
+                    layer(
+                        0,
+                        (buses.lead[0], buses.lead[1]),
+                        &mut self.drives[0],
+                        solo[0],
+                    );
+                    layer(1, (cl, cr), &mut self.drives[1], solo[1]);
+                    layer(
+                        2,
+                        (buses.harmony[0], buses.harmony[1]),
+                        &mut self.drives[2],
+                        solo[2],
+                    );
                     // Vocoder or talkbox, on top of the lead and harmonies.
                     if vocoding {
                         let dry = 0.5 * (dry_l + dry_r) * g_in;
                         let v = self.vocoder.tick(0.5 * (in_l + in_r), dry, sc, follow) * voc_level;
-                        layer(3, self.vocoder.widen(v), &mut self.drives[3]);
+                        layer(3, self.vocoder.widen(v), &mut self.drives[3], solo[3]);
                     }
                 }
                 Routing::Series => {
                     // One output: the whole chain takes the voice's
                     // settings.
-                    let s = self.series(&buses, creative_level, voc_level, vocoding, sc, follow);
-                    layer(0, s, &mut self.drives[0]);
+                    let s = self.series(
+                        &buses,
+                        creative_level,
+                        voc_level,
+                        vocoding,
+                        sc,
+                        follow,
+                        solo,
+                        soloing,
+                    );
+                    // The chain's solo is done inside it.
+                    layer(0, s, &mut self.drives[0], 1.0);
                 }
             }
             let (wet_l, wet_r) = if fx {
@@ -1438,6 +1496,7 @@ impl Engine {
     /// One sample of the series chain (see [`crate::chain`]): the
     /// voice and Creative's pitch layers at the source, then each module
     /// on what the previous ones made.
+    #[allow(clippy::too_many_arguments)]
     fn series(
         &mut self,
         buses: &Buses,
@@ -1446,11 +1505,18 @@ impl Engine {
         vocoding: bool,
         sidechain: f32,
         follow: Option<f64>,
+        solo: [f32; 4],
+        soloing: f32,
     ) -> (f32, f32) {
         let [cl, cr] = buses.creative;
         let mut s = (
             buses.lead[0] + cl * creative_level,
             buses.lead[1] + cr * creative_level,
+        );
+        // Solo: the soloed layers alone, as they go into the chain.
+        let mut alone = (
+            buses.lead[0] * solo[0] + cl * creative_level * solo[1],
+            buses.lead[1] * solo[0] + cr * creative_level * solo[1],
         );
         // Harmonies after the vocoder: its internal carrier sings them
         // (the vocoder's pitch is its carrier's), and what passes by the
@@ -1470,6 +1536,10 @@ impl Engine {
                 Stage::Harmony => {
                     let g = if carried { pass } else { 1.0 };
                     s = (s.0 + buses.harmony[0] * g, s.1 + buses.harmony[1] * g);
+                    alone = (
+                        alone.0 + buses.harmony[0] * solo[2],
+                        alone.1 + buses.harmony[1] * solo[2],
+                    );
                 }
                 Stage::Vocoder if vocoding => {
                     let m = 0.5 * (s.0 + s.1);
@@ -1478,11 +1548,15 @@ impl Engine {
                     let (d, w) = crossfade(voc_level);
                     pass = d;
                     s = (s.0 * d + vl * w, s.1 * d + vr * w);
+                    alone = (alone.0 + vl * w * solo[3], alone.1 + vr * w * solo[3]);
                 }
                 Stage::Vocoder => {}
             }
         }
-        s
+        (
+            s.0 + (alone.0 - s.0) * soloing,
+            s.1 + (alone.1 - s.1) * soloing,
+        )
     }
 }
 
@@ -2155,6 +2229,40 @@ mod tests {
         e.process_with_sidechain(&mut l, &mut r, Some((&voice, &voice)));
         for i in n / 2..n / 2 + 100 {
             assert!((l[i] - synth[i - lat]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn solo_mutes_the_other_layers() {
+        // The lead alone, then soloing the (silent) harmony layer: the
+        // lead must go quiet, in parallel and in series.
+        for routing in [0.0, 1.0] {
+            let render = |solo_harmony: bool| {
+                let mut e = Engine::default();
+                e.prepare(48_000.0, 512);
+                let mut v = ParamValues::default();
+                v.set(ParamId::Routing, routing);
+                v.set(ParamId::Mix, 100.0);
+                v.set(ParamId::SoloHarmony, if solo_harmony { 1.0 } else { 0.0 });
+                e.set_all(&v, true);
+                let mut peak = 0.0_f32;
+                let mut n = 0u32;
+                for _ in 0..40 {
+                    let mut l = [0.0_f32; 512];
+                    for x in &mut l {
+                        #[allow(clippy::cast_precision_loss)]
+                        let t = n as f32 / 48_000.0;
+                        *x = 0.4 * (std::f32::consts::TAU * 220.0 * t).sin();
+                        n += 1;
+                    }
+                    let mut r = l;
+                    e.process(&mut l, &mut r);
+                    peak = l.iter().fold(peak, |a, b| a.max(b.abs()));
+                }
+                peak
+            };
+            assert!(render(false) > 0.05, "routing {routing}");
+            assert!(render(true) < 1e-3, "routing {routing}");
         }
     }
 }

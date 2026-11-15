@@ -405,3 +405,43 @@ fn preset_browser_capture() {
             .expect("write capture");
     }
 }
+
+#[test]
+fn settings_capture() {
+    // The gear's menu open, a layer soloed, in series.
+    let write = std::env::var_os("QUACK_WRITE_CAPTURES").is_some();
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design");
+    let mut v = ParamValues::default();
+    v.set(ParamId::Mode, 1.0);
+    v.set(ParamId::HarmonyOn, 1.0);
+    v.set(ParamId::VocoderOn, 1.0);
+    v.set(ParamId::Routing, 1.0);
+    v.set(ParamId::SoloHarmony, 1.0);
+    v.set(ParamId::MidiOut, 1.0);
+    let params = Values(RefCell::new(v), ControlState::default());
+    let view = View {
+        latency_samples: 591,
+        sample_rate: 48_000.0,
+        tempo: 96.0,
+        ..View::default()
+    };
+    let ctx = egui::Context::default();
+    theme::apply(&ctx, truce_font::JETBRAINS_MONO);
+    let mut st = UiState::default();
+    st.set_page(Page::Harmony);
+    st.open_settings();
+    #[allow(clippy::cast_precision_loss)]
+    let canvas = support::raster::render(
+        &ctx,
+        BASE_W as f32,
+        BASE_H as f32,
+        2.0,
+        3,
+        color::BG,
+        |ui| draw(ui, &params, &view, &mut st),
+    );
+    if write {
+        support::raster::write_png(&canvas, &out.join("editor-settings.png"))
+            .expect("write capture");
+    }
+}

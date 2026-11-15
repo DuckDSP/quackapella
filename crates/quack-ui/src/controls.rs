@@ -87,10 +87,10 @@ pub(crate) fn knob_named(
     accent: Color32,
     fmt: &dyn Fn(f64) -> String,
     label: &str,
-) {
+) -> egui::Response {
     knob_tapered(
         ui, params, st, id, centre, size_pt, floor, accent, fmt, label, false,
-    );
+    )
 }
 
 /// [`knob_named`], with a logarithmic travel when `log` is set (for
@@ -109,7 +109,68 @@ pub(crate) fn knob_tapered(
     fmt: &dyn Fn(f64) -> String,
     label: &str,
     log: bool,
+) -> egui::Response {
+    knob_impl(
+        ui,
+        params,
+        st,
+        id,
+        centre,
+        size_pt,
+        floor,
+        accent,
+        fmt,
+        label,
+        log,
+        size::CAPTION - 1.0,
+    )
+}
+
+/// A small knob (a voice's level, its pan) with a smaller label.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn knob_small(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    id: ParamId,
+    centre: egui::Pos2,
+    size_pt: f32,
+    accent: Color32,
+    fmt: &dyn Fn(f64) -> String,
+    label: &str,
 ) {
+    let floor = id.spec().kind.min();
+    knob_impl(
+        ui,
+        params,
+        st,
+        id,
+        centre,
+        size_pt,
+        floor,
+        accent,
+        fmt,
+        label,
+        false,
+        size::CAPTION - 3.0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knob_impl(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    id: ParamId,
+    centre: egui::Pos2,
+    size_pt: f32,
+    floor: f64,
+    accent: Color32,
+    fmt: &dyn Fn(f64) -> String,
+    label: &str,
+    log: bool,
+    label_size: f32,
+) -> egui::Response {
     let spec = id.spec();
     let kind = spec.kind;
     let log = log && kind.min() > 0.0;
@@ -194,21 +255,26 @@ pub(crate) fn knob_tapered(
         let m = norm(st.presets.modded.get(id).max(floor)) as f32;
         crate::paint::mod_arc(p, centre, size_pt, t, m, accent);
     }
+    // Small knobs have no room for a unit.
+    let unit = if size_pt < 46.0 { "" } else { spec.unit };
     knob_value(
         p,
         area,
         &fmt(params.get_plain(id).max(floor)),
-        spec.unit,
+        unit,
         size::VALUE,
     );
-    text(
-        p,
-        centre + vec2(0.0, size_pt * 0.5 + 12.0),
-        Align2::CENTER_CENTER,
-        label,
-        size::CAPTION,
-        color::TEXT_DIM,
-    );
+    if !label.is_empty() {
+        text(
+            p,
+            centre + vec2(0.0, size_pt * 0.5 + label_size * 0.5 + 5.0),
+            Align2::CENTER_CENTER,
+            label,
+            label_size,
+            color::TEXT_DIM,
+        );
+    }
+    resp
 }
 
 /// Place of `plain` on a logarithmic travel from `min` to `max` (0-1).
@@ -285,19 +351,13 @@ pub(crate) fn fader(
     crate::perform::attach(ui, &resp, params, id);
 
     let p = ui.painter();
-    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    crate::paint::fill(p, r, radius::CONTROL, color::CONTROL);
     #[allow(clippy::cast_possible_truncation)]
     let t = kind.normalize(params.get_plain(id)) as f32;
     let inner = r.shrink(2.0);
     if t > 0.0 {
         let fill = Rect::from_min_size(inner.min, vec2(inner.width() * t, inner.height()));
-        rounded(
-            p,
-            fill,
-            radius::CONTROL - 1,
-            accent.gamma_multiply(0.28),
-            accent.gamma_multiply(0.28),
-        );
+        crate::paint::fill(p, fill, radius::CONTROL - 1, accent.gamma_multiply(0.28));
     }
     let mid = r.center().y;
     // Without a label, the value sits in the middle.
@@ -350,7 +410,7 @@ pub(crate) fn segmented(
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let lit = (params.get_plain(id).max(0.0).round() as usize).min(labels.len() - 1);
     let p = ui.painter();
-    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    crate::paint::fill(p, r, radius::CONTROL, color::CONTROL);
     #[allow(clippy::cast_precision_loss)]
     let w = r.width() / labels.len() as f32;
     for (i, label) in labels.iter().enumerate() {
@@ -368,24 +428,25 @@ pub(crate) fn segmented(
         crate::perform::attach(ui, &resp, params, id);
         let accent = accents[i % accents.len()];
         if i == lit {
-            rounded(
+            crate::paint::fill(
                 p,
                 seg.shrink(2.0),
                 radius::CONTROL - 1,
                 accent.gamma_multiply(0.22),
-                accent.gamma_multiply(0.8),
             );
         } else if resp.hovered() {
-            rounded(
-                p,
-                seg.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            crate::paint::fill(p, seg.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         }
         let c = if i == lit { accent } else { color::TEXT_DIM };
-        text(p, seg.center(), Align2::CENTER_CENTER, label, size::BODY, c);
+        crate::paint::text_fit(
+            p,
+            seg.center(),
+            Align2::CENTER_CENTER,
+            label,
+            size::BODY.min(r.height() * 0.52),
+            c,
+            seg.width() - 8.0,
+        );
     }
 }
 
@@ -399,7 +460,7 @@ pub(crate) fn tabs(
     accent: Color32,
 ) {
     let p = ui.painter();
-    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    crate::paint::fill(p, r, radius::CONTROL, color::CONTROL);
     #[allow(clippy::cast_precision_loss)]
     let w = r.width() / labels.len() as f32;
     for (i, label) in labels.iter().enumerate() {
@@ -410,28 +471,29 @@ pub(crate) fn tabs(
             *selected = i;
         }
         if i == *selected {
-            rounded(
+            crate::paint::fill(
                 p,
                 seg.shrink(2.0),
                 radius::CONTROL - 1,
                 accent.gamma_multiply(0.22),
-                accent.gamma_multiply(0.8),
             );
         } else if resp.hovered() {
-            rounded(
-                p,
-                seg.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            crate::paint::fill(p, seg.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         }
         let c = if i == *selected {
             accent
         } else {
             color::TEXT_DIM
         };
-        text(p, seg.center(), Align2::CENTER_CENTER, label, size::BODY, c);
+        crate::paint::text_fit(
+            p,
+            seg.center(),
+            Align2::CENTER_CENTER,
+            label,
+            size::BODY.min(r.height() * 0.52),
+            c,
+            seg.width() - 8.0,
+        );
     }
 }
 
@@ -457,6 +519,72 @@ pub(crate) fn toggle(
     crate::perform::attach(ui, &resp, params, id);
 }
 
+/// A bool parameter as a small switch with its label on the right
+/// (states that stay on: Keep in Key, Latch...). The whole of `r` is
+/// the hit area.
+pub(crate) fn switch(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    id: ParamId,
+    r: Rect,
+    label: &str,
+    accent: Color32,
+) -> egui::Response {
+    let on = params.get_plain(id) >= 0.5;
+    let resp = ui.interact(
+        r,
+        ui.id().with(("quack-switch", id.index())),
+        Sense::click(),
+    );
+    if resp.clicked() {
+        set_once(params, id, if on { 0.0 } else { 1.0 });
+    }
+    crate::perform::attach(ui, &resp, params, id);
+    switch_look(ui.painter(), r, label, on, resp.hovered(), accent);
+    resp
+}
+
+/// How a [`switch`] looks, for switches that are not parameters.
+pub(crate) fn switch_look(
+    p: &egui::Painter,
+    r: Rect,
+    label: &str,
+    on: bool,
+    hover: bool,
+    accent: Color32,
+) {
+    let track = Rect::from_min_size(pos2(r.left(), r.center().y - 8.0), vec2(28.0, 16.0));
+    let bg = if on {
+        accent.gamma_multiply(0.45)
+    } else if hover {
+        color::HOVER
+    } else {
+        color::BORDER
+    };
+    crate::paint::fill(p, track, 8, bg);
+    let knob_x = if on {
+        track.right() - 8.0
+    } else {
+        track.left() + 8.0
+    };
+    p.circle_filled(
+        pos2(knob_x, track.center().y),
+        5.5,
+        if on { accent } else { color::TEXT_FAINT },
+    );
+    if !label.is_empty() {
+        crate::paint::text_fit(
+            p,
+            pos2(track.right() + 8.0, r.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            size::LABEL,
+            if on { color::TEXT } else { color::TEXT_DIM },
+            r.right() - track.right() - 8.0,
+        );
+    }
+}
+
 /// Previous / next choice of an enum parameter, its name in between.
 /// A click on either arrow (or the wheel) is one edit; it wraps.
 pub(crate) fn stepper(
@@ -471,7 +599,7 @@ pub(crate) fn stepper(
     let count = kind.max() + 1.0;
     let at = params.get_plain(id);
     let p = ui.painter();
-    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    crate::paint::fill(p, r, radius::CONTROL, color::CONTROL);
     let arrow_w = r.height();
     let step = |dir: f64| set_once(params, id, (at + dir).rem_euclid(count));
     for (i, (label, dir)) in [("‹", -1.0), ("›", 1.0)].into_iter().enumerate() {
@@ -492,13 +620,7 @@ pub(crate) fn stepper(
             step(dir);
         }
         if resp.hovered() {
-            rounded(
-                p,
-                a.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            crate::paint::fill(p, a.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         }
         text(
             p,
@@ -521,13 +643,7 @@ pub(crate) fn stepper(
     let open = name_resp.clicked();
     crate::perform::attach(ui, &name_resp, params, id);
     if name_resp.hovered() {
-        rounded(
-            p,
-            mid.shrink(2.0),
-            radius::CONTROL - 1,
-            color::RAISED,
-            color::RAISED,
-        );
+        crate::paint::fill(p, mid.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             step(-f64::from(scroll.signum()));
