@@ -1,0 +1,67 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching the version in Cargo.toml) to build
+# the macOS installer and the VST3 / CLAP / AU zips and publish them as
+# a draft GitHub release. Review the draft, then publish it by hand.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS release (pkg + zips)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      # Universal binaries: cargo truce package builds both slices.
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-truce --version =6.3.0 --locked
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${GITHUB_REF_NAME}" == "v$version" ]] || {
+            echo "tag ${GITHUB_REF_NAME} does not match version $version"; exit 1; }
+      - run: cargo test --workspace --features quack-plugin/rt-paranoid,quack-link-plugin/rt-paranoid
+      # No Developer ID on the runner: bundles signed ad hoc, pkg unsigned.
+      - name: Build pkg and zips
+        run: scripts/release-macos.sh
+      - name: Install the pkg, auval the two AUs
+        run: |
+          sudo installer -pkg dist/Quackapella-*-macos.pkg -target /
+          killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+          auval -strict -v aumf Qkpl DKDS
+          auval -strict -v aufx Qklk DKDS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quackapella-release-macos
+          path: dist/*
+          if-no-files-found: error
+      - name: Draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: Quackapella ${{ github.ref_name }}
+          files: |
+            dist/*.pkg
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          body: |
+            Quackapella and Quackapella Link for macOS (Apple Silicon and Intel).
+
+            - `Quackapella-*-macos.pkg`: installer for AU, VST3 and CLAP (pick the formats in "Customize").
+            - `*-vst3.zip`, `*-clap.zip`, `*-au.zip`: the same bundles to copy by hand.
+
+            The installer is not signed by Apple (open-source project, no paid
+            developer account). See "Opening on macOS" in the README.
