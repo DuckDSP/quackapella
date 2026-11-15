@@ -1,5 +1,6 @@
 //! Drawing helpers in the DuckDSP style (after Sonder's `paint.rs`):
-//! flat surfaces, thin outlines, one accent at a time.
+//! flat surfaces told apart by their shade (no outlines on panels and
+//! controls), one accent at a time.
 
 use egui::{Align2, Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
@@ -64,12 +65,62 @@ pub(crate) fn rounded(p: &Painter, r: Rect, rad: u8, fill: Color32, border: Colo
     );
 }
 
+/// A filled box without outline.
+pub(crate) fn fill(p: &Painter, r: Rect, rad: u8, c: Color32) {
+    p.rect_filled(r, CornerRadius::same(rad), c);
+}
+
 pub(crate) fn panel(p: &Painter, r: Rect) {
-    rounded(p, r, radius::PANEL, color::PANEL, color::BORDER);
+    fill(p, r, radius::PANEL, color::PANEL);
+}
+
+/// A section's title: small capitals, spaced out, in `c` (faint text
+/// unless it names a layer). `pos` is its left centre.
+pub(crate) fn section(p: &Painter, pos: Pos2, s: &str, c: Color32) -> Rect {
+    spaced(p, pos, &s.to_uppercase(), size::SECTION, 1.4, c)
+}
+
+/// The power symbol (bypass), centred on `c`.
+pub(crate) fn power_icon(p: &Painter, c: Pos2, r: f32, col: Color32) {
+    let stroke = Stroke::new(2.0_f32, col);
+    let pts: Vec<Pos2> = (0..=28)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let a = std::f32::consts::PI * (-0.5 + 0.22 + 1.56 * i as f32 / 28.0)
+                - std::f32::consts::PI;
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    p.add(Shape::line(pts, stroke));
+    p.line_segment([c - vec2(0.0, r + 1.0), c - vec2(0.0, r * 0.15)], stroke);
+}
+
+/// A gear (settings), centred on `c`.
+pub(crate) fn gear_icon(p: &Painter, c: Pos2, r: f32, col: Color32) {
+    let stroke = Stroke::new(1.6_f32, col);
+    p.circle_stroke(c, r * 0.42, stroke);
+    for i in 0..8 {
+        #[allow(clippy::cast_precision_loss)]
+        let a = std::f32::consts::PI * 2.0 * i as f32 / 8.0;
+        let d = vec2(a.cos(), a.sin());
+        p.line_segment([c + d * r * 0.62, c + d * r], Stroke::new(2.4_f32, col));
+    }
+    p.circle_stroke(c, r * 0.72, stroke);
+}
+
+/// A layer's light: lit (with a soft halo) or dark.
+pub(crate) fn led(p: &Painter, c: Pos2, on: bool, col: Color32) {
+    if on {
+        p.circle_filled(c, 7.0, col.gamma_multiply(0.12));
+        p.circle_filled(c, 5.0, col.gamma_multiply(0.22));
+        p.circle_filled(c, 3.5, col);
+    } else {
+        p.circle_filled(c, 3.5, color::HOVER);
+    }
 }
 
 pub(crate) fn well(p: &Painter, r: Rect) {
-    rounded(p, r, radius::CONTROL, color::WELL, color::GRID_STRONG);
+    fill(p, r, radius::CONTROL, color::WELL);
 }
 
 /// Rotary control in Knock's style (`knob_face_sized` there): dark
@@ -138,8 +189,17 @@ pub(crate) fn mod_arc(p: &Painter, c: Pos2, size: f32, t: f32, m: f32, accent: C
 /// The value inside a knob, as in Knock: number in the value font, unit
 /// smaller and dimmer; shrunk until it fits the face.
 pub(crate) fn knob_value(p: &Painter, r: Rect, val: &str, unit: &str, size: f32) {
-    let mut font_size = size;
-    loop {
+    // A word ("Off", "Jump") stands without its unit.
+    let unit = if val.chars().any(|c| c.is_ascii_digit()) {
+        unit
+    } else {
+        ""
+    };
+    // Inside the inner ring (49/64 of the face), a few points clear of it.
+    let room = r.width() * 49.0 / 64.0 - 8.0;
+    let max = size.min(r.width() * 0.26);
+    let min = 9.0_f32.min(max);
+    let layout = |font_size: f32, sep: &str, unit: &str| {
         let mut job = egui::text::LayoutJob::default();
         job.append(
             val,
@@ -152,43 +212,56 @@ pub(crate) fn knob_value(p: &Painter, r: Rect, val: &str, unit: &str, size: f32)
         );
         if !unit.is_empty() {
             job.append(
-                &format!(" {unit}"),
+                &format!("{sep}{unit}"),
                 0.0,
                 egui::TextFormat {
-                    font_id: value_font(font_size - 3.0),
+                    font_id: value_font((font_size * 0.76).max(7.5)),
                     color: color::TEXT_DIM,
                     ..Default::default()
                 },
             );
         }
-        let galley = p.layout_job(job);
-        if galley.size().x <= r.width() - 18.0 || font_size <= 9.0 {
-            p.galley(r.center() - galley.size() * 0.5, galley, color::TEXT);
-            break;
+        p.layout_job(job)
+    };
+    // Shrink first; at the smallest size drop the space before the
+    // unit, then the unit itself: the value never touches the ring.
+    let mut font_size = max;
+    let galley = loop {
+        let g = layout(font_size, " ", unit);
+        if g.size().x <= room {
+            break g;
         }
-        font_size -= 0.5;
-    }
+        if font_size > min {
+            font_size = (font_size - 0.5).max(min);
+            continue;
+        }
+        let g = layout(font_size, "", unit);
+        if g.size().x <= room {
+            break g;
+        }
+        break layout(font_size, "", "");
+    };
+    p.galley(r.center() - galley.size() * 0.5, galley, color::TEXT);
 }
 
 /// Button-like box with centred text. `on` lights it in `accent`.
 pub(crate) fn pill(p: &Painter, r: Rect, label: &str, on: bool, hover: bool, accent: Color32) {
-    if on {
-        rounded(
-            p,
-            r,
-            radius::CONTROL,
-            accent.gamma_multiply(0.20),
-            accent.gamma_multiply(0.9),
-        );
+    let bg = if on {
+        accent.gamma_multiply(0.22)
+    } else if hover {
+        color::HOVER
     } else {
-        rounded(
-            p,
-            r,
-            radius::CONTROL,
-            if hover { color::BORDER } else { color::RAISED },
-            color::BORDER,
-        );
-    }
+        color::RAISED
+    };
+    fill(p, r, radius::CONTROL, bg);
     let c = if on { accent } else { color::TEXT_DIM };
-    text(p, r.center(), Align2::CENTER_CENTER, label, size::BODY, c);
+    text_fit(
+        p,
+        r.center(),
+        Align2::CENTER_CENTER,
+        label,
+        size::BODY.min(r.height() * 0.55),
+        c,
+        r.width() - 12.0,
+    );
 }

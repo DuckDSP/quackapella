@@ -22,6 +22,7 @@ mod assist;
 mod brand;
 mod controls;
 mod eq;
+mod help;
 pub mod library;
 pub mod link;
 mod paint;
@@ -41,13 +42,14 @@ use quack_dsp::params::NOTE_PARAMS;
 use quack_dsp::vocoder::{Carrier, VocoderMode, bands_from_index};
 use quack_dsp::{ParamId, VoiceMode};
 
+use help::Hint;
 use paint::{panel, spaced, text, value, well};
 use theme::{color, radius, size, space};
 
 /// Editor size in points at 100 % zoom (the zoom scales it, with the
 /// AUv2 resize patch in `vendor/`).
 pub const BASE_W: u32 = 1040;
-pub const BASE_H: u32 = 904;
+pub const BASE_H: u32 = 800;
 
 /// Parameter access in plain values, implemented over the host by the
 /// plugin and by a plain array in tests.
@@ -157,6 +159,8 @@ pub struct UiState {
     vocoder_tab: usize,
     /// Perform row lists open, and where they hang from.
     keys_menu: bool,
+    /// Settings (the gear) open.
+    settings: bool,
     voice_menu: bool,
     channel_menu: bool,
     source_menu: bool,
@@ -182,6 +186,7 @@ impl Default for UiState {
             assist: assist::AssistUi::default(),
             vocoder_tab: 0,
             keys_menu: false,
+            settings: false,
             voice_menu: false,
             channel_menu: false,
             source_menu: false,
@@ -263,6 +268,11 @@ impl UiState {
         }
     }
 
+    /// Open the settings (the gear's menu); for captures.
+    pub fn open_settings(&mut self) {
+        self.settings = true;
+    }
+
     /// Close an edit left open (window closed mid-drag).
     pub fn end_open_edits(&mut self, params: &dyn ParamAccess) {
         if let Some((id, _)) = self.drag.take() {
@@ -317,80 +327,93 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     p.rect_filled(full, 0.0, color::BG);
     let mode = VoiceMode::from_index(params.get_plain(ParamId::Mode));
     let accent = mode_accent(mode);
-    let pad = space::XL;
-    let inner = full.shrink(pad);
+    let inner = full.shrink(space::L);
+    let gap = space::S;
 
     perform::refresh(params, st);
 
-    // Header: wordmark, presets, latency, bypass.
-    let head_y = inner.top() + 18.0;
+    // Header: wordmark, presets, latency, settings, bypass, DuckDSP.
+    let head = Rect::from_min_size(inner.min, vec2(inner.width(), HEADER_H));
+    let head_y = head.center().y;
     spaced(
         &p,
-        pos2(inner.left(), head_y),
+        pos2(head.left() + 2.0, head_y - 3.0),
         "QUACKAPELLA",
-        size::TITLE + 4.0,
+        size::TITLE + 1.0,
         4.0,
         color::TEXT,
     );
     p.line_segment(
         [
-            pos2(inner.left(), head_y + 20.0),
-            pos2(inner.left() + 36.0, head_y + 20.0),
+            pos2(head.left() + 2.0, head_y + 12.0),
+            pos2(head.left() + 32.0, head_y + 12.0),
         ],
         egui::Stroke::new(2.0_f32, color::QUACK),
     );
-    let byp = Rect::from_min_size(pos2(inner.right() - 96.0, head_y - 15.0), vec2(96.0, 30.0));
-    controls::toggle(ui, params, ParamId::Bypass, byp, "Bypass", color::QUACK);
+    let mark_h = 11.0;
+    let mark = Rect::from_min_size(
+        pos2(
+            head.right() - brand::Brand::DuckDsp.width_for(mark_h),
+            head_y - mark_h / 2.0,
+        ),
+        vec2(brand::Brand::DuckDsp.width_for(mark_h), mark_h),
+    );
+    brand::paint(ui, brand::Brand::DuckDsp, mark, color::TEXT_FAINT);
+    let icon = vec2(34.0, HEADER_H - 2.0);
+    let byp = Rect::from_min_size(
+        pos2(mark.left() - space::L - icon.x, head_y - icon.y / 2.0),
+        icon,
+    );
+    bypass_button(ui, params, byp);
+    let gear = byp.translate(vec2(-icon.x - space::S, 0.0));
+    perform::settings_button(ui, st, gear);
     #[allow(clippy::cast_possible_truncation)]
     let lat_ms = if view.sample_rate > 0.0 {
         (f64::from(view.latency_samples) * 1000.0 / view.sample_rate) as f32
     } else {
         0.0
     };
+    let lat = format!("{lat_ms:.1} ms");
+    let lat_w = 70.0;
+    let lat_r = Rect::from_min_size(
+        pos2(gear.left() - space::M - lat_w, head_y - 12.0),
+        vec2(lat_w, 24.0),
+    );
+    paint::fill(&p, lat_r, radius::CONTROL, color::PANEL);
     value(
         &p,
-        pos2(byp.left() - space::L, head_y),
-        Align2::RIGHT_CENTER,
-        &format!("{lat_ms:.1} ms"),
-        size::VALUE,
+        lat_r.center(),
+        Align2::CENTER_CENTER,
+        &lat,
+        size::VALUE - 2.0,
         color::TEXT_DIM,
     );
-    let lat_caption = text(
-        &p,
-        pos2(byp.left() - space::L - 70.0, head_y),
-        Align2::RIGHT_CENTER,
-        "Latency",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
+    ui.interact(lat_r, ui.id().with("quack-latency"), Sense::hover())
+        .hint("Latency the host compensates");
 
-    // Layers strip: each layer's switch, page and level; then the
-    // correction style, the voice range and the latency switch.
-    let mode_r = Rect::from_min_size(
-        pos2(inner.left(), inner.top() + 48.0),
-        vec2(inner.width(), 82.0),
+    // Layers strip: routing, the layers' cards, voice range and latency
+    // switch.
+    let strip = Rect::from_min_size(
+        pos2(inner.left(), head.bottom() + space::M),
+        vec2(inner.width(), STRIP_H),
     );
-    layers_panel(ui, params, st, mode_r, mode);
+    layers_panel(ui, params, st, strip, mode);
 
     // Presets between the wordmark and the latency (drawn after the
-    // mode panel so the browser opens over it).
-    let bar_left = inner.left() + 230.0;
+    // strip so the browser opens over it).
     let bar_r = Rect::from_min_max(
-        pos2(bar_left, head_y - 15.0),
-        pos2(lat_caption.left() - space::XL, head_y + 15.0),
+        pos2(inner.left() + 236.0, head_y - 16.0),
+        pos2(
+            (lat_r.left() - space::XL).min(inner.left() + 236.0 + 500.0),
+            head_y + 16.0,
+        ),
     );
-    let bar_r = Rect::from_min_size(bar_r.min, vec2(bar_r.width().min(440.0), 30.0));
 
-    // Tune panel and pitch graph.
-    let mid_top = mode_r.bottom() + space::M;
-    let mid_h = 318.0;
-    // The FX page gives its eight tabs a little more room.
-    let tune_w = if st.page == Page::Fx { 420.0 } else { 452.0 };
-    let tune_r = Rect::from_min_size(pos2(inner.left(), mid_top), vec2(tune_w, mid_h));
+    // Tune panel (or the FX page's EQ / assistant) and the layer page.
+    let mid_top = strip.bottom() + gap;
+    let tune_r = Rect::from_min_size(pos2(inner.left(), mid_top), vec2(LEFT_W, MID_H));
     assist::tick(params, st, view);
     if st.page == Page::Fx && !st.assist.open {
-        // The FX page takes the whole row: the output EQ's graph where
-        // the tune panel is on the layers' pages.
         eq::graph_panel(ui, params, st, view, tune_r, color::FX);
     } else if st.page == Page::Fx {
         assist::assistant_panel(ui, params, st, view, tune_r, color::FX);
@@ -398,8 +421,8 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         tune_panel(ui, params, st, view, tune_r, accent, mode);
     }
     let graph_r = Rect::from_min_max(
-        pos2(tune_r.right() + space::M, mid_top),
-        pos2(inner.right(), mid_top + mid_h),
+        pos2(tune_r.right() + gap, mid_top),
+        pos2(inner.right(), mid_top + MID_H),
     );
     let now = ui.input(|i| i.time);
     if now > 0.0 {
@@ -414,64 +437,58 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
         Page::Fx => fx_panel(ui, params, st, view, graph_r, page_acc),
     }
 
-    // Bottom row: voice, level, MIDI.
-    let row_top = tune_r.bottom() + space::M;
-    let foot_h = 26.0;
-    let macro_h = 92.0;
-    let perform_h = 72.0;
-    let row_h = inner.bottom() - foot_h - macro_h - perform_h - 2.0 * space::M - row_top;
-    let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(452.0, row_h));
+    // Lower row: the voice, the shown layer's effect sends, the output.
+    let row_top = tune_r.bottom() + gap;
+    let voice_r = Rect::from_min_size(pos2(inner.left(), row_top), vec2(LEFT_W, ROW_H));
     voice_panel(ui, params, st, voice_r, accent);
-    // The mixer, where the level and MIDI-in panels were: the levels,
-    // then each layer's delay, reverb, chorus and drive.
-    let split_x = voice_r.right() + space::M + 250.0 + space::M;
     let mix_r = Rect::from_min_max(
-        pos2(voice_r.right() + space::M, row_top),
-        pos2(inner.right(), row_top + row_h),
+        pos2(voice_r.right() + gap, row_top),
+        pos2(inner.right(), row_top + ROW_H),
     );
     mixer_panel(ui, params, st, mix_r);
-    let midi_r = Rect::from_min_max(pos2(split_x, row_top), mix_r.max);
 
-    // Perform row: snapshots and morph under the voice and mixer,
-    // MIDI out under MIDI in.
-    let perform_top = midi_r.bottom() + space::M;
-    let snap_r = Rect::from_min_max(
-        pos2(inner.left(), perform_top),
-        pos2(split_x - space::M, perform_top + perform_h),
+    // Perform: macros, snapshots and morph.
+    let perform_r = Rect::from_min_size(
+        pos2(inner.left(), mix_r.bottom() + gap),
+        vec2(inner.width(), PERFORM_H),
     );
-    perform::snapshot_panel(ui, params, st, snap_r);
-    let out_r = Rect::from_min_max(
-        pos2(midi_r.left(), perform_top),
-        pos2(inner.right(), perform_top + perform_h),
-    );
-    perform::midi_out_panel(ui, params, st, view, out_r, accent);
+    perform::perform_panel(ui, params, st, perform_r);
 
-    // Macros, program change, zoom.
-    let macro_r = Rect::from_min_size(
-        pos2(inner.left(), out_r.bottom() + space::M),
-        vec2(inner.width(), macro_h),
+    // Status bar: MIDI learn, version.
+    let status = Rect::from_min_max(
+        pos2(inner.left(), perform_r.bottom() + gap),
+        pos2(inner.right(), inner.bottom()),
     );
-    perform::macro_panel(ui, params, st, macro_r, accent);
-    perform::perform_menus(ui, params, st, accent);
-
-    // Footer: the DuckDSP mark.
-    let mark_h = 14.0;
-    let mark = Rect::from_min_size(
-        pos2(inner.left(), inner.bottom() - mark_h),
-        vec2(brand::Brand::DuckDsp.width_for(mark_h), mark_h),
-    );
-    brand::paint(ui, brand::Brand::DuckDsp, mark, color::TEXT_FAINT);
-    text(
+    paint::fill(&p, status, radius::CONTROL, color::CONTROL);
+    if let Some(hint) = help::current(ui.ctx()) {
+        paint::text_fit(
+            &p,
+            pos2(status.left() + space::M, status.center().y),
+            Align2::LEFT_CENTER,
+            &hint,
+            size::CAPTION - 2.5,
+            color::TEXT_DIM,
+            status.width() - 2.0 * space::M - 60.0,
+        );
+    } else {
+        perform::learn_status(
+            ui,
+            params,
+            pos2(status.left() + space::M, status.center().y),
+        );
+    }
+    value(
         &p,
-        pos2(inner.right(), mark.center().y),
+        pos2(status.right() - space::M, status.center().y),
         Align2::RIGHT_CENTER,
         concat!("v", env!("CARGO_PKG_VERSION")),
-        size::CAPTION,
+        size::CAPTION - 2.5,
         color::TEXT_FAINT,
     );
-    perform::learn_status(ui, params, pos2(inner.center().x, mark.center().y));
 
     perform::preset_bar(ui, params, st, bar_r);
+    perform::settings_menu(ui, params, st, view, gear);
+    perform::perform_menus(ui, params, st, accent);
 
     // Safety net: a drag cut short (window lost focus) ends its edit.
     if (st.drag.is_some() || st.eq.dragging()) && !ui.input(|i| i.pointer.any_down()) {
@@ -479,9 +496,47 @@ pub fn draw(ui: &mut egui::Ui, params: &dyn ParamAccess, view: &View, st: &mut U
     }
 }
 
-/// The layers strip: one cell per layer (switch, name opening its
-/// page, level), then the correction style, the voice range and the
-/// latency switch on the right.
+/// Heights of the editor's rows, and the width of the left column.
+const HEADER_H: f32 = 34.0;
+const STRIP_H: f32 = 72.0;
+const MID_H: f32 = 318.0;
+const ROW_H: f32 = 150.0;
+const PERFORM_H: f32 = 118.0;
+const LEFT_W: f32 = 420.0;
+
+/// Bypass as a power button: lit while the plugin processes.
+fn bypass_button(ui: &egui::Ui, params: &dyn ParamAccess, r: Rect) {
+    let on = params.get_plain(ParamId::Bypass) >= 0.5;
+    let resp = ui.interact(r, ui.id().with("quack-bypass"), Sense::click());
+    if resp.clicked() {
+        set_once(params, ParamId::Bypass, if on { 0.0 } else { 1.0 });
+    }
+    crate::perform::attach(ui, &resp, params, ParamId::Bypass);
+    let p = ui.painter();
+    let bg = if on {
+        color::QUACK.gamma_multiply(0.22)
+    } else if resp.hovered() {
+        color::HOVER
+    } else {
+        color::RAISED
+    };
+    paint::fill(p, r, radius::CONTROL, bg);
+    paint::power_icon(
+        p,
+        r.center() + vec2(0.0, 1.0),
+        6.5,
+        if on { color::QUACK } else { color::NATURAL },
+    );
+    resp.hint(if on {
+        "Bypassed: click to process again"
+    } else {
+        "Bypass"
+    });
+}
+
+/// The layers strip: routing on the left, one card per layer (light,
+/// name, what it does, solo, level), then the effects' card; the voice
+/// range and the latency switch on the right.
 fn layers_panel(
     ui: &egui::Ui,
     params: &dyn ParamAccess,
@@ -489,13 +544,11 @@ fn layers_panel(
     r: Rect,
     style: VoiceMode,
 ) {
-    let p = ui.painter();
-    panel(p, r);
-    let row1 = r.top() + 9.0;
-    let row2 = r.top() + 47.0;
-    // Right block: voice range and latency, then the style.
-    let right_w = 262.0;
-    let voice_r = Rect::from_min_size(pos2(r.right() - space::L - 150.0, row1), vec2(150.0, 28.0));
+    let side_w = 116.0;
+    let routing_w = 92.0;
+    // Right block: the voice range over the latency switch.
+    let half = (r.height() - space::S) / 2.0;
+    let voice_r = Rect::from_min_size(pos2(r.right() - side_w, r.top()), vec2(side_w, half));
     let range = VoiceRange::from_index(params.get_plain(ParamId::Voice));
     if controls::stepper(
         ui,
@@ -503,14 +556,14 @@ fn layers_panel(
         ParamId::Voice,
         voice_r,
         range.name(),
-        color::QUACK,
+        color::TEXT,
     ) {
         st.voice_menu = !st.voice_menu;
     }
     st.voice_rect = voice_r;
     let low_r = Rect::from_min_size(
-        pos2(r.right() - space::L - right_w, row1),
-        vec2(right_w - 150.0 - space::S, 28.0),
+        pos2(voice_r.left(), voice_r.bottom() + space::S),
+        vec2(side_w, half),
     );
     controls::toggle(
         ui,
@@ -518,69 +571,227 @@ fn layers_panel(
         ParamId::LowLatency,
         low_r,
         "Low Latency",
-        color::QUACK,
+        color::NEUTRAL,
     );
-    let style_r = Rect::from_min_size(pos2(low_r.left() + 52.0, row2), vec2(right_w - 52.0, 28.0));
-    text(
-        p,
-        pos2(low_r.left(), style_r.center().y),
-        Align2::LEFT_CENTER,
-        "Style",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    let names: Vec<&str> = VoiceMode::ALL.iter().map(|m| m.name()).collect();
-    let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
-    controls::segmented(ui, params, ParamId::Mode, style_r, &names, &accents);
 
-    // Routing (parallel or series), then the layer cells, in chain
-    // order in series with a chevron between them (click: swap).
-    let routing_w = 84.0;
-    let route_x = r.left() + space::L;
-    routing_switch(
-        ui,
-        params,
-        pos2(route_x, row1),
-        routing_w,
-        row2 + 28.0 - row1,
-    );
+    routing_switch(ui, params, r.min, routing_w, r.height());
     let series = Routing::from_index(params.get_plain(ParamId::Routing)) == Routing::Series;
     let chain = Chain::from_index(params.get_plain(ParamId::Chain));
     let order = layer_order(series, chain);
-    let left = route_x + routing_w + space::M;
-    let right = low_r.left() - space::XL;
+    let left = r.left() + routing_w + space::S;
+    let right = voice_r.left() - space::S;
     let gap = 12.0;
-    // The layers, then the effects' cell after a gap (they come last,
-    // whatever the routing).
     let cells = order.len() + 1;
     #[allow(clippy::cast_precision_loss)]
     let w = (right - left - gap * (cells - 1) as f32) / cells as f32;
+    let soloing = SOLO_PARAMS.iter().any(|&id| params.get_plain(id) >= 0.5);
     for (i, page) in order.into_iter().chain([Page::Fx]).enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let x = left + (w + gap) * i as f32;
-        let acc = page_accent(page, style);
-        let on = layer_on(params, page);
-        let tab = Rect::from_min_size(pos2(x, row1), vec2(w, 28.0));
-        layer_tab(ui, params, st, tab, page, on, acc);
-        let fader = Rect::from_min_size(pos2(x, row2), vec2(w, 28.0));
-        let label = match page {
-            Page::Voice => "Lead",
-            _ => "Level",
-        };
-        controls::fader(
-            ui,
-            params,
-            st,
-            page.level(),
-            fader,
-            if on { acc } else { acc.gamma_multiply(0.35) },
-            label,
-        );
+        let card = Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height()));
+        layer_card(ui, params, st, card, page, style, soloing);
         if series && i > 0 && page != Page::Fx {
-            let g = Rect::from_min_size(pos2(x - gap, row1), vec2(gap, row2 + 28.0 - row1));
+            let g = Rect::from_min_size(pos2(x - gap, r.top()), vec2(gap, r.height()));
             chain_link(ui, params, g, chain, i - 1);
         }
     }
+}
+
+/// The solo switches of the layers, in [`Page::ALL`] order.
+const SOLO_PARAMS: [ParamId; 4] = [
+    ParamId::SoloVoice,
+    ParamId::SoloCreative,
+    ParamId::SoloHarmony,
+    ParamId::SoloVocoder,
+];
+
+/// A layer's solo switch (the effects have none).
+fn solo_param(page: Page) -> Option<ParamId> {
+    Page::ALL
+        .iter()
+        .position(|&l| l == page)
+        .map(|i| SOLO_PARAMS[i])
+}
+
+/// What a layer's card says under its name.
+fn layer_summary(params: &dyn ParamAccess, page: Page, style: VoiceMode) -> String {
+    if !layer_on(params, page) {
+        return "off".to_owned();
+    }
+    match page {
+        Page::Voice => style.name().to_owned(),
+        Page::Creative => "on".to_owned(),
+        Page::Harmony => HarmonyMode::from_index(params.get_plain(ParamId::Harmony))
+            .name()
+            .to_owned(),
+        Page::Vocoder => VocoderMode::from_index(params.get_plain(ParamId::Vocoder))
+            .name()
+            .to_owned(),
+        Page::Fx => {
+            let n = [
+                ParamId::ToneOn,
+                ParamId::DynamicsOn,
+                ParamId::DriveOn,
+                ParamId::ChorusOn,
+                ParamId::EqOn,
+                ParamId::DelayOn,
+                ParamId::ReverbOn,
+                ParamId::OutputOn,
+            ]
+            .iter()
+            .filter(|&&id| params.get_plain(id) >= 0.5)
+            .count();
+            format!("{n} on")
+        }
+    }
+}
+
+/// A layer's card: its light (a click switches the layer), its name
+/// and summary (a click shows its page), solo, and its level.
+fn layer_card(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    r: Rect,
+    page: Page,
+    style: VoiceMode,
+    soloing: bool,
+) {
+    let acc = page_accent(page, style);
+    let on = layer_on(params, page);
+    let shown = st.page == page;
+    let solo = solo_param(page);
+    let soloed = solo.is_some_and(|id| params.get_plain(id) >= 0.5);
+    let muted = soloing && !soloed;
+    let knob_d = 40.0;
+    let knob_c = pos2(r.right() - 10.0 - knob_d / 2.0, r.center().y);
+    let led_r = Rect::from_min_size(r.min, vec2(30.0, 34.0));
+    let solo_r = Rect::from_min_size(pos2(r.left() + 12.0, r.bottom() - 26.0), vec2(24.0, 18.0));
+    let body = Rect::from_min_max(r.min, pos2(knob_c.x - knob_d / 2.0 - 4.0, r.bottom()));
+    let resp = ui.interact(
+        body,
+        ui.id().with(("quack-layer-card", page as u8)),
+        Sense::click(),
+    );
+    // The light and solo sit on the card and take their own clicks.
+    let led_resp = page.switch().map(|id| {
+        let resp = ui.interact(
+            led_r,
+            ui.id().with(("quack-layer-on", page as u8)),
+            Sense::click(),
+        );
+        if resp.clicked() {
+            set_once(params, id, if on { 0.0 } else { 1.0 });
+        }
+        crate::perform::attach(ui, &resp, params, id);
+        resp.hint(if on { "Switch off" } else { "Switch on" })
+    });
+    let solo_resp = solo.map(|id| {
+        let resp = ui.interact(
+            solo_r,
+            ui.id().with(("quack-layer-solo", page as u8)),
+            Sense::click(),
+        );
+        if resp.clicked() {
+            set_once(params, id, if soloed { 0.0 } else { 1.0 });
+        }
+        crate::perform::attach(ui, &resp, params, id);
+        resp.hint("Solo: hear this layer alone")
+    });
+    let over_parts = led_resp.as_ref().is_some_and(egui::Response::hovered)
+        || solo_resp.as_ref().is_some_and(egui::Response::hovered);
+    if resp.clicked() && !over_parts {
+        st.set_page(page);
+    }
+    let p = ui.painter();
+    let bg = if shown {
+        blend(color::PANEL, acc, 0.14)
+    } else if resp.hovered() && !over_parts {
+        color::RAISED
+    } else {
+        color::PANEL
+    };
+    paint::fill(p, r, radius::PANEL, bg);
+    paint::led(p, pos2(r.left() + 16.0, r.top() + 18.0), on, acc);
+    if led_resp.as_ref().is_some_and(egui::Response::hovered) {
+        p.circle_stroke(
+            pos2(r.left() + 16.0, r.top() + 18.0),
+            7.5,
+            egui::Stroke::new(1.0_f32, color::TEXT_FAINT),
+        );
+    }
+    let name_c = if shown {
+        acc
+    } else if on {
+        color::TEXT
+    } else {
+        color::TEXT_DIM
+    };
+    let text_w = knob_c.x - knob_d / 2.0 - 6.0 - (r.left() + 28.0);
+    paint::text_fit(
+        p,
+        pos2(r.left() + 28.0, r.top() + 18.0),
+        Align2::LEFT_CENTER,
+        page.name(),
+        size::BODY,
+        name_c,
+        text_w,
+    );
+    let summary = layer_summary(params, page, style);
+    let sum_r = paint::text_fit(
+        p,
+        pos2(r.left() + 28.0, r.top() + 36.0),
+        Align2::LEFT_CENTER,
+        &summary,
+        size::CAPTION - 2.5,
+        color::TEXT_FAINT,
+        text_w,
+    );
+    let _ = sum_r;
+    if let Some(sr) = solo_resp {
+        let bg = if soloed {
+            color::QUACK
+        } else if sr.hovered() {
+            color::HOVER
+        } else {
+            color::RAISED
+        };
+        paint::fill(p, solo_r, 4, bg);
+        text(
+            p,
+            solo_r.center(),
+            Align2::CENTER_CENTER,
+            "S",
+            size::CAPTION - 2.5,
+            if soloed { color::BG } else { color::TEXT_DIM },
+        );
+    }
+    controls::knob_small(
+        ui,
+        params,
+        st,
+        page.level(),
+        knob_c,
+        knob_d,
+        if on { acc } else { acc.gamma_multiply(0.35) },
+        &|v: f64| format!("{v:.0}"),
+        "",
+    );
+    if muted {
+        // Muted by another layer's solo.
+        ui.painter()
+            .rect_filled(r, radius::PANEL, color::BG.gamma_multiply(0.55));
+    }
+}
+
+/// `a` moved toward `b` by `t` (0-1), opaque.
+fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let v = (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+        v
+    };
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
 /// The layers in the order they play: parallel, the fixed order; in
@@ -606,54 +817,43 @@ fn layer_order(series: bool, chain: Chain) -> [Page; 4] {
 fn routing_switch(ui: &egui::Ui, params: &dyn ParamAccess, at: egui::Pos2, w: f32, h: f32) {
     let p = ui.painter();
     let r = Rect::from_min_size(at, vec2(w, h));
-    paint::rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    paint::fill(p, r, radius::PANEL, color::PANEL);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let lit = params.get_plain(ParamId::Routing).round() as usize;
+    let inner = r.shrink(4.0);
     for (i, routing) in Routing::ALL.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let seg = Rect::from_min_size(
-            pos2(r.left(), r.top() + h / 2.0 * i as f32),
-            vec2(w, h / 2.0),
-        );
+            pos2(inner.left(), inner.top() + inner.height() / 2.0 * i as f32),
+            vec2(inner.width(), inner.height() / 2.0),
+        )
+        .shrink2(vec2(0.0, 1.0));
         let resp = ui.interact(seg, ui.id().with(("quack-routing", i)), Sense::click());
         if resp.clicked() && i != lit {
             #[allow(clippy::cast_precision_loss)]
             set_once(params, ParamId::Routing, i as f64);
         }
         crate::perform::attach(ui, &resp, params, ParamId::Routing);
-        let resp = resp.on_hover_text(match routing {
+        let resp = resp.hint(match routing {
             Routing::Parallel => "Every layer is built from the voice, then mixed",
             Routing::Series => "Each module processes what comes before it",
         });
         if i == lit {
-            paint::rounded(
-                p,
-                seg.shrink(2.0),
-                radius::CONTROL - 1,
-                color::QUACK.gamma_multiply(0.22),
-                color::QUACK.gamma_multiply(0.8),
-            );
+            paint::fill(p, seg, radius::CONTROL, color::HOVER);
         } else if resp.hovered() {
-            paint::rounded(
-                p,
-                seg.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            paint::fill(p, seg, radius::CONTROL, color::RAISED);
         }
-        let c = if i == lit {
-            color::QUACK
-        } else {
-            color::TEXT_DIM
-        };
         text(
             p,
             seg.center(),
             Align2::CENTER_CENTER,
             routing.name(),
-            size::CAPTION,
-            c,
+            size::CAPTION - 1.0,
+            if i == lit {
+                color::TEXT
+            } else {
+                color::TEXT_DIM
+            },
         );
     }
 }
@@ -667,7 +867,7 @@ fn chain_link(ui: &egui::Ui, params: &dyn ParamAccess, r: Rect, chain: Chain, sl
     let hovered = if swappable {
         let resp = ui
             .interact(r, ui.id().with(("quack-chain", slot)), Sense::click())
-            .on_hover_text("Swap these two modules");
+            .hint("Swap these two modules");
         if resp.clicked() {
             #[allow(clippy::cast_precision_loss)]
             set_once(
@@ -688,105 +888,29 @@ fn chain_link(ui: &egui::Ui, params: &dyn ParamAccess, r: Rect, chain: Chain, sl
     let mid = r.center();
     let a = 4.0;
     let stroke = egui::Stroke::new(if hovered { 2.0_f32 } else { 1.5 }, c);
-    for dy in [-19.0, 19.0] {
-        let y = mid.y + dy;
-        p.line_segment(
-            [pos2(mid.x - a / 2.0, y - a), pos2(mid.x + a / 2.0, y)],
-            stroke,
-        );
-        p.line_segment(
-            [pos2(mid.x + a / 2.0, y), pos2(mid.x - a / 2.0, y + a)],
-            stroke,
-        );
-    }
     if swappable && hovered {
         // Arrows both ways: a swap.
-        p.line_segment([pos2(mid.x - 5.0, mid.y), pos2(mid.x + 5.0, mid.y)], stroke);
-    }
-}
-
-/// A layer's tab: the switch (a dot) on the left, the name opening the
-/// layer's page. The voice has no switch.
-fn layer_tab(
-    ui: &egui::Ui,
-    params: &dyn ParamAccess,
-    st: &mut UiState,
-    r: Rect,
-    page: Page,
-    on: bool,
-    accent: Color32,
-) {
-    let p = ui.painter();
-    let shown = st.page == page;
-    let power = Rect::from_min_size(r.min, vec2(r.height(), r.height()));
-    let name_r = Rect::from_min_max(pos2(power.right(), r.top()), r.max);
-    let resp = ui.interact(
-        name_r,
-        ui.id().with(("quack-layer-tab", page as u8)),
-        Sense::click(),
-    );
-    if resp.clicked() {
-        st.page = page;
-        if page != Page::Fx {
-            st.mix_layer = page;
-        }
-    }
-    if shown {
-        paint::rounded(
-            p,
-            r,
-            radius::CONTROL,
-            accent.gamma_multiply(0.22),
-            accent.gamma_multiply(0.8),
-        );
-    } else {
-        paint::rounded(
-            p,
-            r,
-            radius::CONTROL,
-            if resp.hovered() {
-                color::BORDER
-            } else {
-                color::RAISED
-            },
-            color::BORDER,
-        );
-    }
-    text(
-        p,
-        name_r.center() - vec2(power.width() * 0.25, 0.0),
-        Align2::CENTER_CENTER,
-        page.name(),
-        size::BODY,
-        if shown { accent } else { color::TEXT_DIM },
-    );
-    // The switch: a lit dot when the layer sounds.
-    let dot = power.center() + vec2(2.0, 0.0);
-    if let Some(id) = page.switch() {
-        let presp = ui.interact(
-            power,
-            ui.id().with(("quack-layer-on", page as u8)),
-            Sense::click(),
-        );
-        if presp.clicked() {
-            set_once(params, id, if on { 0.0 } else { 1.0 });
-        }
-        crate::perform::attach(ui, &presp, params, id);
-        let ring = if presp.hovered() {
-            color::TEXT_DIM
-        } else {
-            color::TEXT_FAINT
-        };
-        p.circle_stroke(
-            dot,
-            6.5,
-            egui::Stroke::new(1.5_f32, if on { accent } else { ring }),
-        );
-        if on {
-            p.circle_filled(dot, 3.5, accent);
+        for (dir, dy) in [(1.0, -5.0), (-1.0, 5.0)] {
+            let (x0, x1) = (mid.x - dir * a / 2.0, mid.x + dir * a / 2.0);
+            let y = mid.y + dy;
+            p.line_segment([pos2(x0, y - a), pos2(x1, y)], stroke);
+            p.line_segment([pos2(x1, y), pos2(x0, y + a)], stroke);
         }
     } else {
-        p.circle_filled(dot, 3.5, accent);
+        p.line_segment(
+            [
+                pos2(mid.x - a / 2.0, mid.y - a),
+                pos2(mid.x + a / 2.0, mid.y),
+            ],
+            stroke,
+        );
+        p.line_segment(
+            [
+                pos2(mid.x + a / 2.0, mid.y),
+                pos2(mid.x - a / 2.0, mid.y + a),
+            ],
+            stroke,
+        );
     }
 }
 
@@ -800,48 +924,41 @@ fn voice_panel(
 ) {
     let p = ui.painter();
     panel(p, r);
-    text(
+    let title_y = r.top() + 20.0;
+    paint::section(
         p,
-        r.left_top() + vec2(space::L, 20.0),
-        Align2::LEFT_CENTER,
+        pos2(r.left() + space::L, title_y),
         "Voice",
-        size::LABEL,
-        color::TEXT_DIM,
+        color::TEXT_FAINT,
     );
     let shift = params.get_plain(ParamId::Pitch) + params.get_plain(ParamId::Fine) / 100.0;
     let formant = params.get_plain(ParamId::Formant);
     let throat = params.get_plain(ParamId::Throat);
     let (line1, line2) = voice_summary(shift, formant);
     let line2 = throat_summary(throat, params.get_plain(ParamId::ThroatPitch)).unwrap_or(line2);
-    value(
+    // Keep In Key: the transposition before the correction, so the
+    // voice lands on the scale.
+    let kk = Rect::from_min_size(pos2(r.left() + 76.0, title_y - 11.0), vec2(124.0, 22.0));
+    controls::switch(ui, params, ParamId::KeepInKey, kk, "Keep in Key", accent);
+    let shown = value(
         p,
         r.right_top() + vec2(-space::L, 20.0),
         Align2::RIGHT_CENTER,
         &line1,
-        size::VALUE,
+        size::VALUE - 1.5,
         if shift.abs() < 0.005 {
-            color::TEXT_DIM
+            color::TEXT_FAINT
         } else {
             accent
         },
     );
-    text(
-        p,
-        pos2(r.center().x, r.bottom() - 13.0),
-        Align2::CENTER_CENTER,
-        &line2,
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    // Keep In Key: the transposition before the correction, so the
-    // voice lands on the scale.
-    let kk = Rect::from_min_size(pos2(r.left() + 76.0, r.top() + 8.0), vec2(112.0, 24.0));
-    controls::toggle(ui, params, ParamId::KeepInKey, kk, "Keep in Key", accent);
+    ui.interact(shown, ui.id().with("quack-voice-summary"), Sense::hover())
+        .hint(line2);
     let st_fmt = |v: f64| format!("{v:+.1}");
     let ct_fmt = |v: f64| format!("{v:+.0}");
     let pct = |v: f64| format!("{v:.0}");
     let kw = r.width() / 5.0;
-    let ky = r.center().y - 4.0;
+    let ky = r.top() + 40.0 + (r.height() - 40.0) / 2.0 - 8.0;
     let knobs: [(ParamId, &dyn Fn(f64) -> String); 5] = [
         (ParamId::Pitch, &st_fmt),
         (ParamId::Fine, &ct_fmt),
@@ -852,7 +969,7 @@ fn voice_panel(
     for (i, (id, fmt)) in knobs.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let cx = r.left() + kw * (i as f32 + 0.5);
-        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 60.0, accent, fmt);
+        controls::knob_sized(ui, params, st, id, pos2(cx, ky), 58.0, accent, fmt);
     }
 }
 
@@ -1076,9 +1193,9 @@ fn harmony_panel(
         },
     );
 
-    let knob_d = 64.0;
+    let knob_d = 62.0;
     let kw = (r.width() - 2.0 * space::L) / 6.0;
-    let row1 = r.top() + 108.0;
+    let row1 = r.top() + 100.0;
     let cap_y = row1 - knob_d * 0.5 - 16.0;
     let intervals_on = mode != HarmonyMode::Midi;
     let key = note_name(params.get_plain(ParamId::Key).round().clamp(0.0, 11.0) as u8 + 60);
@@ -1146,48 +1263,47 @@ fn harmony_panel(
             &interval,
             &label,
         );
-        // The voice's own level, under it.
-        let fr = Rect::from_center_size(
-            pos2(cx, row1 + knob_d * 0.5 + 38.0),
-            vec2(kw - space::S, 22.0),
-        );
+        // The voice's own level and its place in the stereo field,
+        // under it.
         let level = quack_dsp::params::HARMONY_LEVEL_PARAMS[i];
         let live = intervals_on && semis != 0;
-        controls::fader(
-            ui,
-            params,
-            st,
-            level,
-            fr,
-            if live { accent } else { dim },
-            "",
-        );
-        // And its place in the stereo field.
-        let pr = fr.translate(vec2(0.0, 26.0));
-        controls::fader(
-            ui,
-            params,
-            st,
-            quack_dsp::params::HARMONY_PAN_PARAMS[i],
-            pr,
-            if live { accent } else { dim },
-            "",
-        );
-        if i == quack_dsp::harmony::INTERVAL_VOICES - 1 {
-            // Beside the last voice's boxes, never over them: one
-            // name per row.
-            let x = fr.right() + space::M;
-            for (row, name) in [(fr, "← Level"), (pr, "← Pan")] {
-                paint::text_fit(
-                    p,
-                    pos2(x, row.center().y),
-                    Align2::LEFT_CENTER,
-                    name,
-                    size::CAPTION - 1.0,
-                    color::TEXT_FAINT,
-                    r.right() - space::L - x,
-                );
+        let small = 40.0;
+        let sy = row1 + knob_d * 0.5 + 12.0 + small * 0.5 + 6.0;
+        let pct0 = |v: f64| format!("{v:.0}");
+        let pan = |v: f64| {
+            if v.abs() < 0.5 {
+                "C".to_owned()
+            } else if v < 0.0 {
+                format!("L{:.0}", -v)
+            } else {
+                format!("R{v:.0}")
             }
+        };
+        for (dx, id, fmt, name) in [
+            (
+                -small * 0.5 - 2.0,
+                level,
+                &pct0 as &dyn Fn(f64) -> String,
+                "Level",
+            ),
+            (
+                small * 0.5 + 2.0,
+                quack_dsp::params::HARMONY_PAN_PARAMS[i],
+                &pan,
+                "Pan",
+            ),
+        ] {
+            controls::knob_small(
+                ui,
+                params,
+                st,
+                id,
+                pos2(cx + dx, sy),
+                small,
+                if live { accent } else { dim },
+                fmt,
+                name,
+            );
         }
     }
     let pct = |v: f64| format!("{v:.0}");
@@ -1200,33 +1316,26 @@ fn harmony_panel(
     };
     // Close voicing and latch, for the played notes (MIDI and Chord).
     let tog_x = r.left() + space::L + kw * 4.0 + space::M;
-    let tog_w = kw * 2.0 - 2.0 * space::M;
-    let close_r = Rect::from_min_size(pos2(tog_x, row1 - 34.0), vec2(tog_w, 28.0));
-    controls::toggle(
+    let tog_w = kw * 2.0 - space::M - space::L;
+    let close_r = Rect::from_min_size(pos2(tog_x, row1 - 26.0), vec2(tog_w, 24.0));
+    controls::switch(
         ui,
         params,
         ParamId::CloseVoicing,
         close_r,
         "Close Voicing",
         accent,
-    );
-    let latch_r = Rect::from_min_size(pos2(tog_x, close_r.bottom() + space::S), vec2(tog_w, 28.0));
-    controls::toggle(ui, params, ParamId::Latch, latch_r, "Latch", accent);
-    text(
-        p,
-        pos2(latch_r.center().x, latch_r.bottom() + 16.0),
-        Align2::CENTER_CENTER,
-        match mode {
-            HarmonyMode::Midi => "The sustain pedal holds notes too",
-            HarmonyMode::Chord => "Latch or pedal hold the chord",
-            _ => "MIDI and Chord sources",
-        },
-        size::CAPTION - 1.0,
-        color::TEXT_FAINT,
-    );
+    )
+    .hint("MIDI and Chord sources: the voices stay within an octave");
+    let latch_r = Rect::from_min_size(pos2(tog_x, close_r.bottom() + space::M), vec2(tog_w, 24.0));
+    controls::switch(ui, params, ParamId::Latch, latch_r, "Latch", accent).hint(match mode {
+        HarmonyMode::Midi => "Holds the notes; the sustain pedal holds them too",
+        HarmonyMode::Chord => "Holds the chord (the sustain pedal too)",
+        _ => "For the MIDI and Chord sources",
+    });
 
     // Second row: what makes several singers out of one, and the doubler.
-    let row2 = r.bottom() - 60.0;
+    let row2 = r.bottom() - 52.0;
     let ms = |v: f64| {
         if v < 0.5 {
             "Off".to_owned()
@@ -1255,7 +1364,7 @@ fn harmony_panel(
             st,
             id,
             pos2(cx, row2),
-            knob_d.min(kw8 - space::S),
+            52.0_f32.min(kw8 - space::S),
             0.0,
             accent,
             fmt,
@@ -1277,10 +1386,10 @@ fn layer_switch(
     accent: Color32,
 ) {
     let sw = Rect::from_min_size(
-        pos2(r.left() + space::L, r.top() + 8.0),
-        vec2(LAYER_SWITCH_W, 28.0),
+        pos2(r.left() + space::L, r.top() + 10.0),
+        vec2(LAYER_SWITCH_W, 24.0),
     );
-    controls::toggle(ui, params, id, sw, label, accent);
+    controls::switch(ui, params, id, sw, label, accent);
 }
 
 /// The vocoder layer, vocoder or talkbox: the voice shapes the internal
@@ -1498,40 +1607,33 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
     // amounts serves the whole chain (the voice's).
     let layer = if series { Page::Voice } else { st.mix_layer };
     let col = Page::ALL.iter().position(|&l| l == layer).unwrap_or(0);
-    let fx_w = (r.width() - space::M) * 4.0 / 7.0;
+    let fx_w = (r.width() - space::S) * 0.51;
     let fx_r = Rect::from_min_size(r.min, vec2(fx_w, r.height()));
-    let gl_r = Rect::from_min_max(pos2(fx_r.right() + space::M, r.top()), r.max);
+    let gl_r = Rect::from_min_max(pos2(fx_r.right() + space::S, r.top()), r.max);
     panel(p, fx_r);
     panel(p, gl_r);
 
     let acc = page_accent(layer, mode);
     let layer_live = layer_on(params, layer);
-    let title = if series {
-        "FX · Chain".to_owned()
-    } else {
-        format!("FX · {}", layer.name())
-    };
     let title_y = r.top() + 20.0;
-    text(
+    let t = paint::section(
         p,
         pos2(fx_r.left() + space::L, title_y),
-        Align2::LEFT_CENTER,
-        &title,
-        size::LABEL,
-        if layer_live { acc } else { color::TEXT_FAINT },
-    );
-    text(
-        p,
-        pos2(fx_r.right() - space::L, title_y),
-        Align2::RIGHT_CENTER,
-        if series {
-            "Whole chain"
-        } else {
-            "Pick a layer above"
-        },
-        size::CAPTION,
+        "FX sends ·",
         color::TEXT_FAINT,
     );
+    paint::section(
+        p,
+        pos2(t.right() + 5.0, title_y),
+        if series { "Chain" } else { layer.name() },
+        if layer_live { acc } else { color::TEXT_FAINT },
+    );
+    ui.interact(t, ui.id().with("quack-sends-title"), Sense::hover())
+        .hint(if series {
+            "In series one set of sends serves the whole chain"
+        } else {
+            "The sends of the layer shown above: pick another card to change it"
+        });
     let fx = params.get_plain(ParamId::FxOn) >= 0.5;
     let fx_switch = |id: ParamId| fx && params.get_plain(id) >= 0.5;
     let off = |v: f64| {
@@ -1541,7 +1643,7 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
             format!("{v:.0}")
         }
     };
-    let knob_y = r.top() + 40.0 + (r.height() - 40.0) / 2.0 - 10.0;
+    let knob_y = r.top() + 40.0 + (r.height() - 40.0) / 2.0 - 8.0;
     let knobs: [(&str, [ParamId; 4], bool); 4] = [
         (
             "Delay",
@@ -1588,25 +1690,23 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
         );
     }
 
-    text(
+    paint::section(
         p,
         pos2(gl_r.left() + space::L, title_y),
-        Align2::LEFT_CENTER,
-        "Global",
-        size::LABEL,
-        color::TUNE,
+        "Output",
+        color::TEXT_FAINT,
     );
     // Quackapella Link channel: the Links set on the same letter.
     let ab = Rect::from_min_size(
-        pos2(gl_r.right() - space::L - 64.0, title_y - 13.0),
-        vec2(64.0, 26.0),
+        pos2(gl_r.right() - space::L - 64.0, title_y - 12.0),
+        vec2(64.0, 24.0),
     );
     text(
         p,
         pos2(ab.left() - space::S, title_y),
         Align2::RIGHT_CENTER,
         "Link",
-        size::CAPTION,
+        size::CAPTION - 1.0,
         color::TEXT_DIM,
     );
     controls::segmented(
@@ -1615,7 +1715,7 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
         ParamId::LinkChannel,
         ab,
         &["A", "B"],
-        &[color::TUNE],
+        &[color::NEUTRAL],
     );
     let gain = |v: f64| format!("{v:+.0}");
     let pct = |v: f64| format!("{v:.0}");
@@ -1637,7 +1737,7 @@ fn mixer_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rec
             pos2(cx, knob_y),
             54.0,
             floor,
-            color::TUNE,
+            color::NEUTRAL,
             fmt,
             name,
         );
@@ -1809,20 +1909,20 @@ fn fx_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, a
         let cell = Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height()));
         let shown = st.fx_tab == tab;
         let on = tab.switch().is_none_or(|id| params.get_plain(id) >= 0.5);
-        let dot_w = if tab.switch().is_some() { 17.0 } else { 0.0 };
+        let dot_w = if tab.switch().is_some() { 18.0 } else { 0.0 };
         let name_r = Rect::from_min_max(pos2(cell.left() + dot_w, cell.top()), cell.max);
         let resp = ui.interact(name_r, ui.id().with(("quack-fx-tab", i)), Sense::click());
         if resp.clicked() {
             st.fx_tab = tab;
         }
-        let (fill, stroke) = if shown {
-            (accent.gamma_multiply(0.22), accent.gamma_multiply(0.8))
+        let fill = if shown {
+            accent.gamma_multiply(0.22)
         } else if resp.hovered() {
-            (color::BORDER, color::BORDER)
+            color::HOVER
         } else {
-            (color::RAISED, color::BORDER)
+            color::RAISED
         };
-        paint::rounded(p, cell, radius::CONTROL, fill, stroke);
+        paint::fill(p, cell, radius::CONTROL, fill);
         text(
             p,
             if tab.switch().is_some() {
@@ -1852,20 +1952,18 @@ fn fx_tabs(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect, a
                 set_once(params, id, if on { 0.0 } else { 1.0 });
             }
             crate::perform::attach(ui, &presp, params, id);
-            let dot = dot_r.center() + vec2(0.5, 0.0);
-            let ring = if presp.hovered() {
-                color::TEXT_DIM
-            } else {
-                color::TEXT_FAINT
-            };
-            p.circle_stroke(
+            let dot = dot_r.center() + vec2(1.5, 0.0);
+            p.circle_filled(
                 dot,
-                4.5,
-                egui::Stroke::new(1.5_f32, if on { accent } else { ring }),
+                3.0,
+                if on {
+                    accent
+                } else if presp.hovered() {
+                    color::TEXT_FAINT
+                } else {
+                    color::BORDER
+                },
             );
-            if on {
-                p.circle_filled(dot, 2.5, accent);
-            }
         }
     }
 }
@@ -2010,7 +2108,7 @@ fn fx_panel(
             );
             let bar =
                 Rect::from_min_max(pos2(at.left() + 56.0, y - 5.0), pos2(at.right(), y + 5.0));
-            paint::rounded(p, bar, 2, color::WELL, color::BORDER);
+            paint::fill(p, bar, 2, color::WELL);
             let frac = if on { (-v / 18.0).clamp(0.0, 1.0) } else { 0.0 };
             if frac > 0.0 {
                 let fill =
@@ -2245,31 +2343,26 @@ fn tune_panel(
 ) {
     let p = ui.painter();
     panel(p, r);
-    text(
-        p,
-        r.left_top() + vec2(space::L, 22.0),
-        Align2::LEFT_CENTER,
-        "Tune",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
+    // The correction style, then where the target notes come from.
+    let style_r = Rect::from_min_size(pos2(r.left() + space::L, r.top() + 8.0), vec2(148.0, 28.0));
+    let names: Vec<&str> = VoiceMode::ALL.iter().map(|m| m.name()).collect();
+    let accents: Vec<Color32> = VoiceMode::ALL.iter().map(|m| mode_accent(*m)).collect();
+    controls::segmented(ui, params, ParamId::Mode, style_r, &names, &accents);
     let sources: Vec<&str> = Source::ALL.iter().map(|s| s.name()).collect();
-    let src_r = Rect::from_min_size(
-        pos2(r.right() - space::L - 260.0, r.top() + 8.0),
-        vec2(260.0, 28.0),
+    let src_r = Rect::from_min_max(
+        pos2(style_r.right() + space::S, style_r.top()),
+        pos2(r.right() - space::L, style_r.bottom()),
     );
-    controls::segmented(ui, params, ParamId::Source, src_r, &sources, &[accent]);
+    controls::segmented(
+        ui,
+        params,
+        ParamId::Source,
+        src_r,
+        &sources,
+        &[color::NEUTRAL],
+    );
     let source = Source::from_index(params.get_plain(ParamId::Source));
     let gate_on = params.get_plain(ParamId::MidiGate) >= 0.5;
-    let gate_r = Rect::from_min_size(
-        pos2(src_r.left() - space::S - 96.0, src_r.top()),
-        vec2(96.0, 28.0),
-    );
-    controls::toggle(ui, params, ParamId::MidiGate, gate_r, "MIDI Gate", accent);
-    if source == Source::Scale {
-        // The gate only acts on the MIDI sources.
-        p.rect_filled(gate_r, 5.0, color::PANEL.gamma_multiply(0.6));
-    }
 
     // Key and scale.
     let row = r.top() + 48.0;
@@ -2355,11 +2448,21 @@ fn tune_panel(
     if !edited {
         p.rect_filled(reset_r, 5.0, color::PANEL.gamma_multiply(0.6));
     }
+    // MIDI Gate: only for the MIDI sources.
+    let gate_r = Rect::from_min_size(
+        pos2(reset_r.left(), reset_r.bottom() + space::S),
+        vec2(scale_r.width(), 24.0),
+    );
+    controls::switch(ui, params, ParamId::MidiGate, gate_r, "MIDI Gate", accent)
+        .hint("MIDI sources: silent while no note is held");
+    if source == Source::Scale {
+        p.rect_filled(gate_r, 5.0, color::PANEL.gamma_multiply(0.6));
+    }
 
     // In the MIDI sources the scale steps back: it only fills in while
     // no note is held, or not at all behind the gate.
     let (hint, hint2) = match (source, gate_on) {
-        (Source::Scale, _) => ("Notes from the scale, minus the ones switched off", ""),
+        (Source::Scale, _) => ("", ""),
         (Source::Midi, false) => ("Held notes, any octave", "  ·  scale while none is held"),
         (Source::MidiExact, false) => ("Sings the held note", "  ·  scale while none is held"),
         (Source::Midi, true) => ("Held notes, any octave", "  ·  silent while none is held"),
@@ -2373,7 +2476,7 @@ fn tune_panel(
         let alpha = if gate_on { 0.75 } else { 0.55 };
         p.rect_filled(veil, 6.0, color::PANEL.gamma_multiply(alpha));
     }
-    let hy = notes_r.bottom() + 16.0;
+    let hy = notes_r.bottom() + 22.0;
     if detect != KeyDetect::Off {
         key_detect_hint(
             p,
@@ -2448,15 +2551,27 @@ fn tune_panel(
         };
         controls::knob_floor(ui, params, st, id, pos2(cx, ky), 70.0, floor, accent, fmt);
         if natural && id == ParamId::Transition {
-            let veil = Rect::from_center_size(pos2(cx, ky + 10.0), vec2(kw, 100.0));
-            ui.painter()
-                .rect_filled(veil, 6.0, color::PANEL.gamma_multiply(0.7));
-            text(
-                ui.painter(),
+            // Natural glides at the retune speed: no transition.
+            let size_pt = 70.0;
+            let veil = Rect::from_center_size(pos2(cx, ky + 10.0), vec2(kw, size_pt + 34.0));
+            let vp = ui.painter();
+            vp.rect_filled(veil, 6.0, color::PANEL);
+            paint::knob(vp, pos2(cx, ky), size_pt, 0.0, color::TEXT_FAINT);
+            paint::text_fit(
+                vp,
                 pos2(cx, ky),
                 Align2::CENTER_CENTER,
                 "Tune only",
-                size::CAPTION - 2.0,
+                size::CAPTION - 4.0,
+                color::TEXT_FAINT,
+                size_pt * 0.7,
+            );
+            text(
+                vp,
+                pos2(cx, ky + size_pt * 0.5 + 11.0),
+                Align2::CENTER_CENTER,
+                "Transition",
+                size::CAPTION - 1.0,
                 color::TEXT_FAINT,
             );
         }
@@ -2509,16 +2624,9 @@ fn pitch_graph(p: &egui::Painter, r: Rect, view: &View, st: &UiState, accent: Co
     panel(p, r);
     // Reading.
     let ty = r.top() + 22.0;
-    text(
-        p,
-        pos2(r.left() + space::L, ty),
-        Align2::LEFT_CENTER,
-        "Pitch",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
+    paint::section(p, pos2(r.left() + space::L, ty), "Pitch", color::TEXT_FAINT);
     let reading = nearest_note(view.pitch_hz);
-    let x0 = r.left() + space::L + 52.0;
+    let x0 = r.left() + space::L + 56.0;
     match reading {
         Some((n, c)) => {
             value(
@@ -2561,12 +2669,11 @@ fn pitch_graph(p: &egui::Painter, r: Rect, view: &View, st: &UiState, accent: Co
             size::VALUE,
             accent,
         );
-        text(
+        let w = paint::section(p, pos2(0.0, -100.0), "Target", color::TEXT_FAINT).width();
+        paint::section(
             p,
-            pos2(r.right() - space::L - 112.0, ty),
-            Align2::RIGHT_CENTER,
+            pos2(r.right() - space::L - 112.0 - w, ty),
             "Target",
-            size::CAPTION,
             color::TEXT_FAINT,
         );
     }

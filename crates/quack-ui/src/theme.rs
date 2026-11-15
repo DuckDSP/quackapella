@@ -46,6 +46,15 @@ pub mod color {
     pub const TEXT_DIM: Color32 = Color32::from_rgb(0xA3, 0xAF, 0xBF);
     pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x8A, 0x96, 0xA8);
 
+    /// Surface of a control on a panel (segment wells, buttons): a step
+    /// up from the panel, no outline.
+    pub const CONTROL: Color32 = Color32::from_rgb(0x16, 0x1D, 0x26);
+    /// Hovered control.
+    pub const HOVER: Color32 = Color32::from_rgb(0x2E, 0x39, 0x48);
+    /// Accent of what belongs to no layer (output, routing, settings):
+    /// a light grey, so the layer shown keeps the only colour.
+    pub const NEUTRAL: Color32 = Color32::from_rgb(0xC9, 0xD3, 0xDF);
+
     /// Quackapella's own accent (title, focus, selection).
     pub const QUACK: Color32 = Color32::from_rgb(0xF2, 0xC9, 0x4C);
     /// One accent per voice mode, from the most transparent to the most
@@ -92,6 +101,8 @@ pub mod size {
     pub const VALUE: f32 = 13.5;
     /// Module and section titles.
     pub const TITLE: f32 = 18.0;
+    /// Section titles: small capitals, spaced out.
+    pub const SECTION: f32 = 11.5;
     /// Large read-outs.
     pub const READOUT: f32 = 26.0;
 }

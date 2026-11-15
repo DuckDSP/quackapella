@@ -2102,6 +2102,16 @@ pub struct QuackParams {
     #[param(id = 1400, name = "Link Channel", default = 0)]
     pub link_channel: EnumParam<LinkChannelParam>,
 
+    /// Solo: hear a layer alone (the others go silent).
+    #[param(id = 1500, name = "Solo Voice")]
+    pub solo_voice: BoolParam,
+    #[param(id = 1501, name = "Solo Creative")]
+    pub solo_creative: BoolParam,
+    #[param(id = 1502, name = "Solo Harmony")]
+    pub solo_harmony: BoolParam,
+    #[param(id = 1503, name = "Solo Vocoder")]
+    pub solo_vocoder: BoolParam,
+
     /// Macros, MIDI learn, loaded preset, zoom: saved with the session.
     #[persist]
     pub control: ControlCell,
@@ -2136,6 +2146,14 @@ impl QuackParams {
         #[allow(clippy::cast_precision_loss)]
         v.set(ParamId::Mode, self.mode.value().to_index() as f64);
         v.set(ParamId::Bypass, f64::from(u8::from(self.bypass.value())));
+        for (id, p) in [
+            (ParamId::SoloVoice, &self.solo_voice),
+            (ParamId::SoloCreative, &self.solo_creative),
+            (ParamId::SoloHarmony, &self.solo_harmony),
+            (ParamId::SoloVocoder, &self.solo_vocoder),
+        ] {
+            v.set(id, f64::from(u8::from(p.value())));
+        }
         v.set(ParamId::Pitch, FloatParamReadF64::value(&self.pitch));
         v.set(ParamId::Fine, FloatParamReadF64::value(&self.fine));
         v.set(ParamId::Formant, FloatParamReadF64::value(&self.formant));

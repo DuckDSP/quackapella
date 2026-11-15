@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::help::Hint;
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use quack_dsp::ParamId;
 use quack_dsp::control::{MACRO_COUNT, can_modulate};
@@ -197,7 +198,7 @@ pub(crate) fn preset_bar(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiSta
     let p = ui.painter().clone();
     let save_w = 64.0;
     let bar = Rect::from_min_max(r.min, pos2(r.right() - save_w - space::S, r.bottom()));
-    rounded(&p, bar, radius::CONTROL, color::WELL, color::BORDER);
+    crate::paint::fill(&p, bar, radius::CONTROL, color::PANEL);
     let arrow_w = bar.height();
     for (i, (label, dir)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
         let a = if i == 0 {
@@ -210,13 +211,7 @@ pub(crate) fn preset_bar(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiSta
         };
         let resp = ui.interact(a, ui.id().with(("quack-preset-step", i)), Sense::click());
         if resp.hovered() {
-            rounded(
-                &p,
-                a.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            crate::paint::fill(&p, a.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         }
         if resp.clicked() {
             step(params, st, dir);
@@ -236,13 +231,7 @@ pub(crate) fn preset_bar(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiSta
     );
     let resp = ui.interact(mid, ui.id().with("quack-preset-name"), Sense::click());
     if resp.hovered() {
-        rounded(
-            &p,
-            mid.shrink(2.0),
-            radius::CONTROL - 1,
-            color::RAISED,
-            color::RAISED,
-        );
+        crate::paint::fill(&p, mid.shrink(2.0), radius::CONTROL - 1, color::HOVER);
     }
     if resp.clicked() {
         st.presets.menu = !st.presets.menu;
@@ -981,41 +970,35 @@ fn short_name(id: ParamId) -> &'static str {
     }
 }
 
-/// Bottom strip: the four macros, program change, learn status, zoom.
-pub(crate) fn macro_panel(
-    ui: &egui::Ui,
-    params: &dyn ParamAccess,
-    st: &mut UiState,
-    r: Rect,
-    accent: Color32,
-) {
+/// Bottom panel: the four macros, then snapshots A and B with their
+/// morph. What each macro moves shows on hover.
+pub(crate) fn perform_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect) {
+    let accent = color::QUACK;
     let p = ui.painter().clone();
     panel(&p, r);
-    text(
+    let title_y = r.top() + 20.0;
+    crate::paint::section(
         &p,
-        r.left_top() + vec2(space::L, 20.0),
-        Align2::LEFT_CENTER,
+        pos2(r.left() + space::L, title_y),
         "Macros",
-        size::LABEL,
-        color::TEXT_DIM,
+        color::TEXT_FAINT,
     );
     let names = params.control().map_or_else(
         || quack_dsp::control::DEFAULT_MACRO_NAMES.map(str::to_owned),
         |c| c.names(),
     );
-    let cell_w = 176.0;
-    let x0 = r.left() + space::L + 70.0;
     let pct = |v: f64| format!("{v:.0}");
+    let knob_y = r.top() + 20.0 + (r.height() - 20.0) / 2.0 - 6.0;
+    let cell_w = 96.0;
     for m in 0..MACRO_COUNT {
         #[allow(clippy::cast_precision_loss)]
-        let cx = x0 + cell_w * m as f32;
-        let centre = pos2(cx + 28.0, r.center().y - 7.0);
-        controls::knob_named(
+        let cx = r.left() + space::L + 40.0 + cell_w * m as f32;
+        let resp = controls::knob_named(
             ui,
             params,
             st,
             MACRO_PARAMS[m],
-            centre,
+            pos2(cx, knob_y),
             50.0,
             0.0,
             accent,
@@ -1023,118 +1006,134 @@ pub(crate) fn macro_panel(
             &names[m],
         );
         let lines = targets_text(params, m);
-        let tx = cx + 64.0;
         if lines.is_empty() {
-            text(
-                &p,
-                pos2(tx, r.center().y - 8.0),
-                Align2::LEFT_CENTER,
-                "Right-click a control",
-                size::CAPTION - 2.5,
-                color::TEXT_FAINT.gamma_multiply(0.8),
-            );
-            text(
-                &p,
-                pos2(tx, r.center().y + 8.0),
-                Align2::LEFT_CENTER,
-                "to assign it",
-                size::CAPTION - 2.5,
-                color::TEXT_FAINT.gamma_multiply(0.8),
-            );
-        }
-        let shown = lines.len().min(4);
-        for (i, l) in lines.iter().take(shown).enumerate() {
-            let l = if i == 3 && lines.len() > 4 {
-                format!("+{} more", lines.len() - 3)
-            } else {
-                l.clone()
-            };
-            #[allow(clippy::cast_precision_loss)]
-            let y = r.center().y - 24.0 + 16.0 * i as f32 + (4.0 - shown as f32) * 8.0;
-            crate::paint::text_fit(
-                &p,
-                pos2(tx, y),
-                Align2::LEFT_CENTER,
-                &l,
-                size::CAPTION - 2.5,
-                color::TEXT_DIM,
-                cell_w - 64.0 - space::S,
-            );
-        }
-    }
-
-    // Right: program change and zoom, learn status under them.
-    let Some(ctl) = params.control() else {
-        return;
-    };
-    let right = r.right() - space::L;
-    let pc = Rect::from_min_size(pos2(right - 150.0, r.top() + 12.0), vec2(150.0, 26.0));
-    let resp = ui.interact(pc, ui.id().with("quack-program-change"), Sense::click());
-    if resp.clicked() {
-        ctl.set_program_change(!ctl.program_change());
-    }
-    pill(
-        &p,
-        pc,
-        "Program Change",
-        ctl.program_change(),
-        resp.hovered(),
-        color::QUACK,
-    );
-    resp.on_hover_text("MIDI program changes recall the factory presets, in list order");
-
-    let zr = Rect::from_min_size(pos2(right - 150.0, pc.bottom() + 8.0), vec2(150.0, 26.0));
-    rounded(&p, zr, radius::CONTROL, color::WELL, color::BORDER);
-    let z = ctl.zoom();
-    let at = ZOOMS.iter().position(|&s| s >= z).unwrap_or(1);
-    for (i, (label, dir)) in [("−", -1i32), ("+", 1)].into_iter().enumerate() {
-        let a = if i == 0 {
-            Rect::from_min_size(zr.min, vec2(zr.height(), zr.height()))
+            resp.hint("Right-click any control to assign it to this macro");
         } else {
-            Rect::from_min_size(
-                pos2(zr.right() - zr.height(), zr.top()),
-                vec2(zr.height(), zr.height()),
-            )
-        };
-        let resp = ui.interact(a, ui.id().with(("quack-zoom", i)), Sense::click());
-        if resp.hovered() {
-            rounded(
-                &p,
-                a.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            resp.hint(format!("{}\n{}", names[m], lines.join("\n")));
         }
-        if resp.clicked() {
-            #[allow(
-                clippy::cast_possible_wrap,
-                clippy::cast_sign_loss,
-                clippy::cast_possible_truncation
-            )]
-            let n = (at as i32 + dir).clamp(0, ZOOMS.len() as i32 - 1) as usize;
-            ctl.set_zoom(ZOOMS[n]);
-        }
-        text(
-            &p,
-            a.center(),
-            Align2::CENTER_CENTER,
-            label,
-            size::TITLE,
-            color::TEXT_DIM,
-        );
     }
-    value(
-        &p,
-        zr.center(),
-        Align2::CENTER_CENTER,
-        &format!("Zoom {z} %"),
-        size::VALUE,
-        color::TEXT_DIM,
+
+    // Snapshots.
+    let x0 = r.left() + 436.0;
+    p.line_segment(
+        [
+            pos2(x0 - space::L, r.top() + space::M),
+            pos2(x0 - space::L, r.bottom() - space::M),
+        ],
+        egui::Stroke::new(1.0_f32, color::GRID_STRONG),
     );
+    let t = crate::paint::section(&p, pos2(x0, title_y), "Snapshots", color::TEXT_FAINT);
+    let morph_on = params.get_plain(ParamId::MorphOn) >= 0.5;
+    let mr = Rect::from_min_size(pos2(t.right() + space::L, title_y - 11.0), vec2(96.0, 22.0));
+    controls::switch(ui, params, ParamId::MorphOn, mr, "Morph", accent)
+        .hint("On: A and B blend with the morph knob. Off: they recall at once");
+    let ctl = params.control();
+    let has = |s: usize| ctl.is_some_and(|c| c.has_snapshot(s));
+    let morph = params.get_plain(ParamId::Morph);
+    let bw = 52.0;
+    let top = knob_y - 26.0;
+    let values = st.presets.values;
+    let snap = |ui: &egui::Ui, x: f32, i: usize, label: &str, lit: bool| {
+        let br = Rect::from_min_size(pos2(x, top), vec2(bw, 30.0));
+        let resp = button(ui, br, &format!("go-{i}"), label, lit, has(i), accent);
+        if resp.clicked()
+            && let Some(c) = ctl
+        {
+            c.request_snapshot(i);
+        }
+        resp.hint(format!("Recall snapshot {label}"));
+        let sr = Rect::from_min_size(pos2(x, br.bottom() + 6.0), vec2(bw, 22.0));
+        let sresp = ui.interact(sr, ui.id().with(("quack-btn", "save", i)), Sense::click());
+        let p = ui.painter();
+        let bg = if sresp.hovered() {
+            color::HOVER
+        } else {
+            color::CONTROL
+        };
+        crate::paint::fill(p, sr, radius::CONTROL, bg);
+        text(
+            p,
+            sr.center(),
+            Align2::CENTER_CENTER,
+            &format!("Save {label}"),
+            size::CAPTION - 3.0,
+            if ctl.is_some() {
+                color::TEXT_DIM
+            } else {
+                color::TEXT_FAINT
+            },
+        );
+        if sresp.clicked()
+            && let Some(c) = ctl
+        {
+            c.store_snapshot(i, &values);
+        }
+        sresp.hint(format!(
+            "Save the current sound as snapshot {label}{}",
+            if has(i) { " (replaces it)" } else { "" }
+        ));
+    };
+    snap(ui, x0, 0, "A", morph_on && morph <= 0.0);
+    let morph_x = x0 + bw + space::M + 26.0;
+    controls::knob_named(
+        ui,
+        params,
+        st,
+        ParamId::Morph,
+        pos2(morph_x, knob_y),
+        50.0,
+        0.0,
+        if morph_on {
+            accent
+        } else {
+            accent.gamma_multiply(0.35)
+        },
+        &pct,
+        "A ↔ B",
+    );
+    let b_x = morph_x + 26.0 + space::M;
+    snap(ui, b_x, 1, "B", morph_on && morph >= 100.0);
+    let ms = |v: f64| format!("{v:.0}");
+    let time_x = b_x + bw + space::L + 26.0;
+    controls::knob_named(
+        ui,
+        params,
+        st,
+        ParamId::MorphTime,
+        pos2(time_x, knob_y),
+        50.0,
+        ParamId::MorphTime.spec().kind.min(),
+        color::NEUTRAL,
+        &ms,
+        "Time",
+    );
+    // MIDI keys that recall A and B.
+    let kx = time_x + 26.0 + space::XL;
+    text(
+        &p,
+        pos2(kx, top + 4.0),
+        Align2::LEFT_CENTER,
+        "Recall from MIDI keys",
+        size::CAPTION - 2.5,
+        color::TEXT_FAINT,
+    );
+    let kr = Rect::from_min_size(
+        pos2(kx, top + 16.0),
+        vec2((r.right() - space::L - kx).min(170.0), 28.0),
+    );
+    let keys = SnapshotKeys::from_index(params.get_plain(ParamId::SnapshotKeys));
+    let name = if keys == SnapshotKeys::Off {
+        "Keys off".to_owned()
+    } else {
+        format!("Keys {}", keys.name())
+    };
+    if controls::stepper(ui, params, ParamId::SnapshotKeys, kr, &name, accent) {
+        st.keys_menu = !st.keys_menu;
+    }
+    st.keys_rect = kr;
 }
 
-/// MIDI learn status, in the footer.
+/// MIDI learn status, in the status bar (`at`: its left centre).
 pub(crate) fn learn_status(ui: &egui::Ui, params: &dyn ParamAccess, at: egui::Pos2) {
     let Some(ctl) = params.control() else {
         return;
@@ -1161,16 +1160,283 @@ pub(crate) fn learn_status(ui: &egui::Ui, params: &dyn ParamAccess, at: egui::Po
     text(
         ui.painter(),
         at,
-        Align2::CENTER_CENTER,
+        Align2::LEFT_CENTER,
         &msg,
-        size::CAPTION - 1.5,
+        size::CAPTION - 2.5,
         c,
     );
+}
+
+/// The settings button (a gear) in the header: opens the settings.
+pub(crate) fn settings_button(ui: &egui::Ui, st: &mut UiState, r: Rect) {
+    let resp = ui.interact(r, ui.id().with("quack-settings"), Sense::click());
+    if resp.clicked() {
+        st.settings = !st.settings;
+    }
+    let p = ui.painter();
+    let bg = if st.settings || resp.hovered() {
+        color::HOVER
+    } else {
+        color::RAISED
+    };
+    crate::paint::fill(p, r, radius::CONTROL, bg);
+    crate::paint::gear_icon(p, r.center(), 7.5, color::TEXT_DIM);
+    resp.hint("Settings: zoom, program change, MIDI out");
+}
+
+/// The settings, under the gear: zoom, program change, MIDI out, MIDI
+/// learn. A click outside closes them.
+pub(crate) fn settings_menu(
+    ui: &egui::Ui,
+    params: &dyn ParamAccess,
+    st: &mut UiState,
+    view: &crate::View,
+    anchor: Rect,
+) {
+    if !st.settings {
+        return;
+    }
+    let w = 320.0;
+    let row = 44.0;
+    let h = 36.0 + row + 68.0 + 84.0 + 58.0;
+    let r = Rect::from_min_size(
+        pos2(anchor.right() - w + 120.0, anchor.bottom() + 8.0),
+        vec2(w, h),
+    );
+    let accent = color::QUACK;
+    let mut close = false;
+    egui::Area::new(ui.id().with("quack-settings-menu"))
+        .fixed_pos(r.min)
+        .fade_in(false)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            let (r, _) = ui.allocate_exact_size(r.size(), Sense::click());
+            let p = ui.painter().clone();
+            rounded(&p, r, radius::PANEL, color::RAISED, color::BORDER);
+            let x = r.left() + space::L;
+            let right = r.right() - space::L;
+            crate::paint::section(&p, pos2(x, r.top() + 20.0), "Settings", color::TEXT_FAINT);
+            let mut y = r.top() + 36.0;
+            let divider = |p: &egui::Painter, y: f32| {
+                p.line_segment(
+                    [pos2(r.left() + 1.0, y), pos2(r.right() - 1.0, y)],
+                    egui::Stroke::new(1.0_f32, color::BORDER.gamma_multiply(0.6)),
+                );
+            };
+
+            // Zoom.
+            divider(&p, y);
+            let cy = y + row / 2.0;
+            text(
+                &p,
+                pos2(x, cy),
+                Align2::LEFT_CENTER,
+                "Zoom",
+                size::BODY,
+                color::TEXT,
+            );
+            if let Some(ctl) = params.control() {
+                let z = ctl.zoom();
+                let at = ZOOMS.iter().position(|&s| s >= z).unwrap_or(1);
+                let plus = Rect::from_min_size(pos2(right - 28.0, cy - 13.0), vec2(28.0, 26.0));
+                let minus = plus.translate(vec2(-28.0 - 64.0, 0.0));
+                for (i, (b, label, dir)) in [(minus, "−", -1i32), (plus, "+", 1)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let resp = ui.interact(b, ui.id().with(("quack-zoom", i)), Sense::click());
+                    let bg = if resp.hovered() {
+                        color::HOVER
+                    } else {
+                        color::CONTROL
+                    };
+                    crate::paint::fill(&p, b, radius::CONTROL, bg);
+                    text(
+                        &p,
+                        b.center(),
+                        Align2::CENTER_CENTER,
+                        label,
+                        size::BODY,
+                        color::TEXT_DIM,
+                    );
+                    if resp.clicked() {
+                        #[allow(
+                            clippy::cast_possible_wrap,
+                            clippy::cast_sign_loss,
+                            clippy::cast_possible_truncation
+                        )]
+                        let n = (at as i32 + dir).clamp(0, ZOOMS.len() as i32 - 1) as usize;
+                        ctl.set_zoom(ZOOMS[n]);
+                    }
+                }
+                value(
+                    &p,
+                    pos2((minus.right() + plus.left()) / 2.0, cy),
+                    Align2::CENTER_CENTER,
+                    &format!("{z} %"),
+                    size::VALUE,
+                    color::TEXT,
+                );
+            }
+            y += row;
+
+            // Program change.
+            divider(&p, y);
+            let cy = y + 18.0;
+            text(
+                &p,
+                pos2(x, cy),
+                Align2::LEFT_CENTER,
+                "Program Change",
+                size::BODY,
+                color::TEXT,
+            );
+            if let Some(ctl) = params.control() {
+                let sr = Rect::from_min_size(pos2(right - 28.0, cy - 9.0), vec2(28.0, 18.0));
+                let resp = ui.interact(sr, ui.id().with("quack-program-change"), Sense::click());
+                if resp.clicked() {
+                    ctl.set_program_change(!ctl.program_change());
+                }
+                controls::switch_look(&p, sr, "", ctl.program_change(), resp.hovered(), accent);
+            }
+            for (i, line) in [
+                "A pedal or controller sends program n: factory",
+                "preset n loads. To change sounds between songs.",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                #[allow(clippy::cast_precision_loss)]
+                text(
+                    &p,
+                    pos2(x, cy + 20.0 + 15.0 * i as f32),
+                    Align2::LEFT_CENTER,
+                    line,
+                    size::CAPTION - 3.0,
+                    color::TEXT_FAINT,
+                );
+            }
+            y += 68.0;
+
+            // MIDI out: switch, then channel and what it plays.
+            divider(&p, y);
+            let cy = y + 20.0;
+            let t = text(
+                &p,
+                pos2(x, cy),
+                Align2::LEFT_CENTER,
+                "MIDI Out",
+                size::BODY,
+                color::TEXT,
+            );
+            let on = params.get_plain(ParamId::MidiOut) >= 0.5;
+            let notes = view.midi_out_notes;
+            if on && notes != 0 {
+                #[allow(clippy::cast_possible_truncation)]
+                let n = crate::note_name(notes.trailing_zeros() as u8);
+                value(
+                    &p,
+                    pos2(t.right() + space::M, cy),
+                    Align2::LEFT_CENTER,
+                    &n,
+                    size::VALUE - 2.0,
+                    accent,
+                );
+            }
+            let sw = Rect::from_min_size(pos2(right - 28.0, cy - 11.0), vec2(28.0, 22.0));
+            controls::switch(ui, params, ParamId::MidiOut, sw, "", accent);
+            let half = (right - x - space::S) / 2.0;
+            let cr = Rect::from_min_size(pos2(x, cy + 18.0), vec2(half, 28.0));
+            let sr = Rect::from_min_size(pos2(cr.right() + space::S, cr.top()), vec2(half, 28.0));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let ch = (params.get_plain(ParamId::MidiOutChannel).max(0.0) as usize).min(15);
+            if controls::stepper(
+                ui,
+                params,
+                ParamId::MidiOutChannel,
+                cr,
+                CHANNELS[ch],
+                accent,
+            ) {
+                st.channel_menu = !st.channel_menu;
+            }
+            let src = OutSource::from_index(params.get_plain(ParamId::MidiOutSource));
+            if controls::stepper(ui, params, ParamId::MidiOutSource, sr, src.name(), accent) {
+                st.source_menu = !st.source_menu;
+            }
+            st.channel_rect = cr;
+            st.source_rect = sr;
+            y += 84.0;
+
+            // MIDI learn.
+            divider(&p, y);
+            let cy = y + 20.0;
+            text(
+                &p,
+                pos2(x, cy),
+                Align2::LEFT_CENTER,
+                "MIDI Learn",
+                size::BODY,
+                color::TEXT,
+            );
+            if let Some(ctl) = params.control() {
+                let n = ctl.bindings().len();
+                let msg = match n {
+                    0 => "Right-click a control to learn".to_owned(),
+                    1 => "1 control learned".to_owned(),
+                    n => format!("{n} controls learned"),
+                };
+                text(
+                    &p,
+                    pos2(x, cy + 18.0),
+                    Align2::LEFT_CENTER,
+                    &msg,
+                    size::CAPTION - 3.0,
+                    color::TEXT_FAINT,
+                );
+                if n > 0 {
+                    let fr = Rect::from_min_size(pos2(right - 86.0, cy - 4.0), vec2(86.0, 26.0));
+                    let resp = ui.interact(fr, ui.id().with("quack-forget-all"), Sense::click());
+                    let bg = if resp.hovered() {
+                        color::HOVER
+                    } else {
+                        color::CONTROL
+                    };
+                    crate::paint::fill(&p, fr, radius::CONTROL, bg);
+                    text(
+                        &p,
+                        fr.center(),
+                        Align2::CENTER_CENTER,
+                        "Forget all",
+                        size::CAPTION - 1.0,
+                        color::TEXT_DIM,
+                    );
+                    if resp.clicked() {
+                        ctl.forget_all();
+                    }
+                }
+            }
+
+            let lists = st.channel_menu || st.source_menu;
+            let clicked_out = ui.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|q| !r.contains(q) && !anchor.contains(q))
+            });
+            if clicked_out && !lists {
+                close = true;
+            }
+        });
+    if close {
+        st.settings = false;
+    }
 }
 
 /// Right-click menu of a control: MIDI learn and macro depths; and, on
 /// a macro knob, its name.
 pub(crate) fn attach(ui: &egui::Ui, resp: &egui::Response, params: &dyn ParamAccess, id: ParamId) {
+    crate::help::param(resp, id);
     let Some(ctl) = params.control() else {
         return;
     };
@@ -1282,7 +1548,7 @@ fn button(
     if enabled {
         pill(p, r, label, lit, resp.hovered(), accent);
     } else {
-        rounded(p, r, radius::CONTROL, color::PANEL, color::BORDER);
+        crate::paint::fill(p, r, radius::CONTROL, color::CONTROL);
         text(
             p,
             r.center(),
@@ -1293,190 +1559,6 @@ fn button(
         );
     }
     resp
-}
-
-/// Snapshots A and B and the morph between them.
-pub(crate) fn snapshot_panel(ui: &egui::Ui, params: &dyn ParamAccess, st: &mut UiState, r: Rect) {
-    let accent = color::QUACK;
-    let p = ui.painter().clone();
-    panel(&p, r);
-    let head_y = r.top() + 20.0;
-    text(
-        &p,
-        pos2(r.left() + space::L, head_y),
-        Align2::LEFT_CENTER,
-        "Snapshots",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    let ctl = params.control();
-    let has = |s: usize| ctl.is_some_and(|c| c.has_snapshot(s));
-    let morph_on = params.get_plain(ParamId::MorphOn) >= 0.5;
-    let morph = params.get_plain(ParamId::Morph);
-
-    // Header, right: store the current sound.
-    let right = r.right() - space::L;
-    let bh = 22.0;
-    for (i, label) in [(1usize, "B"), (0, "A")] {
-        #[allow(clippy::cast_precision_loss)]
-        let x = right - 34.0 - (1 - i) as f32 * 40.0;
-        let br = Rect::from_min_size(pos2(x, head_y - bh / 2.0), vec2(34.0, bh));
-        let resp = button(
-            ui,
-            br,
-            &format!("save-{i}"),
-            label,
-            false,
-            ctl.is_some(),
-            accent,
-        );
-        if resp.clicked()
-            && let Some(c) = ctl
-        {
-            c.store_snapshot(i, &st.presets.values);
-        }
-        resp.on_hover_text(format!(
-            "Save the current settings as snapshot {label}{}",
-            if has(i) { " (replaces it)" } else { "" }
-        ));
-    }
-    text(
-        &p,
-        pos2(right - 82.0, head_y),
-        Align2::RIGHT_CENTER,
-        "Save to",
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
-    let hint = match (has(0), has(1), morph_on) {
-        (false, false, _) => "Save two sounds, then morph between them",
-        (true, false, _) | (false, true, _) => "Save the other snapshot to morph",
-        (true, true, false) => "Morph off: A and B recall at once",
-        (true, true, true) => "",
-    };
-    if !hint.is_empty() {
-        text(
-            &p,
-            pos2(r.left() + 110.0, head_y),
-            Align2::LEFT_CENTER,
-            hint,
-            size::CAPTION,
-            color::TEXT_FAINT,
-        );
-    }
-
-    // Controls row.
-    let row = Rect::from_min_size(
-        pos2(r.left() + space::L, r.bottom() - space::M - 28.0),
-        vec2(r.width() - 2.0 * space::L, 28.0),
-    );
-    let mut x = row.left();
-    let mut next = |w: f32| {
-        let c = Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
-        x += w + space::S;
-        c
-    };
-    controls::toggle(ui, params, ParamId::MorphOn, next(78.0), "Morph", accent);
-    let br = next(34.0);
-    let lit = morph_on && morph <= 0.0;
-    if button(ui, br, "go-a", "A", lit, has(0), accent).clicked()
-        && let Some(c) = ctl
-    {
-        c.request_snapshot(0);
-    }
-    let fr = next(196.0);
-    controls::fader(ui, params, st, ParamId::Morph, fr, accent, "A ↔ B");
-    let br = next(34.0);
-    let lit = morph_on && morph >= 100.0;
-    if button(ui, br, "go-b", "B", lit, has(1), accent).clicked()
-        && let Some(c) = ctl
-    {
-        c.request_snapshot(1);
-    }
-    x += space::S;
-    let tr = Rect::from_min_size(pos2(x, row.top()), vec2(128.0, row.height()));
-    controls::fader(ui, params, st, ParamId::MorphTime, tr, accent, "Time");
-    let kr = Rect::from_min_max(pos2(tr.right() + space::S, row.top()), row.right_bottom());
-    let keys = SnapshotKeys::from_index(params.get_plain(ParamId::SnapshotKeys));
-    let name = if keys == SnapshotKeys::Off {
-        "Keys off".to_owned()
-    } else {
-        format!("Keys {}", keys.name())
-    };
-    if controls::stepper(ui, params, ParamId::SnapshotKeys, kr, &name, accent) {
-        st.keys_menu = !st.keys_menu;
-    }
-    st.keys_rect = kr;
-}
-
-/// The MIDI output: on/off, channel, what it plays.
-pub(crate) fn midi_out_panel(
-    ui: &egui::Ui,
-    params: &dyn ParamAccess,
-    st: &mut UiState,
-    view: &crate::View,
-    r: Rect,
-    accent: Color32,
-) {
-    let p = ui.painter().clone();
-    panel(&p, r);
-    let head_y = r.top() + 20.0;
-    let t = text(
-        &p,
-        pos2(r.left() + space::L, head_y),
-        Align2::LEFT_CENTER,
-        "MIDI Out",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    let on = params.get_plain(ParamId::MidiOut) >= 0.5;
-    let notes = view.midi_out_notes;
-    if on && notes != 0 {
-        let low = notes.trailing_zeros();
-        #[allow(clippy::cast_possible_truncation)]
-        let mut s = crate::note_name(low as u8);
-        if notes.count_ones() > 1 {
-            s = format!("{s} (+{})", notes.count_ones() - 1);
-        }
-        value(
-            &p,
-            pos2(t.right() + space::M, head_y),
-            Align2::LEFT_CENTER,
-            &s,
-            size::VALUE,
-            accent,
-        );
-    }
-    let tr = Rect::from_min_size(
-        pos2(r.right() - space::L - 56.0, head_y - 11.0),
-        vec2(56.0, 22.0),
-    );
-    controls::toggle(ui, params, ParamId::MidiOut, tr, "On", accent);
-
-    let row_y = r.bottom() - space::M - 28.0;
-    let cr = Rect::from_min_size(pos2(r.left() + space::L, row_y), vec2(84.0, 28.0));
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let ch = (params.get_plain(ParamId::MidiOutChannel).max(0.0) as usize).min(15);
-    if controls::stepper(
-        ui,
-        params,
-        ParamId::MidiOutChannel,
-        cr,
-        CHANNELS[ch],
-        accent,
-    ) {
-        st.channel_menu = !st.channel_menu;
-    }
-    let sr = Rect::from_min_max(
-        pos2(cr.right() + space::S, row_y),
-        pos2(r.right() - space::L, row_y + 28.0),
-    );
-    let src = OutSource::from_index(params.get_plain(ParamId::MidiOutSource));
-    if controls::stepper(ui, params, ParamId::MidiOutSource, sr, src.name(), accent) {
-        st.source_menu = !st.source_menu;
-    }
-    st.channel_rect = cr;
-    st.source_rect = sr;
 }
 
 /// Pop-up lists of the perform row, over everything else.

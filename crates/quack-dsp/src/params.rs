@@ -304,9 +304,21 @@ pub enum ParamId {
     WhisperTone,
     KeyDetect,
     LinkChannel,
+    SoloVoice,
+    SoloCreative,
+    SoloHarmony,
+    SoloVocoder,
 }
 
-pub const PARAM_COUNT: usize = 200;
+pub const PARAM_COUNT: usize = 204;
+
+/// Solo switches of the layers: voice, creative, harmony, vocoder.
+pub const SOLO_PARAMS: [ParamId; 4] = [
+    ParamId::SoloVoice,
+    ParamId::SoloCreative,
+    ParamId::SoloHarmony,
+    ParamId::SoloVocoder,
+];
 
 /// Stereo place of each harmony interval voice.
 pub const HARMONY_PAN_PARAMS: [ParamId; 4] = [
@@ -2420,6 +2432,34 @@ static SPECS: [ParamSpec; PARAM_COUNT] = [
             default: 0,
         },
     },
+    ParamSpec {
+        key: "solo_voice",
+        host_id: 1500,
+        name: "Solo Voice",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "solo_creative",
+        host_id: 1501,
+        name: "Solo Creative",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "solo_harmony",
+        host_id: 1502,
+        name: "Solo Harmony",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
+    ParamSpec {
+        key: "solo_vocoder",
+        host_id: 1503,
+        name: "Solo Vocoder",
+        unit: "",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 impl ParamId {
@@ -2624,6 +2664,10 @@ impl ParamId {
         Self::WhisperTone,
         Self::KeyDetect,
         Self::LinkChannel,
+        Self::SoloVoice,
+        Self::SoloCreative,
+        Self::SoloHarmony,
+        Self::SoloVocoder,
     ];
 
     #[must_use]

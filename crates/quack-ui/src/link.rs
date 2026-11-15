@@ -6,7 +6,7 @@ use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 
 use crate::brand;
 use crate::controls::KNOB_TRAVEL;
-use crate::paint::{knob, knob_value, panel, rounded, spaced, text, text_fit, well};
+use crate::paint::{fill, knob, knob_value, panel, section, spaced, text, text_fit, well};
 use crate::theme::{color, radius, size, space};
 
 /// The window, in points.
@@ -42,15 +42,8 @@ fn link_choice(
     r: Rect,
     accent: Color32,
 ) {
-    text(
-        p,
-        pos2(r.left(), r.top() - 15.0),
-        Align2::LEFT_CENTER,
-        "Link",
-        size::LABEL,
-        color::TEXT_DIM,
-    );
-    rounded(p, r, radius::CONTROL, color::WELL, color::BORDER);
+    section(p, pos2(r.left(), r.top() - 14.0), "Link", color::TEXT_FAINT);
+    fill(p, r, radius::CONTROL, color::CONTROL);
     let cur = access.link().min(quack_link_names().len() - 1);
     let w = r.width() / 2.0;
     for (i, name) in quack_link_names().iter().enumerate() {
@@ -61,21 +54,14 @@ fn link_choice(
             access.set_link(i);
         }
         if i == cur {
-            rounded(
+            fill(
                 p,
                 c.shrink(2.0),
                 radius::CONTROL - 1,
                 accent.gamma_multiply(0.22),
-                accent.gamma_multiply(0.8),
             );
         } else if resp.hovered() {
-            rounded(
-                p,
-                c.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            fill(p, c.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -221,13 +207,11 @@ pub fn draw(ui: &mut egui::Ui, access: &dyn LinkAccess, view: &LinkView, st: &mu
     let text_right = centre.x - knob_d * 0.5 - space::L;
 
     // Role, on the left.
-    text(
+    section(
         &p,
-        pos2(left, body.top() + space::L + 7.0),
-        Align2::LEFT_CENTER,
-        "Send this track as",
-        size::LABEL,
-        color::TEXT_DIM,
+        pos2(left, body.top() + space::L + 8.0),
+        "Send as",
+        color::TEXT_FAINT,
     );
     // The link channel takes the end of the row.
     let ab_w = 64.0;
@@ -242,7 +226,7 @@ pub fn draw(ui: &mut egui::Ui, access: &dyn LinkAccess, view: &LinkView, st: &mu
         Rect::from_min_size(pos2(seg.right() + space::S, seg.top()), vec2(ab_w, 32.0)),
         accent,
     );
-    rounded(&p, seg, radius::CONTROL, color::WELL, color::BORDER);
+    fill(&p, seg, radius::CONTROL, color::CONTROL);
     let labels = ["Mix", "Carrier"];
     let w = seg.width() / 2.0;
     for (i, label) in labels.iter().enumerate() {
@@ -257,21 +241,14 @@ pub fn draw(ui: &mut egui::Ui, access: &dyn LinkAccess, view: &LinkView, st: &mu
         }
         let a = accent_of(i);
         if i == role {
-            rounded(
+            fill(
                 &p,
                 r.shrink(2.0),
                 radius::CONTROL - 1,
                 a.gamma_multiply(0.22),
-                a.gamma_multiply(0.8),
             );
         } else if resp.hovered() {
-            rounded(
-                &p,
-                r.shrink(2.0),
-                radius::CONTROL - 1,
-                color::RAISED,
-                color::RAISED,
-            );
+            fill(&p, r.shrink(2.0), radius::CONTROL - 1, color::HOVER);
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -422,7 +399,7 @@ pub fn draw(ui: &mut egui::Ui, access: &dyn LinkAccess, view: &LinkView, st: &mu
         LinkState::Unavailable => (color::METER_OVER, "The system refused the link"),
         LinkState::Off => (color::TEXT_FAINT, "Bypassed: nothing is sent"),
     };
-    p.circle_filled(pos2(inner.left() + 4.0, foot_y), 4.0, dot);
+    crate::paint::led(&p, pos2(inner.left() + 5.0, foot_y), awake, dot);
     let mark_h = 12.0;
     let mark_w = brand::Brand::DuckDsp.width_for(mark_h);
     text_fit(
