@@ -1174,17 +1174,20 @@ fn harmony_panel(
             "",
         );
         if i == quack_dsp::harmony::INTERVAL_VOICES - 1 {
-            // Beside the last voice's boxes, never over them.
+            // Beside the last voice's boxes, never over them: one
+            // name per row.
             let x = fr.right() + space::M;
-            paint::text_fit(
-                p,
-                pos2(x, pr.center().y),
-                Align2::LEFT_CENTER,
-                "← Level and pan",
-                size::CAPTION - 1.0,
-                color::TEXT_FAINT,
-                r.right() - space::L - x,
-            );
+            for (row, name) in [(fr, "← Level"), (pr, "← Pan")] {
+                paint::text_fit(
+                    p,
+                    pos2(x, row.center().y),
+                    Align2::LEFT_CENTER,
+                    name,
+                    size::CAPTION - 1.0,
+                    color::TEXT_FAINT,
+                    r.right() - space::L - x,
+                );
+            }
         }
     }
     let pct = |v: f64| format!("{v:.0}");
@@ -1697,16 +1700,24 @@ impl FxTab {
         }
     }
 
+    /// The effect's amount (or send) per layer, where it has one.
+    const fn layer_amounts(self) -> Option<[ParamId; 4]> {
+        match self {
+            Self::Drive => Some(quack_dsp::params::DRIVE_AMOUNT_PARAMS),
+            Self::Chorus => Some(quack_dsp::params::CHORUS_AMOUNT_PARAMS),
+            Self::Delay => Some(quack_dsp::params::DELAY_SEND_PARAMS),
+            Self::Reverb => Some(quack_dsp::params::REVERB_SEND_PARAMS),
+            _ => None,
+        }
+    }
+
     /// What the effect does, under the tabs.
     const fn caption(self) -> &'static str {
         match self {
             Self::Tone => "Input EQ, before every layer",
             Self::Input => "Gate, de-esser and compressor on the input",
-            Self::Drive => "Each layer's amount is in the mixer below",
-            Self::Chorus => "Each layer's amount is in the mixer below",
+            Self::Drive | Self::Chorus | Self::Delay | Self::Reverb => "",
             Self::Eq => "EQ and exciter on the transformed sound, after the layers",
-            Self::Delay => "Each layer's send is in the mixer below",
-            Self::Reverb => "Each layer's send is in the mixer below",
             Self::Output => "De-esser, compressor and limiter on the whole sound",
         }
     }
@@ -1904,14 +1915,37 @@ fn fx_panel(
         vec2(r.width() - 2.0 * space::L, 28.0),
     );
     fx_tabs(ui, params, st, tabs_r, accent);
-    text(
-        p,
-        pos2(r.left() + space::L, tabs_r.bottom() + 16.0),
-        Align2::LEFT_CENTER,
-        tab.caption(),
-        size::CAPTION,
-        color::TEXT_FAINT,
-    );
+    if let Some(ids) = tab.layer_amounts() {
+        // How much of this effect each layer gets, right here.
+        let names = ["Voice", "Creative", "Harmony", "Vocoder"];
+        let colours = [color::TUNE, color::CREATIVE, color::SYNTH, color::VOCODER];
+        let w = (tabs_r.width() - 3.0 * space::S) / 4.0;
+        for (i, id) in ids.into_iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let fr = Rect::from_min_size(
+                pos2(
+                    tabs_r.left() + (w + space::S) * i as f32,
+                    tabs_r.bottom() + 6.0,
+                ),
+                vec2(w, 22.0),
+            );
+            let c = if tab_on {
+                colours[i]
+            } else {
+                colours[i].gamma_multiply(0.35)
+            };
+            controls::fader(ui, params, st, id, fr, c, names[i]);
+        }
+    } else {
+        text(
+            p,
+            pos2(r.left() + space::L, tabs_r.bottom() + 16.0),
+            Align2::LEFT_CENTER,
+            tab.caption(),
+            size::CAPTION,
+            color::TEXT_FAINT,
+        );
+    }
 
     let off = |v: f64| {
         if v < 0.5 {
