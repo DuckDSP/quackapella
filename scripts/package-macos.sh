@@ -55,11 +55,38 @@ export TRUCE_NOTARY_PROFILE="$profile"
 
 cargo truce "${args[@]}"
 
+# cargo truce puts one welcome.html (English, the fallback) at the root
+# of the installer resources. Add <lang>.lproj copies so Installer shows
+# the page in the system language: en.lproj and fr.lproj for now. Only
+# on an unsigned .pkg: flattening again would drop a signature.
+localize() {
+    local pkg="$1"
+    if pkgutil --check-signature "$pkg" >/dev/null 2>&1; then
+        echo "signed .pkg: welcome page left in English only"
+        return
+    fi
+    local tmp
+    tmp="$(mktemp -d)"
+    pkgutil --expand "$pkg" "$tmp/x"
+    mkdir -p "$tmp/x/Resources/en.lproj"
+    cp packaging/macos/welcome.html "$tmp/x/Resources/en.lproj/welcome.html"
+    local lproj
+    for lproj in packaging/macos/*.lproj; do
+        mkdir -p "$tmp/x/Resources/$(basename "$lproj")"
+        cp "$lproj"/welcome.html "$tmp/x/Resources/$(basename "$lproj")/"
+    done
+    rm "$pkg"
+    pkgutil --flatten "$tmp/x" "$pkg"
+    rm -rf "$tmp"
+    echo "welcome page localized: en $(cd packaging/macos && echo *.lproj)"
+}
+
 mkdir -p dist
 for src in target/dist/quackapella-suite-*.pkg; do
     [[ -e "$src" ]] || continue
     pkg="dist/$(basename "$src" | sed 's/^quackapella-suite-/Quackapella-/')"
     cp "$src" "$pkg"
+    localize "$pkg"
     echo "== $pkg"
     pkgutil --check-signature "$pkg" || true
     if [[ $notarize -eq 1 ]]; then
